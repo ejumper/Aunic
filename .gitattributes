@@ -1,0 +1,2 @@
+src/aunic/config.py filter=local-config
+notes-and-plans/tools/search-tool/search-tool.md filter=local-config

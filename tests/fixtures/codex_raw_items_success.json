@@ -1,0 +1,23 @@
+[
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "Return a greeting."
+      }
+    ]
+  },
+  {
+    "type": "message",
+    "role": "assistant",
+    "content": [
+      {
+        "type": "output_text",
+        "text": "{\"text\":\"Hello!\",\"tool_calls\":[]}"
+      }
+    ],
+    "phase": "final_answer"
+  }
+]

@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.aunic/
+.claude/
+notes-and-plans/ztesting/
+notes-and-plans/zfuture-features/scratchpad.md

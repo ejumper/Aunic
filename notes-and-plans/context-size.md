@@ -1,0 +1,1 @@
+Currently, context size will be managed manually. If the context window is exceeded on run, or during a run, the user should be notified via error in the `indicator-area`
