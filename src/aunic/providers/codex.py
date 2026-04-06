@@ -30,6 +30,7 @@ from aunic.providers.sdk_tools import (
     deserialize_tool_execution_result,
     provider_rows_from_tool_execution,
 )
+from aunic.transcript.compaction import prepare_transcript_for_model
 from aunic.transcript.flattening import flatten_tool_result_for_provider
 from aunic.transcript.translation import compose_final_user_message, group_assistant_rows
 
@@ -271,7 +272,9 @@ async def _create_thread_for_request(
 ) -> tuple[str, bool]:
     transcript_messages = request.transcript_messages or []
     if transcript_messages:
-        history = build_codex_history_items(transcript_messages)
+        history = build_codex_history_items(
+            prepare_transcript_for_model(transcript_messages)
+        )
         response = await session.resume_thread_with_history(
             history=history,
             model=model,

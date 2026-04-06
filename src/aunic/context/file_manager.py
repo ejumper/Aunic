@@ -9,7 +9,7 @@ from typing import Any, Callable
 from watchfiles import awatch
 
 from aunic.config import ContextSettings, SETTINGS
-from aunic.context.types import FileChange, FileSnapshot
+from aunic.context.types import FileChange, FileMetadata, FileSnapshot
 from aunic.errors import FileReadError, OptimisticWriteError
 
 
@@ -46,6 +46,22 @@ class FileManager:
             raw_text=raw_text,
             revision_id=revision_id,
             content_hash=content_hash,
+            mtime_ns=stat.st_mtime_ns,
+            size_bytes=stat.st_size,
+        )
+
+    async def read_metadata(self, path: Path | str) -> FileMetadata:
+        normalized = _normalize_path(path)
+        try:
+            stat = await asyncio.to_thread(normalized.stat)
+        except FileNotFoundError as exc:
+            raise FileReadError(f"File does not exist: {normalized}") from exc
+        except OSError as exc:
+            raise FileReadError(f"Could not stat file: {normalized}") from exc
+
+        return FileMetadata(
+            path=normalized,
+            revision_id=f"meta:{stat.st_mtime_ns}:{stat.st_size}",
             mtime_ns=stat.st_mtime_ns,
             size_bytes=stat.st_size,
         )

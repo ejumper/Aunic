@@ -4,8 +4,9 @@ import json
 from typing import TYPE_CHECKING, Callable
 
 from prompt_toolkit.application.current import get_app
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.formatted_text import StyleAndTextTuples
-from prompt_toolkit.layout.containers import Window
+from prompt_toolkit.layout.containers import Window, ScrollOffsets
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
@@ -32,18 +33,27 @@ class TranscriptView:
     ) -> None:
         self._controller = controller
         self._width = width or (lambda: 100)
+        self._scroll_pos = 0
+        self._row_start_lines: dict[int, int] = {}
         self._control = _ScrollableFormattedTextControl(
-            text=self._render, focusable=True, show_cursor=False, scroll_callback=self._on_scroll,
+            text=self._render,
+            focusable=True,
+            show_cursor=False,
+            scroll_callback=self._on_scroll,
+            get_cursor_position=lambda: Point(0, self._scroll_pos),
         )
         self.window = Window(
             self._control,
             height=Dimension(preferred=15, max=40, min=3),
             dont_extend_height=True,
+            wrap_lines=False,
             right_margins=[ScrollbarMargin(display_arrows=False)],
+            scroll_offsets=ScrollOffsets(top=0, bottom=0),
+            get_vertical_scroll=lambda w: self._scroll_pos,
         )
         self._selected_row_number: int | None = None
+        self._scroll_to_selection = False
         self._row_cache: dict[int, tuple[str, StyleAndTextTuples]] = {}
-        self._line_ranges: dict[int, tuple[int, int]] = {}
         self._last_line_count = 1
 
     def preferred_height(self) -> int:
@@ -102,7 +112,7 @@ class TranscriptView:
         index = row_numbers.index(self._selected_row_number) if self._selected_row_number in row_numbers else 0
         index = max(0, min(len(row_numbers) - 1, index + delta))
         self._selected_row_number = row_numbers[index]
-        self._ensure_selected_visible()
+        self._scroll_to_selection = True
         try:
             get_app().invalidate()
         except Exception:
@@ -124,7 +134,10 @@ class TranscriptView:
 
     def _render(self) -> StyleAndTextTuples:
         rows = self._controller.visible_transcript_rows()
+        prev_selection = self._selected_row_number
         self.ensure_selection()
+        if self._selected_row_number != prev_selection:
+            self._scroll_to_selection = True
         tool_call_index = self._controller.tool_call_index()
         context = TranscriptRenderContext(
             width=max(20, self._width() - 2),
@@ -144,8 +157,11 @@ class TranscriptView:
         )
 
         fragments = render_filter_toolbar(self._controller.transcript_view_state, context)
-        self._line_ranges = {}
+        scroll_to = self._scroll_to_selection
+        self._scroll_to_selection = False
+
         line_count = 1
+        row_start_lines: dict[int, int] = {}
         active_cache_keys: set[int] = set()
 
         for row in rows:
@@ -160,9 +176,8 @@ class TranscriptView:
             else:
                 row_fragments = cached[1]
             active_cache_keys.add(row.row_number)
-            start_line = line_count
+            row_start_lines[row.row_number] = line_count
             line_count += _line_count(row_fragments)
-            self._line_ranges[row.row_number] = (start_line, line_count)
             fragments.extend(row_fragments)
 
         self._row_cache = {
@@ -173,8 +188,16 @@ class TranscriptView:
         if not rows:
             fragments.append(("class:transcript.tool.content", "(no transcript rows to display)\n"))
             line_count += 1
+
+        self._row_start_lines = row_start_lines
         self._last_line_count = line_count
-        self._ensure_selected_visible()
+
+        if scroll_to and self._selected_row_number in row_start_lines:
+            self._scroll_pos = row_start_lines[self._selected_row_number]
+
+        max_scroll = max(0, line_count - 3)
+        self._scroll_pos = max(0, min(self._scroll_pos, max_scroll))
+
         return fragments
 
     def _cache_key_for_row(
@@ -214,29 +237,13 @@ class TranscriptView:
 
     def _on_scroll(self, direction: int) -> None:
         scroll_lines = 3
-        new_scroll = max(0, self.window.vertical_scroll + direction * scroll_lines)
+        new_scroll = self._scroll_pos + direction * scroll_lines
         max_scroll = max(0, self._last_line_count - 3)
-        self.window.vertical_scroll = min(new_scroll, max_scroll)
+        self._scroll_pos = max(0, min(new_scroll, max_scroll))
         try:
             get_app().invalidate()
         except Exception:
             pass
-
-    def _ensure_selected_visible(self) -> None:
-        if self._selected_row_number is None:
-            return
-        line_range = self._line_ranges.get(self._selected_row_number)
-        if line_range is None:
-            return
-        start_line, end_line = line_range
-        render_info = self.window.render_info
-        visible_height = render_info.window_height if render_info is not None else 10
-        scroll_top = self.window.vertical_scroll
-        scroll_bottom = scroll_top + max(1, visible_height - 1)
-        if start_line < scroll_top:
-            self.window.vertical_scroll = max(0, start_line - 1)
-        elif end_line > scroll_bottom:
-            self.window.vertical_scroll = max(0, end_line - visible_height)
 
 
 class _ScrollableFormattedTextControl(FormattedTextControl):

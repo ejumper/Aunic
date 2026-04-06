@@ -186,6 +186,76 @@ async def test_tool_loop_redirects_plain_text_output_into_note_tool_call(
 
 
 @pytest.mark.asyncio
+async def test_tool_loop_keeps_assistant_reasoning_patch_in_memory_only_between_turns(
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("# Note\n\nOriginal note.\n", encoding="utf-8")
+    context_result = await _build_context(note, "Find the official Python homepage and write it down.")
+    provider = _SequenceProvider(
+        [
+            ProviderResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        name="web_search",
+                        arguments={"queries": ["python homepage"]},
+                        id="call_1",
+                    )
+                ],
+                assistant_message_patch={
+                    "reasoning": "Search first, then update the note.",
+                    "reasoning_details": [
+                        {
+                            "type": "reasoning.text",
+                            "text": "Search first, then update the note.",
+                        }
+                    ],
+                },
+            ),
+            ProviderResponse(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        name="note_edit",
+                        arguments={
+                            "old_string": "Original note.\n",
+                            "new_string": "Python's official homepage is https://www.python.org/.\n",
+                        },
+                        id="call_2",
+                    )
+                ],
+            ),
+        ]
+    )
+
+    with pytest.raises(AssertionError, match="more turns than expected"):
+        await ToolLoop(search_service=_FakeSearchService()).run(
+            LoopRunRequest(
+                provider=provider,
+                prompt_run=context_result.prompt_runs[0],
+                context_result=context_result,
+                active_file=note,
+                persist_message_rows=False,
+            )
+        )
+
+    assert provider.requests[1].assistant_message_patches == [
+        {
+            "reasoning": "Search first, then update the note.",
+            "reasoning_details": [
+                {
+                    "type": "reasoning.text",
+                    "text": "Search first, then update the note.",
+                }
+            ],
+        }
+    ]
+    rows = parse_transcript_rows(note.read_text(encoding="utf-8"))
+    assert all("reasoning" not in str(row.content) for row in rows)
+
+
+@pytest.mark.asyncio
 async def test_tool_loop_persists_web_search_rows_but_not_note_mode_messages_when_message_rows_disabled(
     tmp_path: Path,
 ) -> None:

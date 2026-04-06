@@ -26,6 +26,7 @@ class ModelOption:
     label: str
     provider_name: str
     model: str
+    profile_id: str | None = None
 
 
 @dataclass
@@ -58,6 +59,8 @@ class TuiState:
     ignored_external_revision: str | None = None
     permission_prompt: PermissionPromptState | None = None
     transcript_open: bool = True
+    active_file_missing_on_disk: bool = False
+    create_parents_on_first_save: bool = False
 
     @property
     def included_files(self) -> tuple[Path, ...]:

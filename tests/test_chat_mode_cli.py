@@ -59,7 +59,7 @@ def test_chat_run_cli_outputs_structured_payload(
             )
 
     monkeypatch.setattr(cli, "ChatModeRunner", FakeRunner)
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: object())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: object())
 
     exit_code = cli.main(
         [
@@ -105,7 +105,7 @@ def test_chat_run_cli_formats_multiline_prompt_through_real_runner(
 
             return ProviderResponse(text="Hello!")
 
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: FakeProvider())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: FakeProvider())
 
     exit_code = cli.main(
         [
@@ -140,7 +140,7 @@ def test_chat_run_cli_returns_error_payload_for_chat_mode_validation_failure(
             raise ChatModeError("bad request")
 
     monkeypatch.setattr(cli, "ChatModeRunner", FakeRunner)
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: object())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: object())
 
     exit_code = cli.main(
         [

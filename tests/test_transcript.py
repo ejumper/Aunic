@@ -11,6 +11,14 @@ from aunic.transcript.parser import (
     parse_transcript_rows,
     split_note_and_transcript,
 )
+from aunic.transcript.compaction import (
+    MODEL_COMPACTION_ERROR_PLACEHOLDER,
+    MODEL_COMPACTION_KEEP_RECENT,
+    MODEL_COMPACTION_RESULT_PLACEHOLDER,
+    compact_transcript_for_model,
+    filter_incomplete_tool_pairs_for_model,
+    prepare_transcript_for_model,
+)
 from aunic.transcript.translation import (
     group_assistant_rows,
     translate_for_anthropic,
@@ -202,6 +210,145 @@ def test_translate_transcript_dispatches_by_provider() -> None:
     assert translate_transcript(rows, "openai_compatible", "note", "prompt")[-1]["role"] == "user"
     with pytest.raises(ValueError):
         translate_transcript(rows, "unknown", "note", "prompt")  # type: ignore[arg-type]
+
+
+def test_compact_transcript_for_model_only_compacts_older_matching_tool_results() -> None:
+    rows = [
+        TranscriptRow(1, "user", "message", content="hello"),
+        TranscriptRow(2, "assistant", "tool_call", "web_search", "call_1", {"queries": ["q1"]}),
+        TranscriptRow(3, "tool", "tool_result", "web_search", "call_1", [{"title": "r1"}]),
+        TranscriptRow(4, "assistant", "tool_call", "web_search", "call_2", {"queries": ["q2"]}),
+        TranscriptRow(5, "tool", "tool_result", "web_search", "call_2", [{"title": "r2"}]),
+        TranscriptRow(6, "assistant", "tool_call", "web_search", "call_3", {"queries": ["q3"]}),
+        TranscriptRow(7, "tool", "tool_result", "web_search", "call_3", [{"title": "r3"}]),
+        TranscriptRow(8, "assistant", "tool_call", "web_search", "call_4", {"queries": ["q4"]}),
+        TranscriptRow(9, "tool", "tool_result", "web_search", "call_4", [{"title": "r4"}]),
+        TranscriptRow(10, "assistant", "tool_call", "web_search", "call_5", {"queries": ["q5"]}),
+        TranscriptRow(11, "tool", "tool_result", "web_search", "call_5", [{"title": "r5"}]),
+        TranscriptRow(12, "assistant", "tool_call", "web_search", "call_6", {"queries": ["q6"]}),
+        TranscriptRow(13, "tool", "tool_result", "web_search", "call_6", [{"title": "r6"}]),
+        TranscriptRow(14, "assistant", "tool_call", "non_compactable", "call_7", {"queries": ["q7"]}),
+        TranscriptRow(15, "tool", "tool_result", "non_compactable", "call_7", [{"title": "r7"}]),
+    ]
+
+    compacted = compact_transcript_for_model(rows)
+
+    assert compacted is not rows
+    assert rows[2].content == [{"title": "r1"}]
+    assert compacted[2].content == MODEL_COMPACTION_RESULT_PLACEHOLDER
+    assert compacted[4].content == [{"title": "r2"}]
+    assert compacted[12].content == [{"title": "r6"}]
+    assert compacted[13].content == {"queries": ["q7"]}
+    assert compacted[14].content == [{"title": "r7"}]
+
+
+def test_compact_transcript_for_model_compacts_tool_errors_and_keeps_recent_per_tool() -> None:
+    rows = [
+        TranscriptRow(1, "tool", "tool_error", "bash", "b1", {"message": "boom-1"}),
+        TranscriptRow(2, "tool", "tool_error", "bash", "b2", {"message": "boom-2"}),
+        TranscriptRow(3, "tool", "tool_error", "bash", "b3", {"message": "boom-3"}),
+        TranscriptRow(4, "tool", "tool_error", "bash", "b4", {"message": "boom-4"}),
+        TranscriptRow(5, "tool", "tool_error", "bash", "b5", {"message": "boom-5"}),
+        TranscriptRow(6, "tool", "tool_error", "bash", "b6", {"message": "boom-6"}),
+    ]
+
+    compacted = compact_transcript_for_model(rows)
+
+    assert compacted[0].content == MODEL_COMPACTION_ERROR_PLACEHOLDER
+    assert [row.content for row in compacted[1:]] == [
+        {"message": "boom-2"},
+        {"message": "boom-3"},
+        {"message": "boom-4"},
+        {"message": "boom-5"},
+        {"message": "boom-6"},
+    ]
+
+
+def test_compact_transcript_for_model_respects_keep_recent_override() -> None:
+    rows = [
+        TranscriptRow(1, "tool", "tool_result", "read", "r1", {"content": "old"}),
+        TranscriptRow(2, "tool", "tool_result", "read", "r2", {"content": "new"}),
+    ]
+
+    compacted = compact_transcript_for_model(rows, keep_recent=1)
+
+    assert compacted[0].content == MODEL_COMPACTION_RESULT_PLACEHOLDER
+    assert compacted[1].content == {"content": "new"}
+
+
+def test_compact_transcript_for_model_reduces_translated_prompt_size_for_old_search_rows() -> None:
+    rows = []
+    for index in range(1, MODEL_COMPACTION_KEEP_RECENT + 3):
+        tool_id = f"call_{index}"
+        rows.append(
+            TranscriptRow(index * 2 - 1, "assistant", "tool_call", "web_search", tool_id, {"queries": [f"q{index}"]})
+        )
+        rows.append(
+            TranscriptRow(
+                index * 2,
+                "tool",
+                "tool_result",
+                "web_search",
+                tool_id,
+                [{"title": f"title-{index}", "url": f"https://example.com/{index}", "snippet": "x" * 400}],
+            )
+        )
+
+    original = translate_for_openai(group_assistant_rows(rows), "# Note", "Prompt")
+    compacted = translate_for_openai(
+        group_assistant_rows(compact_transcript_for_model(rows)),
+        "# Note",
+        "Prompt",
+    )
+
+    original_size = sum(len(str(message)) for message in original)
+    compacted_size = sum(len(str(message)) for message in compacted)
+
+    assert compacted_size < original_size
+
+
+def test_filter_incomplete_tool_pairs_for_model_drops_orphaned_calls_and_results() -> None:
+    rows = [
+        TranscriptRow(1, "assistant", "tool_call", "read", "orphan_call", {"file_path": "/tmp/a.txt"}),
+        TranscriptRow(2, "assistant", "tool_call", "web_search", "call_1", {"queries": ["weather"]}),
+        TranscriptRow(3, "tool", "tool_result", "web_search", "call_1", [{"url": "https://example.com"}]),
+        TranscriptRow(4, "tool", "tool_result", "read", "orphan_result", {"content": "orphan"}),
+        TranscriptRow(5, "user", "message", content="Continue"),
+    ]
+
+    filtered = filter_incomplete_tool_pairs_for_model(rows)
+
+    assert [(row.role, row.type, row.tool_id) for row in filtered] == [
+        ("assistant", "tool_call", "call_1"),
+        ("tool", "tool_result", "call_1"),
+        ("user", "message", None),
+    ]
+    assert rows[0].tool_id == "orphan_call"
+    assert rows[3].tool_id == "orphan_result"
+
+
+def test_prepare_transcript_for_model_filters_before_compacting() -> None:
+    rows = [
+        TranscriptRow(1, "assistant", "tool_call", "web_search", "orphan_call", {"queries": ["q0"]}),
+        TranscriptRow(2, "assistant", "tool_call", "web_search", "call_1", {"queries": ["q1"]}),
+        TranscriptRow(3, "tool", "tool_result", "web_search", "call_1", [{"title": "r1"}]),
+        TranscriptRow(4, "assistant", "tool_call", "web_search", "call_2", {"queries": ["q2"]}),
+        TranscriptRow(5, "tool", "tool_result", "web_search", "call_2", [{"title": "r2"}]),
+        TranscriptRow(6, "assistant", "tool_call", "web_search", "call_3", {"queries": ["q3"]}),
+        TranscriptRow(7, "tool", "tool_result", "web_search", "call_3", [{"title": "r3"}]),
+        TranscriptRow(8, "assistant", "tool_call", "web_search", "call_4", {"queries": ["q4"]}),
+        TranscriptRow(9, "tool", "tool_result", "web_search", "call_4", [{"title": "r4"}]),
+        TranscriptRow(10, "assistant", "tool_call", "web_search", "call_5", {"queries": ["q5"]}),
+        TranscriptRow(11, "tool", "tool_result", "web_search", "call_5", [{"title": "r5"}]),
+        TranscriptRow(12, "assistant", "tool_call", "web_search", "call_6", {"queries": ["q6"]}),
+        TranscriptRow(13, "tool", "tool_result", "web_search", "call_6", [{"title": "r6"}]),
+    ]
+
+    prepared = prepare_transcript_for_model(rows)
+
+    assert all(row.tool_id != "orphan_call" for row in prepared)
+    assert prepared[1].content == MODEL_COMPACTION_RESULT_PLACEHOLDER
+    assert prepared[-1].content == [{"title": "r6"}]
 
 
 def test_provider_request_accepts_transcript_fields() -> None:

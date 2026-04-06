@@ -276,3 +276,160 @@ async def test_codex_provider_seeds_history_once_and_returns_generated_rows(
     assert len(response.generated_rows) == 2
     assert response.provider_metadata["transport"] == "codex_sdk"
     assert response.provider_metadata["history_seeded"] is True
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_compacts_old_tool_results_before_history_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, settings, cwd, *, config_overrides=()):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def start_thread(self, **kwargs):
+            raise AssertionError("history path should use resume_thread_with_history")
+
+        async def resume_thread_with_history(self, **kwargs):
+            captured["history"] = kwargs["history"]
+            return {"thread": {"id": "thread-1"}}
+
+        async def run_turn(self, **kwargs):
+            return CodexTurnResult(
+                thread_id="thread-1",
+                turn_id="turn-1",
+                status="completed",
+                raw_items=[
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "done"}],
+                    }
+                ],
+                thread_items=[],
+                token_usage=None,
+                error_message=None,
+                stderr_lines=[],
+            )
+
+    monkeypatch.setattr("aunic.providers.codex.CodexAppServerSession", FakeSession)
+
+    provider = CodexProvider(CodexSettings())
+    rows: list[TranscriptRow] = []
+    for index in range(1, 8):
+        tool_id = f"call_{index}"
+        rows.append(
+            TranscriptRow(index * 2 - 1, "assistant", "tool_call", "web_search", tool_id, {"queries": [f"q{index}"]})
+        )
+        rows.append(
+            TranscriptRow(
+                index * 2,
+                "tool",
+                "tool_result",
+                "web_search",
+                tool_id,
+                [{"title": f"title-{index}", "url": f"https://example.com/{index}"}],
+            )
+        )
+
+    await provider.generate(
+        ProviderRequest(
+            messages=[],
+            transcript_messages=rows,
+            note_snapshot="# Note",
+            user_prompt="Current prompt",
+            tools=[],
+            metadata={
+                "cwd": str(Path.cwd()),
+                "active_file": str(Path.cwd() / "note.md"),
+                "mode": "note",
+                "work_mode": "off",
+            },
+        )
+    )
+
+    history = captured["history"]
+    assert isinstance(history, list)
+    outputs = [item["output"] for item in history if item.get("type") == "function_call_output"]
+    assert outputs[0] == "[Old tool result content cleared]"
+    assert "title-7" in outputs[-1]
+
+
+@pytest.mark.asyncio
+async def test_codex_provider_drops_incomplete_tool_pairs_before_history_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, settings, cwd, *, config_overrides=()):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def start_thread(self, **kwargs):
+            raise AssertionError("history path should use resume_thread_with_history")
+
+        async def resume_thread_with_history(self, **kwargs):
+            captured["history"] = kwargs["history"]
+            return {"thread": {"id": "thread-1"}}
+
+        async def run_turn(self, **kwargs):
+            return CodexTurnResult(
+                thread_id="thread-1",
+                turn_id="turn-1",
+                status="completed",
+                raw_items=[
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "done"}],
+                    }
+                ],
+                thread_items=[],
+                token_usage=None,
+                error_message=None,
+                stderr_lines=[],
+            )
+
+    monkeypatch.setattr("aunic.providers.codex.CodexAppServerSession", FakeSession)
+
+    provider = CodexProvider(CodexSettings())
+    rows = [
+        TranscriptRow(1, "assistant", "tool_call", "read", "orphan_call", {"file_path": "/tmp/a.txt"}),
+        TranscriptRow(2, "assistant", "tool_call", "web_search", "call_1", {"queries": ["weather"]}),
+        TranscriptRow(3, "tool", "tool_result", "web_search", "call_1", [{"url": "https://example.com"}]),
+    ]
+
+    await provider.generate(
+        ProviderRequest(
+            messages=[],
+            transcript_messages=rows,
+            note_snapshot="# Note",
+            user_prompt="Current prompt",
+            tools=[],
+            metadata={
+                "cwd": str(Path.cwd()),
+                "active_file": str(Path.cwd() / "note.md"),
+                "mode": "note",
+                "work_mode": "off",
+            },
+        )
+    )
+
+    history = captured["history"]
+    assert isinstance(history, list)
+    function_calls = [item for item in history if item.get("type") == "function_call"]
+    assert len(function_calls) == 1
+    assert function_calls[0]["call_id"] == "call_1"

@@ -7,6 +7,82 @@ from aunic import cli
 from aunic.context.types import FileChange, FileSnapshot
 
 
+def test_default_tui_argv_rewrite_only_applies_to_bare_paths() -> None:
+    assert cli._coerce_default_tui_argv(["note", "run", "file.md"]) == (
+        ["note", "run", "file.md"],
+        False,
+    )
+    assert cli._coerce_default_tui_argv(["file.md"]) == (["tui", "file.md"], True)
+    assert cli._coerce_default_tui_argv(["-p", "file.md"]) == (["tui", "-p", "file.md"], True)
+
+
+def test_bare_path_cli_launches_tui_with_parent_as_default_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    async def _fake_run_tui(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_tui", _fake_run_tui)
+
+    exit_code = cli.main([str(note)])
+
+    assert exit_code == 0
+    assert captured["active_file"] == note.resolve()
+    assert captured["display_root"] == note.resolve().parent
+    assert captured["cwd"] == note.resolve().parent
+    assert captured["allow_missing_active_file"] is False
+
+
+def test_bare_path_cli_with_parents_allows_missing_file(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "new" / "dir" / "note.md"
+    captured: dict[str, object] = {}
+
+    async def _fake_run_tui(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "run_tui", _fake_run_tui)
+
+    exit_code = cli.main(["-p", str(target)])
+
+    assert exit_code == 0
+    assert captured["active_file"] == target.resolve()
+    assert captured["allow_missing_active_file"] is True
+    assert captured["create_missing_parents_on_save"] is True
+    assert target.exists() is False
+
+
+def test_bare_path_cli_missing_parent_without_parents_fails(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    target = tmp_path / "missing" / "dir" / "note.md"
+    called = False
+
+    async def _fake_run_tui(**kwargs):
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr(cli, "run_tui", _fake_run_tui)
+
+    exit_code = cli.main([str(target)])
+
+    assert exit_code == 1
+    assert called is False
+    assert "Re-run with -p/--parents" in capsys.readouterr().err
+
+
 def test_context_inspect_cli_outputs_context_payload(tmp_path: Path, capsys) -> None:
     note = tmp_path / "note.md"
     note.write_text("# Note\n@>>Editable core<<@\n", encoding="utf-8")

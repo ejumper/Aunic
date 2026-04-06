@@ -44,10 +44,13 @@ class AunicTuiApp:
         included_files: tuple[Path, ...] = (),
         initial_provider: str = "codex",
         initial_model: str | None = None,
+        initial_profile_id: str | None = None,
         reasoning_effort=None,
         display_root: Path | None = None,
         initial_mode: str = "note",
         cwd: Path | None = None,
+        allow_missing_active_file: bool = False,
+        create_missing_parents_on_save: bool = False,
         file_manager: FileManager | None = None,
         note_runner: NoteModeRunner | None = None,
         chat_runner: ChatModeRunner | None = None,
@@ -59,9 +62,12 @@ class AunicTuiApp:
             included_files=included_files,
             initial_provider=initial_provider,
             initial_model=initial_model,
+            initial_profile_id=initial_profile_id,
             reasoning_effort=reasoning_effort,
             display_root=display_root,
             cwd=cwd,
+            allow_missing_active_file=allow_missing_active_file,
+            create_missing_parents_on_save=create_missing_parents_on_save,
             file_manager=file_manager,
             note_runner=note_runner,
             chat_runner=chat_runner,
@@ -663,7 +669,7 @@ class AunicTuiApp:
         idx = self.controller.state.dialog_selection_index
         self.controller.state.selected_model_index = idx
         selected = self.controller.state.selected_model
-        _save_tui_model_pref(selected.provider_name, selected.model)
+        _save_tui_model_pref(selected.provider_name, selected.model, selected.profile_id)
         self.controller._set_status(f"Selected model: {selected.label}.")
         self.controller.close_dialog()
         self.application.layout.focus(self.prompt_field)
@@ -990,19 +996,26 @@ def _write_tui_prefs(data: dict) -> None:
         pass
 
 
-def _load_tui_model_pref() -> tuple[str, str] | None:
+def _load_tui_model_pref() -> tuple[str, str | None, str | None] | None:
     data = _read_tui_prefs()
     provider = data.get("provider")
     model = data.get("model")
-    if isinstance(provider, str) and isinstance(model, str):
-        return provider, model
+    profile_id = data.get("profile_id")
+    normalized_model = model if isinstance(model, str) else None
+    normalized_profile_id = profile_id if isinstance(profile_id, str) else None
+    if isinstance(provider, str):
+        return provider, normalized_model, normalized_profile_id
     return None
 
 
-def _save_tui_model_pref(provider: str, model: str) -> None:
+def _save_tui_model_pref(provider: str, model: str, profile_id: str | None = None) -> None:
     data = _read_tui_prefs()
     data["provider"] = provider
     data["model"] = model
+    if profile_id is None:
+        data.pop("profile_id", None)
+    else:
+        data["profile_id"] = profile_id
     _write_tui_prefs(data)
 
 
@@ -1037,29 +1050,35 @@ async def run_tui(
     included_files: tuple[Path, ...] = (),
     initial_provider: str = "codex",
     initial_model: str | None = None,
+    initial_profile_id: str | None = None,
     reasoning_effort=None,
     display_root: Path | None = None,
     initial_mode: str = "note",
     cwd: Path | None = None,
+    allow_missing_active_file: bool = False,
+    create_missing_parents_on_save: bool = False,
     file_manager: FileManager | None = None,
     note_runner: NoteModeRunner | None = None,
     chat_runner: ChatModeRunner | None = None,
     input: Input | None = None,
     output: Output | None = None,
 ) -> int:
-    if initial_provider == "codex" and initial_model is None:
+    if initial_provider == "codex" and initial_model is None and initial_profile_id is None:
         saved = _load_tui_model_pref()
         if saved:
-            initial_provider, initial_model = saved
+            initial_provider, initial_model, initial_profile_id = saved
     app = AunicTuiApp(
         active_file=active_file,
         included_files=included_files,
         initial_provider=initial_provider,
         initial_model=initial_model,
+        initial_profile_id=initial_profile_id,
         reasoning_effort=reasoning_effort,
         display_root=display_root,
         initial_mode=initial_mode,
         cwd=cwd,
+        allow_missing_active_file=allow_missing_active_file,
+        create_missing_parents_on_save=create_missing_parents_on_save,
         file_manager=file_manager,
         note_runner=note_runner,
         chat_runner=chat_runner,

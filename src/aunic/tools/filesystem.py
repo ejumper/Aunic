@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from aunic.config import SETTINGS
+from aunic.errors import FileReadError
 from aunic.domain import ToolSpec
 from aunic.tools.base import ToolDefinition, ToolExecutionResult
 from aunic.tools.runtime import (
@@ -281,14 +282,44 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
     if permission is not None:
         return permission
     try:
-        snapshot = await runtime.file_manager.read_snapshot(path)
-    except Exception:
+        metadata = await runtime.file_manager.read_metadata(path)
+    except FileNotFoundError:
         return _tool_error_result(
             "read",
             failure_payload(
                 category="validation_error",
                 reason="not_found",
                 message=f"File not found: {path}. Current working directory: {runtime.cwd}",
+                file_path=str(path),
+            ),
+        )
+    except Exception as exc:
+        if isinstance(exc, OSError):
+            return _tool_error_result(
+                "read",
+                failure_payload(
+                    category="validation_error",
+                    reason="read_failed",
+                    message=f"Could not access file: {path}.",
+                    file_path=str(path),
+                ),
+            )
+        if isinstance(exc, FileReadError) and str(exc).startswith("File does not exist:"):
+            return _tool_error_result(
+                "read",
+                failure_payload(
+                    category="validation_error",
+                    reason="not_found",
+                    message=f"File not found: {path}. Current working directory: {runtime.cwd}",
+                    file_path=str(path),
+                ),
+            )
+        return _tool_error_result(
+            "read",
+            failure_payload(
+                category="validation_error",
+                reason="read_failed",
+                message=str(exc),
                 file_path=str(path),
             ),
         )
@@ -314,7 +345,7 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
         )
 
     previous = runtime.session_state.read_entry(path)
-    if previous is not None and previous.revision_id == snapshot.revision_id and previous.offset == (args.offset or 1) and previous.limit == args.limit and previous.pages == args.pages:
+    if previous is not None and previous.revision_id == metadata.revision_id and previous.offset == (args.offset or 1) and previous.limit == args.limit and previous.pages == args.pages:
         payload = {
             "type": "file_unchanged",
             "file_path": str(path),
@@ -329,6 +360,9 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
 
     suffix = path.suffix.lower()
     if suffix == ".ipynb":
+        snapshot = await _read_text_snapshot(runtime, path)
+        if isinstance(snapshot, ToolExecutionResult):
+            return snapshot
         payload = _read_notebook(snapshot)
         runtime.session_state.record_read(
             ReadStateEntry(
@@ -341,14 +375,14 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
         )
         return ToolExecutionResult("read", "completed", payload)
     if suffix == ".pdf":
-        payload = _read_pdf(snapshot, pages=args.pages)
+        payload = _read_pdf(path, pages=args.pages)
         if isinstance(payload, dict) and payload.get("category"):
             return _tool_error_result("read", payload)
         runtime.session_state.record_read(
             ReadStateEntry(
                 path=path,
-                revision_id=snapshot.revision_id,
-                mtime_ns=snapshot.mtime_ns,
+                revision_id=metadata.revision_id,
+                mtime_ns=metadata.mtime_ns,
                 is_full_read=args.pages is None,
                 pages=args.pages,
                 content=payload,
@@ -356,20 +390,23 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
         )
         return ToolExecutionResult("read", "completed", payload)
     if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}:
-        payload = _read_image(snapshot)
+        payload = _read_image(path, metadata)
         if isinstance(payload, dict) and payload.get("category"):
             return _tool_error_result("read", payload)
         runtime.session_state.record_read(
             ReadStateEntry(
                 path=path,
-                revision_id=snapshot.revision_id,
-                mtime_ns=snapshot.mtime_ns,
+                revision_id=metadata.revision_id,
+                mtime_ns=metadata.mtime_ns,
                 is_full_read=True,
                 content=payload,
             )
         )
         return ToolExecutionResult("read", "completed", payload)
 
+    snapshot = await _read_text_snapshot(runtime, path)
+    if isinstance(snapshot, ToolExecutionResult):
+        return snapshot
     payload = _read_text(snapshot, offset=args.offset, limit=args.limit)
     if isinstance(payload, dict) and payload.get("category"):
         return _tool_error_result("read", payload)
@@ -754,6 +791,32 @@ def _read_text(snapshot, *, offset: int | None, limit: int | None) -> dict[str, 
     }
 
 
+async def _read_text_snapshot(runtime: RunToolContext, path: Path):
+    try:
+        return await runtime.file_manager.read_snapshot(path)
+    except FileReadError as exc:
+        message = str(exc)
+        if "valid UTF-8" in message:
+            return _tool_error_result(
+                "read",
+                failure_payload(
+                    category="validation_error",
+                    reason="invalid_utf8",
+                    message=message,
+                    file_path=str(path),
+                ),
+            )
+        return _tool_error_result(
+            "read",
+            failure_payload(
+                category="validation_error",
+                reason="read_failed",
+                message=message,
+                file_path=str(path),
+            ),
+        )
+
+
 def _read_notebook(snapshot) -> dict[str, Any]:
     try:
         notebook = json.loads(snapshot.raw_text)
@@ -778,28 +841,45 @@ def _read_notebook(snapshot) -> dict[str, Any]:
     }
 
 
-def _read_pdf(snapshot, *, pages: str | None) -> dict[str, Any]:
+def _read_pdf(path: Path, *, pages: str | None) -> dict[str, Any]:
     if PdfReader is None:
         return failure_payload(
             category="validation_error",
             reason="pdf_unavailable",
             message="PDF reading is unavailable because pypdf is not installed.",
-            file_path=str(snapshot.path),
+            file_path=str(path),
         )
-    reader = PdfReader(str(snapshot.path))
+    try:
+        reader = PdfReader(str(path))
+    except Exception:
+        return failure_payload(
+            category="validation_error",
+            reason="invalid_pdf",
+            message=f"PDF file is corrupted or unreadable: {path}",
+            file_path=str(path),
+        )
     page_indexes = _parse_pdf_pages(pages, len(reader.pages))
     if isinstance(page_indexes, dict):
+        page_indexes.setdefault("file_path", str(path))
         return page_indexes
     if len(page_indexes) > SETTINGS.tools.read_max_pdf_pages:
         return failure_payload(
             category="validation_error",
             reason="page_limit",
             message="Requested PDF page range exceeds the configured limit.",
-            file_path=str(snapshot.path),
+            file_path=str(path),
         )
     extracted: list[str] = []
     for index in page_indexes:
-        text = reader.pages[index].extract_text() or ""
+        try:
+            text = reader.pages[index].extract_text() or ""
+        except Exception:
+            return failure_payload(
+                category="validation_error",
+                reason="invalid_pdf",
+                message=f"PDF file is corrupted or unreadable: {path}",
+                file_path=str(path),
+            )
         extracted.append(f"Page {index + 1}:\n{text.strip()}")
     content = "\n\n".join(item for item in extracted if item.strip())
     if _estimate_tokens(content) > SETTINGS.tools.read_max_output_tokens:
@@ -807,35 +887,43 @@ def _read_pdf(snapshot, *, pages: str | None) -> dict[str, Any]:
             category="validation_error",
             reason="token_limit",
             message="PDF content would exceed the output token limit.",
-            file_path=str(snapshot.path),
+            file_path=str(path),
         )
     return {
         "type": "pdf",
-        "file_path": str(snapshot.path),
+        "file_path": str(path),
         "pages": pages or f"1-{len(reader.pages)}",
         "content": content,
     }
 
 
-def _read_image(snapshot) -> dict[str, Any]:
-    if snapshot.size_bytes == 0:
+def _read_image(path: Path, metadata) -> dict[str, Any]:
+    if metadata.size_bytes == 0:
         return failure_payload(
             category="validation_error",
             reason="empty_image",
             message="Image file is empty.",
-            file_path=str(snapshot.path),
+            file_path=str(path),
         )
     width = height = None
-    format_name = snapshot.path.suffix.lower().lstrip(".")
+    format_name = path.suffix.lower().lstrip(".")
     if Image is not None:
-        with Image.open(snapshot.path) as img:
-            width, height = img.size
-            format_name = (img.format or format_name).lower()
+        try:
+            with Image.open(path) as img:
+                width, height = img.size
+                format_name = (img.format or format_name).lower()
+        except Exception:
+            return failure_payload(
+                category="validation_error",
+                reason="invalid_image",
+                message=f"Image file is corrupted or unreadable: {path}",
+                file_path=str(path),
+            )
     return {
         "type": "image",
-        "file_path": str(snapshot.path),
+        "file_path": str(path),
         "format": format_name,
-        "size_bytes": snapshot.size_bytes,
+        "size_bytes": metadata.size_bytes,
         "width": width,
         "height": height,
     }

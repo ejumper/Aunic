@@ -11,6 +11,7 @@ from aunic.errors import ClaudeSDKError
 from aunic.providers.base import LLMProvider
 from aunic.providers.claude_client import ClaudeSession, ClaudeTurnResult
 from aunic.providers.sdk_tools import ToolBridgeConfig
+from aunic.transcript.compaction import prepare_transcript_for_model
 from aunic.transcript.translation import (
     compose_final_user_message,
     group_assistant_rows,
@@ -201,8 +202,9 @@ def build_claude_seed_messages(
     *,
     model: str,
 ) -> list[dict[str, Any]]:
+    compacted_rows = prepare_transcript_for_model(request.transcript_messages or [])
     translated = translate_for_anthropic(
-        group_assistant_rows(request.transcript_messages or []),
+        group_assistant_rows(compacted_rows),
         request.note_snapshot or "",
         request.user_prompt or "",
     )

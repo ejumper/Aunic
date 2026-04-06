@@ -19,7 +19,8 @@ from aunic.context.types import TextSpan
 from aunic.errors import ChatModeError, FileReadError, NoteModeError, OptimisticWriteError
 from aunic.modes import ChatModeRunRequest, ChatModeRunner, NoteModeRunRequest, NoteModeRunner
 from aunic.progress import ProgressEvent
-from aunic.providers import ClaudeProvider, CodexProvider, LlamaCppProvider
+from aunic.proto_settings import get_openai_compatible_profiles
+from aunic.providers import ClaudeProvider, CodexProvider, OpenAICompatibleProvider
 from aunic.research.fetch import FetchService
 from aunic.research.search import SearchService, canonicalize_url
 from aunic.research.types import FetchPacket, ResearchState, SearchResult
@@ -79,9 +80,12 @@ class TuiController:
         included_files: tuple[Path, ...] = (),
         initial_provider: str = "codex",
         initial_model: str | None = None,
+        initial_profile_id: str | None = None,
         reasoning_effort=None,
         display_root: Path | None = None,
         cwd: Path | None = None,
+        allow_missing_active_file: bool = False,
+        create_missing_parents_on_save: bool = False,
         file_manager: FileManager | None = None,
         note_runner: NoteModeRunner | None = None,
         chat_runner: ChatModeRunner | None = None,
@@ -100,13 +104,17 @@ class TuiController:
             available_files=tuple([active_file, *[path for path in included_files if path != active_file]]),
             mode="note",
             selected_model_index=0,
-            model_options=_build_model_options(initial_provider, initial_model),
+            model_options=_build_model_options(self._cwd, initial_provider, initial_model),
             reasoning_effort=reasoning_effort,
             indicator_message="Ready.",
+            active_file_missing_on_disk=allow_missing_active_file,
+            create_parents_on_first_save=create_missing_parents_on_save,
         )
         self.state.selected_model_index = _selected_model_index(
             self.state.model_options,
             initial_provider,
+            initial_model,
+            initial_profile_id,
         )
 
         self._editor_buffer: Buffer | None = None
@@ -149,12 +157,15 @@ class TuiController:
         self._invalidate = callback
 
     async def initialize(self) -> None:
-        await self._load_active_file(reset_dirty=True)
+        if self.state.active_file_missing_on_disk:
+            self._bootstrap_missing_active_file()
+        else:
+            await self._load_active_file(reset_dirty=True)
         if self._prompt_buffer is not None:
             self._sync_prompt_text(self.state.prompt_text)
 
     async def start_watch_task(self) -> None:
-        if self._watch_task is not None:
+        if self._watch_task is not None or self.state.active_file_missing_on_disk:
             return
         self._watch_task = asyncio.create_task(self._watch_files())
 
@@ -341,22 +352,17 @@ class TuiController:
 
     async def save_active_file(self) -> bool:
         try:
-            expected_revision = None if self.state.ignored_external_revision else self._last_revision_id
-            snapshot = await self._file_manager.write_text(
-                self.state.active_file,
-                self._full_text,
-                expected_revision=expected_revision,
-            )
+            snapshot = await self._persist_active_file_text(self._full_text)
         except OptimisticWriteError:
             self.state.pending_external_reload = True
             self.state.active_dialog = "reload_confirm"
             self._set_error("The file changed on disk. Reload or ignore before saving.")
             self._invalidate()
             return False
-        self._last_revision_id = snapshot.revision_id
-        self._last_saved_text = snapshot.raw_text
-        self.state.editor_dirty = False
-        self.state.ignored_external_revision = None
+        except FileReadError as exc:
+            self._set_error(str(exc))
+            self._invalidate()
+            return False
         self._set_status("Saved active file.")
         self._invalidate()
         return True
@@ -374,6 +380,11 @@ class TuiController:
 
         prompt_text = self.current_prompt_text()
         stripped = prompt_text.strip()
+
+        if self.state.active_file_missing_on_disk:
+            self._set_error("Save the new file before running Aunic.")
+            self._invalidate()
+            return
 
         # Intercept @web prefix
         if stripped.startswith("@web"):
@@ -589,6 +600,7 @@ class TuiController:
             {row.row_number for row in self._transcript_rows}
         )
         self._refresh_cached_fetch_urls()
+        self.state.active_file_missing_on_disk = False
         if reset_dirty:
             self._last_saved_text = snapshot.raw_text
             self.state.editor_dirty = False
@@ -617,7 +629,11 @@ class TuiController:
         self.state.pending_switch_path = None
         self.state.pending_external_reload = False
         self.state.ignored_external_revision = None
-        await self._load_active_file(reset_dirty=True)
+        self.state.active_file_missing_on_disk = not path.exists()
+        if self.state.active_file_missing_on_disk:
+            self._bootstrap_missing_active_file()
+        else:
+            await self._load_active_file(reset_dirty=True)
         self._set_status(f"Opened {path.name}.")
         self._invalidate()
 
@@ -1050,7 +1066,7 @@ class TuiController:
             return CodexProvider()
         if option.provider_name == "claude":
             return ClaudeProvider()
-        return LlamaCppProvider()
+        return OpenAICompatibleProvider(project_root=self._cwd, profile_id=option.profile_id)
 
     def _refresh_cached_fetch_urls(self) -> None:
         manifest = self._read_fetch_manifest()
@@ -1138,41 +1154,146 @@ class TuiController:
 
     async def _write_active_file_text(self, updated_text: str) -> bool:
         try:
-            expected_revision = None if self.state.ignored_external_revision else self._last_revision_id
-            snapshot = await self._file_manager.write_text(
-                self.state.active_file,
-                updated_text,
-                expected_revision=expected_revision,
-            )
+            await self._persist_active_file_text(updated_text)
         except OptimisticWriteError:
             self.state.pending_external_reload = True
             self.state.active_dialog = "reload_confirm"
             self._set_error("The file changed on disk. Reload or ignore before saving.")
             self._invalidate()
             return False
+        except FileReadError as exc:
+            self._set_error(str(exc))
+            self._invalidate()
+            return False
 
+        await self._load_active_file(reset_dirty=True)
+        return True
+
+    def _bootstrap_missing_active_file(self) -> None:
+        self._last_revision_id = None
+        self._last_saved_text = ""
+        self._full_text = ""
+        self._note_content_text = ""
+        self._transcript_text = None
+        self._transcript_rows = []
+        self.transcript_view_state.expanded_rows.clear()
+        self._cached_fetch_urls = set()
+        self._recent_display_change_spans = ()
+        self.state.editor_dirty = False
+        self.state.pending_external_reload = False
+        self.state.ignored_external_revision = None
+        self.state.fold_state[self.state.active_file] = default_folded_anchor_ids(self._note_content_text)
+        self._sync_editor_from_note_content(preserve_cursor=False)
+        self._set_status("New file: will be created on first save.")
+
+    async def _persist_active_file_text(self, updated_text: str):
+        if self.state.active_file_missing_on_disk and not self.state.active_file.parent.exists():
+            if not self.state.create_parents_on_first_save:
+                raise FileReadError(
+                    "Parent directory does not exist. Reopen with -p/--parents to create it on first save."
+                )
+            try:
+                self.state.active_file.parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise FileReadError(f"Could not create parent directories for: {self.state.active_file}") from exc
+
+        expected_revision = None
+        if not self.state.active_file_missing_on_disk and not self.state.ignored_external_revision:
+            expected_revision = self._last_revision_id
+
+        try:
+            snapshot = await self._file_manager.write_text(
+                self.state.active_file,
+                updated_text,
+                expected_revision=expected_revision,
+            )
+        except OSError as exc:
+            raise FileReadError(f"Could not write file: {self.state.active_file}") from exc
         self._last_revision_id = snapshot.revision_id
         self._last_saved_text = snapshot.raw_text
         self._full_text = snapshot.raw_text
         self.state.editor_dirty = False
         self.state.ignored_external_revision = None
-        await self._load_active_file(reset_dirty=True)
-        return True
+        was_missing = self.state.active_file_missing_on_disk
+        self.state.active_file_missing_on_disk = False
+        if was_missing:
+            await self.start_watch_task()
+        return snapshot
 
 
-def _build_model_options(initial_provider: str, initial_model: str | None) -> tuple[ModelOption, ...]:
+def _build_model_options(
+    cwd: Path,
+    initial_provider: str,
+    initial_model: str | None,
+) -> tuple[ModelOption, ...]:
     codex_model = initial_model if initial_provider == "codex" and initial_model else SETTINGS.codex.default_model
-    llama_model = initial_model if initial_provider == "llama" and initial_model else SETTINGS.llama_cpp.default_model
-    return (
+    options: list[ModelOption] = [
         ModelOption(label=f"Codex ({codex_model})", provider_name="codex", model=codex_model),
-        ModelOption(label=f"Llama ({llama_model})", provider_name="llama", model=llama_model),
-        ModelOption(label="Claude Haiku", provider_name="claude", model=SETTINGS.claude.haiku_model),
-        ModelOption(label="Claude Sonnet", provider_name="claude", model=SETTINGS.claude.sonnet_model),
-        ModelOption(label="Claude Opus", provider_name="claude", model=SETTINGS.claude.opus_model),
+    ]
+
+    openai_profiles = get_openai_compatible_profiles(cwd)
+    if openai_profiles:
+        for profile in openai_profiles:
+            model = (
+                initial_model
+                if initial_provider in {"openai_compatible", "llama"} and initial_model
+                and profile.model == initial_model
+                else profile.model
+            )
+            options.append(
+                ModelOption(
+                    label=profile.display_label,
+                    provider_name="openai_compatible",
+                    model=model,
+                    profile_id=profile.profile_id,
+                )
+            )
+    else:
+        llama_model = (
+            initial_model
+            if initial_provider in {"openai_compatible", "llama"} and initial_model
+            else SETTINGS.llama_cpp.default_model
+        )
+        options.append(
+            ModelOption(
+                label="Llama Addie",
+                provider_name="openai_compatible",
+                model=llama_model,
+                profile_id="llama_addie",
+            )
+        )
+
+    options.extend(
+        [
+            ModelOption(label="Claude Haiku", provider_name="claude", model=SETTINGS.claude.haiku_model),
+            ModelOption(label="Claude Sonnet", provider_name="claude", model=SETTINGS.claude.sonnet_model),
+            ModelOption(label="Claude Opus", provider_name="claude", model=SETTINGS.claude.opus_model),
+        ]
     )
+    return tuple(options)
 
 
-def _selected_model_index(options: tuple[ModelOption, ...], provider_name: str) -> int:
+def _selected_model_index(
+    options: tuple[ModelOption, ...],
+    provider_name: str,
+    model: str | None = None,
+    profile_id: str | None = None,
+) -> int:
+    if provider_name == "llama":
+        provider_name = "openai_compatible"
+        profile_id = profile_id or "llama_addie"
+    if provider_name == "openai_compatible" and profile_id is not None:
+        for index, option in enumerate(options):
+            if option.provider_name == provider_name and option.profile_id == profile_id:
+                return index
+    if provider_name == "openai_compatible" and model is not None:
+        for index, option in enumerate(options):
+            if option.provider_name == provider_name and option.model == model:
+                return index
+    if model is not None:
+        for index, option in enumerate(options):
+            if option.provider_name == provider_name and option.model == model:
+                return index
     for index, option in enumerate(options):
         if option.provider_name == provider_name:
             return index

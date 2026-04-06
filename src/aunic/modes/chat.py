@@ -136,6 +136,7 @@ class ChatModeRunner:
             force_final_response = request.total_turn_budget == 0
             error_message: str | None = None
             provider_metadata: dict[str, object] = {}
+            assistant_message_patches: list[dict[str, object]] = []
             usage_entries: list[UsageLogEntry] = []
             provider_response_index = 0
 
@@ -152,6 +153,17 @@ class ChatModeRunner:
                     )
                 )
 
+            def append_assistant_message_patch(
+                patch: dict[str, object] | None,
+                metadata: dict[str, object],
+            ) -> None:
+                if patch is None:
+                    return
+                assistant_message_patches.append(dict(patch))
+                limit = metadata.get("reasoning_replay_turns")
+                if isinstance(limit, int) and limit > 0:
+                    del assistant_message_patches[:-limit]
+
             while True:
                 if force_final_response and counted_turns > request.total_turn_budget:
                     break
@@ -159,6 +171,7 @@ class ChatModeRunner:
                 provider_request = ProviderRequest(
                     messages=[],
                     transcript_messages=list(run_log),
+                    assistant_message_patches=list(assistant_message_patches),
                     note_snapshot=context_result.note_snapshot_text or runtime.note_snapshot_text() or None,
                     user_prompt=current_user_prompt_text or None,
                     tools=[] if force_final_response else [definition.spec for definition in tool_registry],
@@ -307,6 +320,7 @@ class ChatModeRunner:
                             )
                         )
                         append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _chat_repair_prompt(
                             malformed_message,
                             final_only=force_final_response,
@@ -347,6 +361,7 @@ class ChatModeRunner:
                             )
                         )
                         append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _chat_repair_prompt(
                             str(exc),
                             final_only=force_final_response,
@@ -390,6 +405,7 @@ class ChatModeRunner:
                             content=tool_call.arguments,
                         )
                     )
+                    append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                     transcript_content = (
                         result.in_memory_content
                         if result.transcript_content is None
@@ -445,6 +461,7 @@ class ChatModeRunner:
                         )
                     )
                     append_run_log_message("assistant", "(empty response)")
+                    append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                     current_user_prompt_text = _chat_repair_prompt(
                         error_message,
                         final_only=force_final_response,
@@ -490,6 +507,7 @@ class ChatModeRunner:
                             )
                         )
                         append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _citation_repair_prompt(invalid_urls)
                         append_run_log_message("user", current_user_prompt_text)
                         if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
@@ -521,6 +539,7 @@ class ChatModeRunner:
                             content=response.text,
                         )
                     )
+                append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                 final_snapshots = await self._refresh_snapshots(context_result.file_snapshots)
                 result = ChatModeRunResult(
                     initial_warnings=context_result.warnings,

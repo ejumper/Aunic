@@ -107,6 +107,7 @@ class UsageLog:
 class ProviderRequest:
     messages: list[Message]
     transcript_messages: list[TranscriptRow] | None = None
+    assistant_message_patches: list[dict[str, Any]] = field(default_factory=list)
     note_snapshot: str | None = None
     user_prompt: str | None = None
     tools: list[ToolSpec] = field(default_factory=list)
@@ -128,6 +129,7 @@ class ProviderResponse:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     generated_rows: list[ProviderGeneratedRow] = field(default_factory=list)
+    assistant_message_patch: dict[str, Any] | None = None
     finish_reason: str | None = None
     usage: Usage | None = None
     raw_items: list[dict[str, Any]] = field(default_factory=list)

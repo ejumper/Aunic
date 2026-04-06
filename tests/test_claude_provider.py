@@ -32,6 +32,70 @@ def test_build_claude_seed_messages_serializes_transcript_history() -> None:
     assert messages[-1]["message"]["role"] == "user"
 
 
+def test_build_claude_seed_messages_compacts_old_tool_results() -> None:
+    rows: list[TranscriptRow] = []
+    for index in range(1, 8):
+        tool_id = f"call_{index}"
+        rows.append(
+            TranscriptRow(index * 2 - 1, "assistant", "tool_call", "web_search", tool_id, {"queries": [f"q{index}"]})
+        )
+        rows.append(
+            TranscriptRow(
+                index * 2,
+                "tool",
+                "tool_result",
+                "web_search",
+                tool_id,
+                [{"title": f"title-{index}", "url": f"https://example.com/{index}"}],
+            )
+        )
+
+    messages = build_claude_seed_messages(
+        ProviderRequest(
+            messages=[],
+            transcript_messages=rows,
+            note_snapshot="# Note",
+            user_prompt="Current prompt",
+        ),
+        model="claude-haiku",
+    )
+
+    tool_result_blocks = [
+        block
+        for message in messages
+        if message["type"] == "user"
+        and isinstance(message["message"]["content"], list)
+        for block in message["message"]["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+    assert tool_result_blocks[0]["content"] == "[Old tool result content cleared]"
+    assert "title-7" in tool_result_blocks[-1]["content"]
+
+
+def test_build_claude_seed_messages_drops_incomplete_tool_pairs() -> None:
+    rows = [
+        TranscriptRow(1, "assistant", "tool_call", "read", "orphan_call", {"file_path": "/tmp/a.txt"}),
+        TranscriptRow(2, "assistant", "tool_call", "web_search", "call_1", {"queries": ["weather"]}),
+        TranscriptRow(3, "tool", "tool_result", "web_search", "call_1", [{"url": "https://example.com"}]),
+    ]
+
+    messages = build_claude_seed_messages(
+        ProviderRequest(
+            messages=[],
+            transcript_messages=rows,
+            note_snapshot="# Note",
+            user_prompt="Current prompt",
+        ),
+        model="claude-haiku",
+    )
+
+    assistant_messages = [message for message in messages if message["type"] == "assistant"]
+    assert len(assistant_messages) == 1
+    blocks = assistant_messages[0]["message"]["content"]
+    assert len(blocks) == 1
+    assert blocks[0]["id"] == "call_1"
+
+
 @pytest.mark.asyncio
 async def test_claude_provider_reuses_session_and_returns_generated_rows(
     monkeypatch: pytest.MonkeyPatch,

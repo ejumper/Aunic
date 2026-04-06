@@ -30,6 +30,15 @@ class FileSnapshot:
 
 
 @dataclass(frozen=True)
+class FileMetadata:
+    path: Path
+    revision_id: str
+    mtime_ns: int
+    size_bytes: int
+    captured_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass(frozen=True)
 class FileChange:
     path: Path
     change: Literal["added", "modified", "deleted"]

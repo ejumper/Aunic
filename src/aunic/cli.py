@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Sequence
 
 from aunic.context import ContextBuildRequest, ContextEngine, FileManager
@@ -13,15 +14,25 @@ from aunic.context.markers import warning_to_dict
 from aunic.errors import ChatModeError, NoteModeError
 from aunic.domain import HealthCheck, Message, ProviderRequest
 from aunic.modes import ChatModeRunRequest, ChatModeRunner, NoteModeRunRequest, NoteModeRunner
-from aunic.providers import ClaudeProvider, CodexProvider, LlamaCppProvider, OllamaEmbeddingProvider
+from aunic.providers import (
+    ClaudeProvider,
+    CodexProvider,
+    LlamaCppProvider,
+    OllamaEmbeddingProvider,
+    OpenAICompatibleProvider,
+)
 from aunic.tui import run_tui
 from aunic.usage import usage_log_to_dict, usage_to_dict
 from aunic.usage_log import append_usage_record
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    processed_argv, bare_tui_launch = _coerce_default_tui_argv(
+        list(sys.argv[1:] if argv is None else argv)
+    )
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(processed_argv)
+    args.bare_tui_launch = bare_tui_launch
     return asyncio.run(_dispatch(args))
 
 
@@ -49,7 +60,7 @@ def _build_parser() -> argparse.ArgumentParser:
     prompt_parser.add_argument("prompt", help="Prompt text to send.")
     prompt_parser.add_argument(
         "--provider",
-        choices=("codex", "llama", "claude"),
+        choices=("codex", "openai_compatible", "llama", "claude"),
         default="codex",
         help="Provider to use for the prompt.",
     )
@@ -80,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
     doctor_parser = subparsers.add_parser("doctor", help="Check provider availability.")
     doctor_parser.add_argument(
         "--provider",
-        choices=("all", "codex", "llama", "claude", "embedding"),
+        choices=("all", "codex", "openai_compatible", "llama", "claude", "embedding"),
         default="all",
         help="Limit doctor checks to a single provider.",
     )
@@ -103,7 +114,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     note_run_parser.add_argument(
         "--provider",
-        choices=("codex", "llama", "claude"),
+        choices=("codex", "openai_compatible", "llama", "claude"),
         default="codex",
         help="Provider to use for note mode.",
     )
@@ -154,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     chat_run_parser.add_argument(
         "--provider",
-        choices=("codex", "llama", "claude"),
+        choices=("codex", "openai_compatible", "llama", "claude"),
         default="codex",
         help="Provider to use for chat mode.",
     )
@@ -254,6 +265,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tui_parser.add_argument("active_file", help="Primary markdown file.")
     tui_parser.add_argument(
+        "-p",
+        "--parents",
+        action="store_true",
+        help="Create missing parent directories on first save for a new file.",
+    )
+    tui_parser.add_argument(
         "--include",
         action="append",
         default=[],
@@ -261,7 +278,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tui_parser.add_argument(
         "--provider",
-        choices=("codex", "llama", "claude"),
+        choices=("codex", "openai_compatible", "llama", "claude"),
         default="codex",
         help="Initial provider to use.",
     )
@@ -285,7 +302,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     tui_parser.add_argument(
         "--cwd",
-        default=os.getcwd(),
+        default=None,
         help="Working directory metadata forwarded to providers.",
     )
 
@@ -293,7 +310,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_prompt(args: argparse.Namespace) -> int:
-    provider = _build_llm_provider(args.provider)
+    provider = _build_llm_provider(args.provider, cwd=args.cwd)
     request = ProviderRequest(
         messages=[Message(role="user", content=args.prompt)],
         system_prompt=args.system_prompt,
@@ -305,7 +322,7 @@ async def _run_prompt(args: argparse.Namespace) -> int:
     response = await provider.generate(request)
     usage_log_path = _persist_prompt_usage_log(args, response)
     payload = {
-        "provider": args.provider,
+        "provider": provider.name,
         "text": response.text,
         "tool_calls": [
             {"name": tool_call.name, "arguments": tool_call.arguments}
@@ -324,8 +341,11 @@ async def _run_doctor(args: argparse.Namespace) -> int:
     checks: list[HealthCheck] = []
     if args.provider in ("all", "codex"):
         checks.append(await CodexProvider().healthcheck())
-    if args.provider in ("all", "llama"):
-        checks.append(await LlamaCppProvider().healthcheck())
+    if args.provider in ("all", "openai_compatible", "llama"):
+        if args.provider == "llama":
+            checks.append(await LlamaCppProvider().healthcheck())
+        else:
+            checks.append(await OpenAICompatibleProvider(project_root=Path.cwd()).healthcheck())
     if args.provider in ("all", "claude"):
         checks.append(await ClaudeProvider().healthcheck())
     if args.provider in ("all", "embedding"):
@@ -349,7 +369,7 @@ async def _run_note(args: argparse.Namespace) -> int:
 
 
 async def _run_note_run(args: argparse.Namespace) -> int:
-    provider = _build_llm_provider(args.provider)
+    provider = _build_llm_provider(args.provider, cwd=args.cwd)
     runner = NoteModeRunner()
     try:
         result = await runner.run(
@@ -394,7 +414,7 @@ async def _run_chat(args: argparse.Namespace) -> int:
 
 
 async def _run_chat_run(args: argparse.Namespace) -> int:
-    provider = _build_llm_provider(args.provider)
+    provider = _build_llm_provider(args.provider, cwd=args.cwd)
     runner = ChatModeRunner()
     try:
         result = await runner.run(
@@ -443,15 +463,35 @@ async def _run_context(args: argparse.Namespace) -> int:
 
 
 async def _run_tui(args: argparse.Namespace) -> int:
+    try:
+        active_file, allow_missing_active_file = _resolve_tui_active_file(
+            args.active_file,
+            create_missing_parents=args.parents,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    display_root = Path(args.display_root).expanduser().resolve() if args.display_root else None
+    if display_root is None and getattr(args, "bare_tui_launch", False):
+        display_root = active_file.parent
+
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
+    if cwd is None:
+        cwd = active_file.parent if getattr(args, "bare_tui_launch", False) else Path.cwd()
+
     return await run_tui(
-        active_file=Path(args.active_file),
+        active_file=active_file,
         included_files=tuple(Path(item) for item in args.include),
         initial_provider=args.provider,
         initial_model=args.model,
+        initial_profile_id="llama_addie" if args.provider == "llama" else None,
         reasoning_effort=args.reasoning_effort,
-        display_root=Path(args.display_root) if args.display_root else None,
+        display_root=display_root,
         initial_mode=args.mode,
-        cwd=Path(args.cwd),
+        cwd=cwd,
+        allow_missing_active_file=allow_missing_active_file,
+        create_missing_parents_on_save=args.parents,
     )
 
 
@@ -537,14 +577,48 @@ async def _run_context_watch(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_llm_provider(name: str):
+def _build_llm_provider(name: str, *, cwd: str | os.PathLike[str] | None = None):
     if name == "codex":
         return CodexProvider()
+    if name == "openai_compatible":
+        return OpenAICompatibleProvider(project_root=Path(cwd or os.getcwd()))
     if name == "llama":
         return LlamaCppProvider()
     if name == "claude":
         return ClaudeProvider()
     raise ValueError(f"Unknown provider: {name}")
+
+
+def _coerce_default_tui_argv(argv: Sequence[str]) -> tuple[list[str], bool]:
+    if not argv:
+        return [], False
+    commands = {"prompt", "doctor", "context", "note", "chat", "tui"}
+    first_non_option = next((token for token in argv if not token.startswith("-")), None)
+    if first_non_option is None or first_non_option in commands:
+        return list(argv), False
+    return ["tui", *argv], True
+
+
+def _resolve_tui_active_file(
+    raw_path: str,
+    *,
+    create_missing_parents: bool,
+) -> tuple[Path, bool]:
+    path = Path(raw_path).expanduser().resolve()
+    if path.exists():
+        if path.is_dir():
+            raise ValueError(f"Target is a directory: {path}")
+        return path, False
+    if path.parent.exists():
+        if not path.parent.is_dir():
+            raise ValueError(f"Parent path is not a directory: {path.parent}")
+        return path, True
+    if not create_missing_parents:
+        raise ValueError(
+            f"Parent directory does not exist: {path.parent}. "
+            "Re-run with -p/--parents to create it on first save."
+        )
+    return path, True
 
 
 def _snapshot_to_dict(snapshot) -> dict[str, str | int]:
@@ -604,7 +678,7 @@ def _persist_prompt_usage_log(args: argparse.Namespace, response) -> str | None:
             {
                 "logged_at": datetime.now().astimezone().isoformat(),
                 "mode": "prompt",
-                "provider": args.provider,
+                "provider": response.provider_metadata.get("provider") or args.provider,
                 "model": args.model,
                 "reasoning_effort": args.reasoning_effort,
                 "prompt": args.prompt,

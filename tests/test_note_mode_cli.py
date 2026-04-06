@@ -94,7 +94,7 @@ def test_note_run_cli_outputs_structured_payload(
             )
 
     monkeypatch.setattr(cli, "NoteModeRunner", FakeRunner)
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: object())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: object())
 
     exit_code = cli.main(
         [
@@ -144,7 +144,7 @@ def test_note_run_cli_passes_literal_prompt_text_through_unchanged(
             )
 
     monkeypatch.setattr(cli, "NoteModeRunner", FakeRunner)
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: object())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: object())
 
     exit_code = cli.main(
         [
@@ -178,7 +178,7 @@ def test_note_run_cli_returns_error_payload_for_note_mode_validation_failure(
             raise NoteModeError("bad request")
 
     monkeypatch.setattr(cli, "NoteModeRunner", FakeRunner)
-    monkeypatch.setattr(cli, "_build_llm_provider", lambda name: object())
+    monkeypatch.setattr(cli, "_build_llm_provider", lambda name, **kwargs: object())
 
     exit_code = cli.main(
         [

@@ -94,6 +94,17 @@ class ToolLoop:
                 )
             )
 
+        def append_assistant_message_patch(
+            patch: dict[str, Any] | None,
+            provider_metadata: dict[str, Any],
+        ) -> None:
+            if patch is None:
+                return
+            assistant_message_patches.append(dict(patch))
+            limit = provider_metadata.get("reasoning_replay_turns")
+            if isinstance(limit, int) and limit > 0:
+                del assistant_message_patches[:-limit]
+
         async def append_loop_event(event: LoopEvent) -> None:
             events.append(event)
             await emit_progress(
@@ -111,6 +122,7 @@ class ToolLoop:
         protected_rejection_count = 0
         conflict_rejection_count = 0
         successful_edit_count = 0
+        assistant_message_patches: list[dict[str, Any]] = []
         stop_reason = "provider_error"
         usage_entries: list[UsageLogEntry] = []
         provider_response_index = 0
@@ -150,6 +162,7 @@ class ToolLoop:
             provider_request = ProviderRequest(
                 messages=[],
                 transcript_messages=list(run_log),
+                assistant_message_patches=list(assistant_message_patches),
                 note_snapshot=runtime.note_snapshot_text() or active_prompt_run.note_snapshot_text or None,
                 user_prompt=current_user_prompt_text or None,
                 tools=[definition.spec for definition in registry],
@@ -274,6 +287,7 @@ class ToolLoop:
                     )
                 )
                 append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                 current_user_prompt_text = _repair_prompt(malformed_message)
                 append_run_log_message("user", current_user_prompt_text)
                 await append_loop_event(
@@ -297,6 +311,7 @@ class ToolLoop:
                         )
                     )
                     append_run_log_message("assistant", "(empty response)")
+                    append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                     current_user_prompt_text = _repair_prompt("Empty response with no tool call.")
                     append_run_log_message("user", current_user_prompt_text)
                     await append_loop_event(
@@ -325,6 +340,7 @@ class ToolLoop:
                     )
                 )
                 append_run_log_message("assistant", assistant_text)
+                append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                 current_user_prompt_text = _note_mode_redirect_prompt(
                     assistant_text,
                     runtime.active_file,
@@ -352,6 +368,7 @@ class ToolLoop:
                     ToolFailure(category="malformed_turn", reason="invalid_arguments", tool_name=tool_call.name, message=str(exc))
                 )
                 append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                 current_user_prompt_text = _repair_prompt(str(exc))
                 append_run_log_message("user", current_user_prompt_text)
                 await append_loop_event(
@@ -383,6 +400,7 @@ class ToolLoop:
                     content=tool_call.arguments,
                 )
             )
+            append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
             try:
                 result = await definition.execute(runtime, parsed_args)
             except ValueError as exc:

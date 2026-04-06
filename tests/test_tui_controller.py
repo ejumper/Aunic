@@ -178,6 +178,28 @@ class _FakeWatchingFileManager:
         )
 
 
+class _NewFileWatchingFileManager:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.current_text: str | None = None
+        self.watch_started = 0
+
+    async def read_snapshot(self, path: Path | str) -> FileSnapshot:
+        assert self.current_text is not None
+        return _snapshot(Path(path), self.current_text, "rev-new")
+
+    async def write_text(self, path: Path | str, new_text: str, expected_revision: str | None = None) -> FileSnapshot:
+        self.current_text = new_text
+        return _snapshot(Path(path), new_text, "rev-write")
+
+    async def watch(self, paths):
+        self.watch_started += 1
+        while True:
+            await asyncio.sleep(60)
+            if False:
+                yield ()
+
+
 @pytest.mark.asyncio
 async def test_controller_send_prompt_saves_buffer_and_dispatches_note_mode(tmp_path: Path) -> None:
     note = tmp_path / "note.md"
@@ -198,6 +220,118 @@ async def test_controller_send_prompt_saves_buffer_and_dispatches_note_mode(tmp_
     assert request.user_prompt == "Please update it."
     assert saved_text == "Changed\n"
     assert controller.state.run_in_progress is False
+
+
+@pytest.mark.asyncio
+async def test_controller_initializes_missing_file_without_creating_it(tmp_path: Path) -> None:
+    note = tmp_path / "new-note.md"
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+
+    await controller.initialize()
+
+    assert note.exists() is False
+    assert controller.state.active_file_missing_on_disk is True
+    assert controller.state.editor_dirty is False
+    assert controller._editor_buffer.text == ""
+    assert controller.state.indicator_message == "New file: will be created on first save."
+
+
+@pytest.mark.asyncio
+async def test_controller_save_new_file_with_missing_parent_requires_parents_flag(tmp_path: Path) -> None:
+    note = tmp_path / "new" / "dir" / "note.md"
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._editor_buffer.text = "Body\n"
+
+    assert await controller.save_active_file() is False
+    assert note.exists() is False
+    assert "Reopen with -p/--parents" in controller.state.indicator_message
+
+
+@pytest.mark.asyncio
+async def test_controller_save_new_file_creates_missing_parents_on_first_save(tmp_path: Path) -> None:
+    note = tmp_path / "new" / "dir" / "note.md"
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        create_missing_parents_on_save=True,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._editor_buffer.text = "Body\n"
+
+    assert await controller.save_active_file() is True
+    assert note.read_text(encoding="utf-8") == "Body\n"
+    assert controller.state.active_file_missing_on_disk is False
+
+    await controller.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_controller_blocks_model_runs_until_new_file_is_saved(tmp_path: Path) -> None:
+    note = tmp_path / "new-note.md"
+    note_runner = _FakeNoteRunner(note)
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        note_runner=note_runner,
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "Do the thing."
+    await controller.send_prompt()
+
+    assert controller._run_task is None
+    assert controller.state.indicator_kind == "error"
+    assert controller.state.indicator_message == "Save the new file before running Aunic."
+    assert note_runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_controller_skips_watch_until_new_file_is_saved(tmp_path: Path) -> None:
+    note = tmp_path / "new-note.md"
+    file_manager = _NewFileWatchingFileManager(note)
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        file_manager=file_manager,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    await controller.start_watch_task()
+
+    assert controller._watch_task is None
+    assert file_manager.watch_started == 0
+
+    controller._editor_buffer.text = "Body\n"
+    assert await controller.save_active_file() is True
+    await asyncio.sleep(0)
+
+    assert controller._watch_task is not None
+    assert file_manager.watch_started == 1
+
+    await controller.shutdown()
 
 
 @pytest.mark.asyncio
@@ -258,6 +392,54 @@ async def test_controller_close_dialog_rejects_permission_prompt(tmp_path: Path)
     assert await task == "reject"
     assert controller.state.active_dialog is None
     assert controller.state.permission_prompt is None
+
+
+def test_controller_builds_openai_profile_model_options_from_proto_settings(tmp_path: Path) -> None:
+    settings_dir = tmp_path / ".aunic"
+    settings_dir.mkdir()
+    (settings_dir / "proto-settings.json").write_text(
+        (
+            "{\n"
+            '  "selected_openai_compatible_profile": "openrouter_nemo",\n'
+            '  "openai_compatible_profiles": {\n'
+            '    "llama_addie": {\n'
+            '      "provider_label": "Llama",\n'
+            '      "custom_model_name": "Addie",\n'
+            '      "model": "local-model",\n'
+            '      "base_url": "http://127.0.0.1:8080",\n'
+            '      "chat_endpoint": "/v1/chat/completions",\n'
+            '      "health_endpoint": "/health",\n'
+            '      "startup_script": "/tmp/addie.sh"\n'
+            "    },\n"
+            '    "openrouter_nemo": {\n'
+            '      "provider_label": "OpenRouter",\n'
+            '      "custom_model_name": "Nemo",\n'
+            '      "model": "nvidia/nemotron-3-super-120b-a12b",\n'
+            '      "base_url": "https://openrouter.ai/api/v1",\n'
+            '      "chat_endpoint": "/chat/completions",\n'
+            '      "api_key": "placeholder"\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    controller = TuiController(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+
+    labels = [option.label for option in controller.state.model_options]
+    openai_options = [option for option in controller.state.model_options if option.provider_name == "openai_compatible"]
+
+    assert "Llama Addie" in labels
+    assert "OpenRouter Nemo" in labels
+    assert [option.profile_id for option in openai_options] == ["llama_addie", "openrouter_nemo"]
 
 
 @pytest.mark.asyncio
