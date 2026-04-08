@@ -476,6 +476,11 @@ def _usage_from_payload(payload: dict[str, Any]) -> Usage | None:
         input_tokens=_coerce_int(usage.get("prompt_tokens")),
         output_tokens=_coerce_int(usage.get("completion_tokens")),
         reasoning_output_tokens=reasoning_tokens,
+        model_context_window=(
+            _coerce_int(usage.get("model_context_window"))
+            or _coerce_int(usage.get("context_window"))
+            or _coerce_int(usage.get("context_length"))
+        ),
     )
 
 

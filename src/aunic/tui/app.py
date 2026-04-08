@@ -3,17 +3,24 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.filters import Condition, has_focus
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.input.base import Input
+from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, VSplit, Window
-from prompt_toolkit.layout.containers import WindowAlign
+from prompt_toolkit.layout.containers import WindowAlign, ScrollOffsets
 from prompt_toolkit.layout.containers import ConditionalContainer, DynamicContainer
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.margins import ScrollbarMargin
 from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.output.base import Output
 from prompt_toolkit.shortcuts import set_title
@@ -25,12 +32,23 @@ from aunic.modes import ChatModeRunner, NoteModeRunner
 from aunic.tui.controller import TuiController
 from aunic.tui.web_search_view import WebSearchView
 from aunic.tui.transcript_view import TranscriptView
+from aunic.tui.note_tables import NoteTablePreviewBufferControl
 from aunic.tui.rendering import (
     AunicMarkdownLexer,
     RecentChangeProcessor,
     ThematicBreakProcessor,
     build_tui_style,
 )
+
+
+_CTRL_BACKSPACE_SEQUENCES = (
+    "\x1b[127;5u",
+    "\x1b[8;5u",
+    "\x1b[27;5;8~",
+)
+
+for _sequence in _CTRL_BACKSPACE_SEQUENCES:
+    ANSI_SEQUENCES.setdefault(_sequence, (Keys.Escape, Keys.ControlH))
 
 
 class AunicTuiApp:
@@ -76,9 +94,20 @@ class AunicTuiApp:
         file_ui_state = _load_tui_file_state(active_file)
         if isinstance(file_ui_state.get("transcript_open"), bool):
             self.controller.state.transcript_open = file_ui_state["transcript_open"]
-        self.controller._on_transcript_open_changed = lambda open_state: _save_tui_file_state(
-            active_file, {"transcript_open": open_state},
-        )
+        if isinstance(file_ui_state.get("transcript_maximized"), bool):
+            self.controller.transcript_view_state.maximized = file_ui_state["transcript_maximized"]
+
+        def _save_transcript_ui_state() -> None:
+            _save_tui_file_state(
+                active_file,
+                {
+                    "transcript_open": self.controller.state.transcript_open,
+                    "transcript_maximized": self.controller.transcript_view_state.maximized,
+                },
+            )
+
+        self.controller._on_transcript_open_changed = lambda _open_state: _save_transcript_ui_state()
+        self.controller._on_transcript_maximized_changed = lambda _maximized: _save_transcript_ui_state()
 
         self.editor = TextArea(
             multiline=True,
@@ -88,6 +117,7 @@ class AunicTuiApp:
             focus_on_click=True,
             read_only=Condition(lambda: self.controller.editor_is_read_only() or self.controller.state.web_mode != "idle"),
         )
+        self.editor.window.right_margins = [ScrollbarMargin(display_arrows=False)]
         self.prompt_field = TextArea(
             multiline=True,
             scrollbar=True,
@@ -95,21 +125,33 @@ class AunicTuiApp:
             focus_on_click=True,
             read_only=Condition(lambda: self.controller.state.run_in_progress),
         )
+        self.prompt_field.window.right_margins = [ScrollbarMargin(display_arrows=False)]
         self.controller.attach_buffers(
             editor_buffer=self.editor.buffer,
             prompt_buffer=self.prompt_field.buffer,
         )
         self.editor.buffer.on_text_changed += self._coalesce_buffer_undo_history
         self.prompt_field.buffer.on_text_changed += self._coalesce_buffer_undo_history
-        self.editor.control.input_processors = [
-            ThematicBreakProcessor(width=lambda: self._editor_width()),
-            RecentChangeProcessor(spans=self.controller.recent_display_change_spans),
-        ]
+        original_editor_control = self.editor.control
+        self.editor.control = NoteTablePreviewBufferControl(
+            buffer=self.editor.buffer,
+            lexer=original_editor_control.lexer,
+            input_processors=[
+                ThematicBreakProcessor(width=lambda: self._editor_width()),
+                RecentChangeProcessor(spans=self.controller.recent_display_change_spans),
+            ],
+            search_buffer_control=original_editor_control.search_buffer_control,
+            preview_search=original_editor_control.preview_search,
+            focusable=original_editor_control.focusable,
+            focus_on_click=original_editor_control.focus_on_click,
+            key_bindings=original_editor_control.key_bindings,
+        )
+        self.editor.window.content = self.editor.control
         self.editor.window.get_line_prefix = self._editor_line_prefix
         self._web_view = WebSearchView(self.controller, width=self._editor_width)
         self._transcript_view = TranscriptView(self.controller, width=self._editor_width)
         self._last_web_mode: str = "idle"
-        self._model_picker_view = ModelPickerView(self.controller)
+        self._model_picker_view = ModelPickerView(self.controller, select=self._select_model_from_picker)
         self._permission_prompt_view = PermissionPromptView(self.controller)
 
         self._file_radio = RadioList(
@@ -150,7 +192,7 @@ class AunicTuiApp:
             HSplit(
                 [
                     DynamicContainer(self._prompt_area_body),
-                    Window(height=1, char="─"),
+                    _ContextSeparatorWindow(self.controller),
                     self.control_row,
                 ]
             ),
@@ -165,11 +207,15 @@ class AunicTuiApp:
         )
         self.note_and_transcript = HSplit(
             [
-                self.editor,
+                ConditionalContainer(
+                    content=self.editor,
+                    filter=Condition(lambda: not self._transcript_fills_editor_area()),
+                ),
                 ConditionalContainer(
                     content=HSplit(
                         [
                             Window(height=1, char="─", style="class:md.thematic"),
+                            self._transcript_view.toolbar_window,
                             self._transcript_view.window,
                         ]
                     ),
@@ -221,6 +267,7 @@ class AunicTuiApp:
             input=input,
             output=output,
         )
+        self.application.pre_run_callables.append(self._invalidate)
         self.controller.set_invalidator(self._invalidate)
         set_title("Aunic")
         self._last_edit_action_by_buffer: dict[int, str] = {}
@@ -243,6 +290,17 @@ class AunicTuiApp:
 
     def _build_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
+
+        @bindings.add("c-c", eager=True, filter=Condition(self._editing_text_area_has_selection))
+        def _copy(_event) -> None:
+            area = self._active_text_area()
+            if area is None:
+                return
+            doc = area.buffer.document
+            if doc.selection is None:
+                return
+            from_pos, to_pos = doc.selection_range()
+            self.controller.copy_text_to_clipboard(doc.text[from_pos:to_pos])
 
         @bindings.add("c-r", eager=True)
         def _send(_event) -> None:
@@ -325,6 +383,11 @@ class AunicTuiApp:
             buf.start_selection()
             buf.cursor_position = len(buf.text)
 
+        @bindings.add("escape", "backspace", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        @bindings.add("escape", "c-h", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        def _backward_kill_word(event) -> None:
+            get_by_name("backward-kill-word").handler(event)
+
         @bindings.add("home", eager=True, filter=Condition(self._editing_text_area_has_focus))
         def _visual_home(_event) -> None:
             area = self._active_text_area()
@@ -383,10 +446,12 @@ class AunicTuiApp:
         @bindings.add("up", eager=True, filter=Condition(self._in_model_picker))
         def _model_up(_event) -> None:
             self.controller.move_dialog_selection(-1)
+            self._model_picker_view.on_cursor_moved()
 
         @bindings.add("down", eager=True, filter=Condition(self._in_model_picker))
         def _model_down(_event) -> None:
             self.controller.move_dialog_selection(1)
+            self._model_picker_view.on_cursor_moved()
 
         @bindings.add("enter", eager=True, filter=Condition(self._in_model_picker))
         def _model_select(_event) -> None:
@@ -501,9 +566,15 @@ class AunicTuiApp:
         transcript_visible = self.controller.has_transcript() and self.controller.state.transcript_open
         if not transcript_visible and self.application.layout.has_focus(self._transcript_view.window):
             self.application.layout.focus(self.editor)
+            return
+        if self._transcript_fills_editor_area() and self.application.layout.has_focus(self.editor):
+            self._transcript_view.ensure_selection()
+            self.application.layout.focus(self._transcript_view.window)
 
     def _editor_width(self) -> int:
         render_info = self.editor.window.render_info
+        if render_info is None:
+            render_info = self._transcript_view.window.render_info
         if render_info is None:
             return 60
         return max(3, render_info.window_width - 2)
@@ -513,22 +584,41 @@ class AunicTuiApp:
             app_height = self.application.output.get_size().rows
         except Exception:
             app_height = 40
-        max_height = max(6, app_height // 3)
-        preferred = self._transcript_view.preferred_height()
+        if self.controller.transcript_view_state.maximized:
+            note_and_transcript_rows = max(
+                3,
+                app_height
+                - 1  # top bar
+                - _dimension_value(self.indicator_window.height, 1)
+                - self._prompt_box_height(),
+            )
+            max_height = note_and_transcript_rows
+        else:
+            max_height = max(6, app_height // 3)
+        body_max_height = max(2, max_height - self._transcript_view.toolbar_height - 1)  # separator row
+        if self.controller.transcript_view_state.maximized:
+            preferred = body_max_height
+        else:
+            preferred = self._transcript_view.preferred_height() - self._transcript_view.toolbar_height
         self._transcript_view.window.height = Dimension(
-            preferred=min(preferred, max_height),
-            max=max_height,
-            min=3,
+            preferred=min(max(2, preferred), body_max_height),
+            max=body_max_height,
+            min=2,
         )
+
+    def _prompt_box_height(self) -> int:
+        prompt_body_height = _dimension_value(self._prompt_area_body(), 3)
+        return prompt_body_height + 1 + 1 + 2
 
     def _editor_line_prefix(self, line_number: int, wrap_count: int):
         lines = self.controller.current_display_lines()
-        if line_number >= len(lines):
+        source_line_number = _source_row_for_display_row(self.editor.control, line_number)
+        if source_line_number >= len(lines):
             return [("", "")]
         prefix = self.controller.line_prefix(
-            line_number,
+            source_line_number,
             wrap_count,
-            in_code_block=_line_is_in_fenced_code_block(lines, line_number),
+            in_code_block=_line_is_in_fenced_code_block(lines, source_line_number),
         )
         return [("", prefix)]
 
@@ -556,6 +646,10 @@ class AunicTuiApp:
             self.application.layout.focus(self.prompt_field)
             return
         if self.application.layout.has_focus(self.prompt_field):
+            if self._transcript_fills_editor_area():
+                self._transcript_view.ensure_selection()
+                self.application.layout.focus(self._transcript_view.window)
+                return
             self.application.layout.focus(self.editor)
             return
         self.application.layout.focus(self.editor)
@@ -570,12 +664,25 @@ class AunicTuiApp:
             or self.application.layout.has_focus(self.prompt_field)
         )
 
+    def _editing_text_area_has_selection(self) -> bool:
+        if not self._editing_text_area_has_focus():
+            return False
+        area = self._active_text_area()
+        return area is not None and area.buffer.selection_state is not None
+
     def _transcript_has_focus(self) -> bool:
         if self.controller.state.active_dialog is not None:
             return False
         if self.controller.state.web_mode != "idle":
             return False
         return self.application.layout.has_focus(self._transcript_view.window)
+
+    def _transcript_fills_editor_area(self) -> bool:
+        return (
+            self.controller.has_transcript()
+            and self.controller.state.transcript_open
+            and self.controller.transcript_view_state.maximized
+        )
 
     def _in_model_picker(self) -> bool:
         return self.controller.state.active_dialog == "model_picker"
@@ -828,6 +935,8 @@ class AunicTuiApp:
             return self._build_file_switch_dialog()
         if dialog == "reload_confirm":
             return self._build_reload_confirm_dialog()
+        if dialog == "note_conflict":
+            return self._build_note_conflict_dialog()
         return Window(height=0)
 
     def _build_file_menu_dialog(self):
@@ -872,6 +981,31 @@ class AunicTuiApp:
                 Button(
                     text="Ignore",
                     handler=lambda: self._background(self.controller.confirm_external_reload(reload_file=False)),
+                ),
+            ],
+        )
+
+    def _build_note_conflict_dialog(self):
+        conflict = self.controller.state.note_conflict
+        tool_name = conflict.tool_name if conflict is not None else "note_write"
+        body = Label(
+            text=(
+                "Your note changed while the model was running.\n\n"
+                f"The model finished with {tool_name}. Choose whether the model update or your edits should win.\n"
+                "The discarded version will be backed up under .aunic/conflicts."
+            )
+        )
+        return Dialog(
+            title="Note Conflict",
+            body=Box(body, padding=1),
+            buttons=[
+                Button(
+                    text="Model Wins",
+                    handler=lambda: self._background(self.controller.confirm_note_conflict(prefer_model=True)),
+                ),
+                Button(
+                    text="User Wins",
+                    handler=lambda: self._background(self.controller.confirm_note_conflict(prefer_model=False)),
                 ),
             ],
         )
@@ -940,22 +1074,85 @@ class PermissionPromptView:
         self._controller._invalidate()
 
 
-class ModelPickerView:
+class _ContextSeparatorWindow(Window):
+    """Separator line that fills left-to-right in blue proportional to context window fill."""
+
     def __init__(self, controller: TuiController) -> None:
         self._controller = controller
+        self._width = 1
+        super().__init__(
+            FormattedTextControl(text=self._render, focusable=False, show_cursor=False),
+            height=1,
+        )
+
+    def _render(self) -> StyleAndTextTuples:
+        w = max(1, self._width)
+        fill = self._controller.context_fill_fraction
+        if fill is None:
+            return [("", "─" * w)]
+        filled = max(0, min(w, round(fill * w)))
+        if fill < 0.5:
+            color = "ansigreen bold"
+        elif fill < 0.75:
+            color = "ansiyellow bold"
+        else:
+            color = "ansired bold"
+        fragments: StyleAndTextTuples = []
+        if filled > 0:
+            fragments.append((color, "─" * filled))
+        if filled < w:
+            fragments.append(("", "─" * (w - filled)))
+        return fragments
+
+    def write_to_screen(self, screen, mouse_handlers, write_position,
+                        parent_style, erase_bg, z_index) -> None:
+        self._width = write_position.width
+        super().write_to_screen(screen, mouse_handlers, write_position,
+                                parent_style, erase_bg, z_index)
+
+
+class ModelPickerView:
+    def __init__(self, controller: TuiController, *, select: Callable[[], None]) -> None:
+        self._controller = controller
+        self._select = select
+        self._scroll_pos = 0
+        self._pending_scroll = False
         self.window = Window(
             FormattedTextControl(
-                text=self._render, focusable=True, show_cursor=False
+                text=self._render,
+                focusable=True,
+                show_cursor=False,
+                get_cursor_position=lambda: Point(0, self._scroll_pos),
             ),
             height=Dimension(preferred=5, max=20, min=3),
             dont_extend_height=True,
+            wrap_lines=False,
+            right_margins=[ScrollbarMargin(display_arrows=False)],
+            scroll_offsets=ScrollOffsets(top=0, bottom=0),
+            get_vertical_scroll=lambda w: self._scroll_pos,
         )
+
+    def on_cursor_moved(self) -> None:
+        self._pending_scroll = True
 
     def _render(self):
         c = self._controller
         options = c.state.model_options
         cursor = c.state.dialog_selection_index
         selected = c.state.selected_model_index
+
+        if self._pending_scroll:
+            self._pending_scroll = False
+            render_info = self.window.render_info
+            visible_height = render_info.window_height if render_info is not None else 5
+            if cursor < self._scroll_pos:
+                self._scroll_pos = cursor
+            elif cursor >= self._scroll_pos + visible_height:
+                self._scroll_pos = cursor - visible_height + 1
+
+        max_scroll = max(0, len(options) - 3)
+        self._scroll_pos = max(0, min(self._scroll_pos, max_scroll))
+
         fragments = []
         for i, option in enumerate(options):
             is_focused = i == cursor
@@ -969,9 +1166,17 @@ class ModelPickerView:
                 combined = ind_style
             else:
                 combined = row_style
-            fragments.append((row_style, "  "))
-            fragments.append((combined, indicator))
-            fragments.append((row_style, f" {option.label}\n"))
+
+            idx = i
+
+            def _click(mouse_event, _idx=idx) -> None:
+                if mouse_event.event_type == MouseEventType.MOUSE_UP:
+                    c.state.dialog_selection_index = _idx
+                    self._select()
+
+            fragments.append((row_style, "  ", _click))
+            fragments.append((combined, indicator, _click))
+            fragments.append((row_style, f" {option.label}\n", _click))
         return fragments
 
 
@@ -1175,10 +1380,9 @@ def _visual_cursor_position_for_wrapped_move(
     if best_match is None:
         return None
 
-    _, row, display_col = best_match
-    processed_line = get_processed_line(row)
-    source_col = processed_line.display_to_source(display_col)
-    return text_area.buffer.document.translate_row_col_to_index(row, source_col)
+    _, display_row, display_col = best_match
+    source_row, source_col = _display_to_source_position(text_area.control, display_row, display_col)
+    return text_area.buffer.document.translate_row_col_to_index(source_row, source_col)
 
 
 def _visual_home_end_position(*, text_area: TextArea, go_end: bool) -> int | None:
@@ -1188,28 +1392,65 @@ def _visual_home_end_position(*, text_area: TextArea, go_end: bool) -> int | Non
 
     control = text_area.control
     get_processed_line = getattr(control, "_last_get_processed_line", None)
-    rowcol_to_yx = getattr(render_info, "_rowcol_to_yx", None)
-    x_offset = getattr(render_info, "_x_offset", 0)
-    y_offset = getattr(render_info, "_y_offset", 0)
+    visible_line_to_row_col = getattr(render_info, "visible_line_to_row_col", None)
 
-    if get_processed_line is None or rowcol_to_yx is None:
+    if get_processed_line is None or visible_line_to_row_col is None:
         return None
 
-    current_y = render_info.cursor_position.y
-    best: tuple[int, int, int] | None = None  # (relative_x, row, display_col)
-
-    for (row, display_col), (absolute_y, absolute_x) in rowcol_to_yx.items():
-        if absolute_y - y_offset != current_y:
-            continue
-        relative_x = absolute_x - x_offset
-        candidate = (relative_x, row, display_col)
-        if best is None or (go_end and relative_x > best[0]) or (not go_end and relative_x < best[0]):
-            best = candidate
-
-    if best is None:
+    current_visible_line = render_info.cursor_position.y
+    start = visible_line_to_row_col.get(current_visible_line)
+    if start is None:
         return None
 
-    _, row, display_col = best
-    processed_line = get_processed_line(row)
-    source_col = processed_line.display_to_source(display_col)
-    return text_area.buffer.document.translate_row_col_to_index(row, source_col)
+    display_row, display_col = start
+    source_row = _source_row_for_display_row(control, display_row)
+    processed_line = get_processed_line(source_row)
+
+    if not go_end:
+        _, source_col = _display_to_source_position(control, display_row, display_col)
+        return text_area.buffer.document.translate_row_col_to_index(source_row, source_col)
+
+    next_start = visible_line_to_row_col.get(current_visible_line + 1)
+    if next_start is not None and _source_row_for_display_row(control, next_start[0]) == source_row:
+        next_display_col = next_start[1]
+        _, source_col = _display_to_source_position(control, next_start[0], next_display_col)
+        return text_area.buffer.document.translate_row_col_to_index(source_row, source_col)
+
+    source_col = len(text_area.buffer.document.lines[source_row])
+    return text_area.buffer.document.translate_row_col_to_index(source_row, source_col)
+
+
+def _source_row_for_display_row(control, display_row: int) -> int:
+    mapper = getattr(control, "display_row_to_source_row", None)
+    if callable(mapper):
+        return mapper(display_row)
+    return display_row
+
+
+def _display_to_source_position(control, display_row: int, display_col: int) -> tuple[int, int]:
+    mapper = getattr(control, "display_to_source_position", None)
+    if callable(mapper):
+        return mapper(display_row, display_col)
+    get_processed_line = getattr(control, "_last_get_processed_line", None)
+    if get_processed_line is None:
+        return display_row, display_col
+    processed_line = get_processed_line(display_row)
+    return display_row, processed_line.display_to_source(display_col)
+
+
+def _dimension_value(value, default: int) -> int:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Dimension):
+        if value.preferred is not None:
+            return value.preferred
+        if value.max is not None:
+            return value.max
+        if value.min is not None:
+            return value.min
+    if value is None:
+        return default
+    window = getattr(value, "window", None)
+    if window is not None:
+        return _dimension_value(getattr(window, "height", None), default)
+    return _dimension_value(getattr(value, "height", None), default) if hasattr(value, "height") else default

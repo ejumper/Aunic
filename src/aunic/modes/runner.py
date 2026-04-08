@@ -176,6 +176,7 @@ class NoteModeRunner:
                 completed_all_prompts=completed_all_prompts,
                 final_file_snapshots=final_snapshots,
                 stop_reason=stop_reason,
+                synthesis_loop_result=synthesis_result.loop_result,
                 synthesis_ran=synthesis_result.ran,
                 synthesis_error=synthesis_result.error_message,
                 usage_log=usage_log,

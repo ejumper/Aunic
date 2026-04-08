@@ -7,7 +7,7 @@ from typing import Any, Literal
 from aunic.domain import ReasoningEffort, WorkMode
 
 TuiMode = Literal["note", "chat"]
-DialogMode = Literal["file_menu", "file_switch_confirm", "reload_confirm", "model_picker", "permission_prompt"]
+DialogMode = Literal["file_menu", "file_switch_confirm", "reload_confirm", "model_picker", "permission_prompt", "note_conflict"]
 WebMode = Literal["idle", "results", "chunks"]
 TranscriptFilter = Literal["all", "chat", "tools", "search"]
 TranscriptSortOrder = Literal["descending", "ascending"]
@@ -22,11 +22,21 @@ class PermissionPromptState:
 
 
 @dataclass(frozen=True)
+class NoteConflictState:
+    tool_name: Literal["note_edit", "note_write"]
+    model_note_content: str
+    user_note_content: str
+    model_revision_id: str
+    transcript_text: str | None = None
+
+
+@dataclass(frozen=True)
 class ModelOption:
     label: str
     provider_name: str
     model: str
     profile_id: str | None = None
+    context_window: int | None = None
 
 
 @dataclass
@@ -34,6 +44,7 @@ class TranscriptViewState:
     filter_mode: TranscriptFilter = "all"
     sort_order: TranscriptSortOrder = "descending"
     expanded_rows: set[int] = field(default_factory=set)
+    maximized: bool = False
 
 
 @dataclass
@@ -58,6 +69,7 @@ class TuiState:
     dialog_selection_index: int = 0
     ignored_external_revision: str | None = None
     permission_prompt: PermissionPromptState | None = None
+    note_conflict: NoteConflictState | None = None
     transcript_open: bool = True
     active_file_missing_on_disk: bool = False
     create_parents_on_first_save: bool = False

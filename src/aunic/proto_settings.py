@@ -23,6 +23,7 @@ class OpenAICompatibleProfile:
     headers: dict[str, str] = field(default_factory=dict)
     replay_reasoning_details: bool = False
     reasoning_replay_turns: int = 1
+    context_window: int | None = None
 
     @property
     def display_label(self) -> str:
@@ -193,6 +194,10 @@ def _parse_openai_compatible_profile(
     if not isinstance(reasoning_replay_turns, int) or reasoning_replay_turns < 1:
         reasoning_replay_turns = 1
 
+    context_window = payload.get("context_window")
+    if not isinstance(context_window, int) or context_window <= 0:
+        context_window = None
+
     return OpenAICompatibleProfile(
         profile_id=profile_id,
         provider_label=provider_label,
@@ -206,6 +211,7 @@ def _parse_openai_compatible_profile(
         headers=headers,
         replay_reasoning_details=replay_reasoning_details,
         reasoning_replay_turns=reasoning_replay_turns,
+        context_window=context_window,
     )
 
 

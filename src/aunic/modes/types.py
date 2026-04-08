@@ -47,6 +47,7 @@ class NoteModeRunResult:
     completed_all_prompts: bool
     final_file_snapshots: tuple[FileSnapshot, ...]
     stop_reason: LoopStopReason
+    synthesis_loop_result: LoopRunResult | None = None
     synthesis_ran: bool = False
     synthesis_error: str | None = None
     usage_log: UsageLog = field(default_factory=UsageLog)

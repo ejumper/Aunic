@@ -62,6 +62,12 @@ def build_tui_style() -> Style:
             "transcript.border": "ansibrightblack",
             "transcript.assistant": "",
             "transcript.user": "",
+            "transcript.chat.heading": "ansiblue bold italic",
+            "transcript.chat.bold": "bold",
+            "transcript.chat.italic": "italic",
+            "transcript.chat.code": "ansiblue",
+            "transcript.chat.link": "ansiblue underline",
+            "transcript.chat.quote": "ansibrightblack",
             "transcript.tool.name": "ansicyan bold",
             "transcript.tool.content": "",
             "transcript.error": "ansired",
@@ -77,6 +83,9 @@ def build_tui_style() -> Style:
             "transcript.search.count": "ansiblue bold",
             "transcript.search.snippet": "ansibrightblack italic",
             "transcript.fetch.snippet": "ansibrightblack italic",
+            "context.separator.green":  "ansigreen bold",
+            "context.separator.yellow": "ansiyellow bold",
+            "context.separator.red":    "ansired bold",
         }
     )
 
@@ -151,7 +160,12 @@ class RecentChangeProcessor(Processor):
         )
 
 
-def lex_markdown_line(line: str, *, in_code_block: bool = False) -> StyleAndTextTuples:
+def lex_markdown_line(
+    line: str,
+    *,
+    in_code_block: bool = False,
+    hide_emphasis_markers: bool = False,
+) -> StyleAndTextTuples:
     if is_fold_placeholder_line(line):
         return [("class:md.fold", line)]
     if in_code_block or line.strip().startswith("```"):
@@ -161,7 +175,7 @@ def lex_markdown_line(line: str, *, in_code_block: bool = False) -> StyleAndText
     heading_match = _HEADING_RE.match(line)
     if heading_match is not None:
         return [("class:md.heading", line)]
-    return _tokenize_inline_markdown(line)
+    return _tokenize_inline_markdown(line, hide_emphasis_markers=hide_emphasis_markers)
 
 
 def soft_wrap_prefix_for_line(
@@ -182,7 +196,11 @@ def soft_wrap_prefix_for_line(
     return ""
 
 
-def _tokenize_inline_markdown(line: str) -> StyleAndTextTuples:
+def _tokenize_inline_markdown(
+    line: str,
+    *,
+    hide_emphasis_markers: bool = False,
+) -> StyleAndTextTuples:
     fragments: StyleAndTextTuples = []
     position = 0
     for match in _TOKEN_RE.finditer(line):
@@ -195,11 +213,11 @@ def _tokenize_inline_markdown(line: str) -> StyleAndTextTuples:
         elif token.startswith("`"):
             fragments.append(("class:md.code", token))
         elif token.startswith("***") and token.endswith("***"):
-            fragments.append(("class:md.bolditalic", token))
+            fragments.append(("class:md.bolditalic", token[3:-3] if hide_emphasis_markers else token))
         elif token.startswith("**") and token.endswith("**"):
-            fragments.append(("class:md.bold", token))
+            fragments.append(("class:md.bold", token[2:-2] if hide_emphasis_markers else token))
         elif token.startswith("*") and token.endswith("*"):
-            fragments.append(("class:md.italic", token))
+            fragments.append(("class:md.italic", token[1:-1] if hide_emphasis_markers else token))
         else:
             fragments.append(("", token))
         position = end

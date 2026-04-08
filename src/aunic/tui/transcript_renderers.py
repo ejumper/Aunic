@@ -4,13 +4,16 @@ import json
 import textwrap
 from dataclasses import dataclass
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from prompt_toolkit.formatted_text import StyleAndTextTuples
+from prompt_toolkit.formatted_text.utils import fragment_list_width
 from prompt_toolkit.mouse_events import MouseEventType
 
 from aunic.domain import TranscriptRow
 from aunic.research.search import canonicalize_url
 from aunic.transcript.flattening import flatten_tool_result_for_provider
+from aunic.tui.transcript_markdown import render_chat_markdown, rendered_lines_width
 from aunic.tui.types import TranscriptFilter, TranscriptViewState
 
 
@@ -27,9 +30,25 @@ class TranscriptRenderContext:
     set_filter: Callable[[TranscriptFilter], None]
     toggle_sort: Callable[[], None]
     toggle_open: Callable[[], None]
+    toggle_maximize: Callable[[], None]
     open_url: Callable[[str], None]
     copy_text: Callable[[str], None]
     copy_cached_fetch: Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class SearchRowLayout:
+    count_width: int
+    domain_width: int
+    title_width: int
+    query_width: int
+    header_label_width: int
+    result_indent: int
+    count_prefix_separator: str = "|"
+    separator: str = " | "
+    action_separator: str = " |"
+    delete_width: int = 3
+    action_width: int = 3
 
 
 def render_filter_toolbar(
@@ -46,6 +65,8 @@ def render_filter_toolbar(
         fragments.append((style, f"[ {label} ]", _mouse(callback)))
 
     append_button("v", "class:transcript.filter", context.toggle_open)
+    fragments.append(("", " "))
+    append_button("-" if state.maximized else "+", "class:transcript.filter", context.toggle_maximize)
     fragments.append(("", " "))
 
     buttons = (
@@ -81,52 +102,58 @@ def render_chat_message(row: TranscriptRow, context: TranscriptRenderContext) ->
     fragments: StyleAndTextTuples = []
     row_style = _row_base_style(row, context)
     total_width = max(30, context.width - 4)
-    bubble_width = max(12, int(total_width * 0.67) - 2)
-    other_width = max(8, total_width - bubble_width - 1)
-    content_lines = _wrap_text(_content_as_text(row.content), bubble_width)
+    max_bubble_width = max(12, int(total_width * 0.85) - 2)
+    min_bubble_width = max(12, int(total_width * 0.33) - 2)
+    content_lines = render_chat_markdown(_content_as_text(row.content), max_width=max_bubble_width)
+    content_width = rendered_lines_width(content_lines)
+    bubble_width = min(max_bubble_width, max(content_width, 1))
+    if len(content_lines) > 1 or content_width > min_bubble_width:
+        bubble_width = max(bubble_width, min_bubble_width)
     top = f"┌{'─' * bubble_width}┐"
     bottom = f"└{'─' * bubble_width}┘"
-    total_lines = len(content_lines) + 2  # top + content + bottom
-    delete_line = total_lines // 2
+    delete_line = 1
 
     if row.role == "assistant":
         line_idx = 0
         _append_prefixed_line(fragments, row.row_number, top, context, row_style=row_style, show_delete=line_idx == delete_line)
         for line in content_lines:
             line_idx += 1
-            _append_prefixed_line(
+            _append_chat_bubble_content_line(
                 fragments,
                 row.row_number,
-                f"│{line.ljust(bubble_width)}│{' ' * (other_width + 1)}",
+                line,
                 context,
                 row_style=row_style,
-                content_style="class:transcript.assistant",
+                bubble_width=bubble_width,
                 show_delete=line_idx == delete_line,
+                content_base_style="class:transcript.assistant",
             )
         line_idx += 1
         _append_prefixed_line(
             fragments,
             row.row_number,
-            f"{bottom}{' ' * (other_width + 1)}",
+            bottom,
             context,
             row_style=row_style,
             show_delete=line_idx == delete_line,
         )
         return fragments
 
-    left_pad = " " * (other_width + 1)
+    left_pad = " " * max(0, total_width - bubble_width - 1)
     line_idx = 0
     _append_prefixed_line(fragments, row.row_number, f"{left_pad}{top}", context, row_style=row_style, show_delete=line_idx == delete_line)
     for line in content_lines:
         line_idx += 1
-        _append_prefixed_line(
+        _append_chat_bubble_content_line(
             fragments,
             row.row_number,
-            f"{left_pad}│{line.ljust(bubble_width)}│",
+            line,
             context,
             row_style=row_style,
-            content_style="class:transcript.user",
+            bubble_width=bubble_width,
             show_delete=line_idx == delete_line,
+            content_base_style="class:transcript.user",
+            left_pad=left_pad,
         )
     line_idx += 1
     _append_prefixed_line(
@@ -173,26 +200,17 @@ def render_bash_result(row: TranscriptRow, context: TranscriptRenderContext) -> 
     toggle = "[^]" if row.row_number in context.expanded_rows else "[v]"
     expanded = row.row_number in context.expanded_rows
 
-    # Pre-count total lines to place delete button at the middle.
-    total_lines = 1  # header
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
     if expanded:
         stdout = str(payload.get("stdout", ""))
         stderr = str(payload.get("stderr", ""))
         stdout_lines = _wrap_text(stdout, max(20, context.width - 6), max_lines=25)
-        total_lines += len(stdout_lines)
         if stderr.strip():
             stderr_lines = _wrap_text(stderr, max(20, context.width - 6), max_lines=25)
-            total_lines += len(stderr_lines)
-        total_lines += 1  # exit_code line
-    delete_line = total_lines // 2
 
-    # Header line (line 0)
-    if delete_line == 0:
-        _append_delete(fragments, row.row_number, context, row_style=row_style)
-    else:
-        _append_delete_padding(fragments, row_style=row_style)
+    # Header line (line 0) always shows the delete button.
+    _append_delete(fragments, row.row_number, context, row_style=row_style)
     fragments.append((_combine_styles(row_style, "class:transcript.tool.name"), "bash"))
     fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
     fragments.append((_combine_styles(row_style, "class:transcript.bash.command"), command_preview))
@@ -204,22 +222,17 @@ def render_bash_result(row: TranscriptRow, context: TranscriptRenderContext) -> 
         return fragments
 
     exit_code = payload.get("exit_code")
-    line_idx = 1
     for line in stdout_lines:
-        _append_prefixed_line(fragments, row.row_number, f"    {line}", context, row_style=row_style, show_delete=line_idx == delete_line)
-        line_idx += 1
-    if stderr_lines:
-        for line in stderr_lines:
-            _append_prefixed_line(
-                fragments,
-                row.row_number,
-                f"    {line}",
-                context,
-                row_style=row_style,
-                content_style="class:transcript.error",
-                show_delete=line_idx == delete_line,
-            )
-            line_idx += 1
+        _append_prefixed_line(fragments, row.row_number, f"    {line}", context, row_style=row_style)
+    for line in stderr_lines:
+        _append_prefixed_line(
+            fragments,
+            row.row_number,
+            f"    {line}",
+            context,
+            row_style=row_style,
+            content_style="class:transcript.error",
+        )
     exit_style = "class:transcript.error" if row.type == "tool_error" or exit_code not in {0, None} else "class:transcript.tool.content"
     _append_prefixed_line(
         fragments,
@@ -228,7 +241,6 @@ def render_bash_result(row: TranscriptRow, context: TranscriptRenderContext) -> 
         context,
         row_style=row_style,
         content_style=exit_style,
-        show_delete=line_idx == delete_line,
     )
     return fragments
 
@@ -242,47 +254,82 @@ def render_search_result(row: TranscriptRow, context: TranscriptRenderContext) -
     toggle = "[^]" if row.row_number in context.expanded_rows else "[v]"
     expanded = row.row_number in context.expanded_rows
 
+    layout = _search_row_layout(width=context.width, result_count=count)
     valid_results = [r for r in results if isinstance(r, dict)] if expanded else []
 
-    # Header line — always shows row-level delete (individual results have their own)
     _append_delete(fragments, row.row_number, context, row_style=row_style)
-    fragments.append((_combine_styles(row_style, "class:transcript.search.count"), str(count)))
-    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), textwrap.shorten(query, width=max(20, context.width - 18), placeholder="...")))
-    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-    fragments.append((_combine_styles(row_style, "class:transcript.toggle"), toggle, _mouse(lambda: context.toggle_expand(row.row_number))))
+    fragments.append(
+        (
+            _combine_styles(row_style, "class:transcript.search.count"),
+            "Search".ljust(layout.header_label_width),
+        )
+    )
+    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.separator))
+    fragments.append(
+        (
+            _combine_styles(row_style, "class:transcript.tool.content"),
+            _fit_cell(query, layout.query_width),
+        )
+    )
+    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.action_separator))
+    fragments.append(
+        (
+            _combine_styles(row_style, "class:transcript.toggle"),
+            toggle,
+            _mouse(lambda: context.toggle_expand(row.row_number)),
+        )
+    )
     fragments.append(("", "\n"))
 
     if not expanded:
         return fragments
 
-    line_idx = 1
     for index, result in enumerate(valid_results, start=1):
         result_index = index - 1
         title = str(result.get("title", "(no title)"))
-        snippet = textwrap.shorten(str(result.get("snippet", "")), width=max(12, context.width // 3), placeholder="...")
         url = str(result.get("url", ""))
+        domain = _normalized_host(url)
         title_style = "class:transcript.link.cached" if _is_cached_url(url, context) else "class:transcript.tool.content"
         title_handler = _mouse(lambda url=url: context.copy_cached_fetch(url)) if _is_cached_url(url, context) else None
 
-        fragments.append((
-            _combine_styles(row_style, "class:transcript.delete"),
-            " X ",
-            _mouse(lambda ri=result_index: context.delete_search_result(row.row_number, ri)),
-        ))
-        fragments.append((_combine_styles(row_style, "class:transcript.search.count"), f"{index}".rjust(2)))
-        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-        title_text = textwrap.shorten(title, width=max(12, context.width // 3), placeholder="...")
+        if layout.result_indent > 0:
+            fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " " * layout.result_indent))
+        fragments.append(
+            (
+                _combine_styles(row_style, "class:transcript.delete"),
+                " X ",
+                _mouse(lambda ri=result_index: context.delete_search_result(row.row_number, ri)),
+            )
+        )
+        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.count_prefix_separator))
+        fragments.append(
+            (
+                _combine_styles(row_style, "class:transcript.search.count"),
+                _format_count_cell(str(index), layout.count_width),
+            )
+        )
+        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.separator))
+        fragments.append(
+            (
+                _combine_styles(row_style, "class:transcript.tool.content"),
+                _fit_cell(domain, layout.domain_width),
+            )
+        )
+        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.separator))
+        title_text = _fit_cell(title, layout.title_width)
         if title_handler is not None:
             fragments.append((_combine_styles(row_style, title_style), title_text, title_handler))
         else:
             fragments.append((_combine_styles(row_style, title_style), title_text))
-        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-        fragments.append((_combine_styles(row_style, "class:transcript.search.snippet"), snippet, _mouse(lambda text=str(result.get("snippet", "")): context.copy_text(text))))
-        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-        fragments.append((_combine_styles(row_style, "class:transcript.link"), "↗", _mouse(lambda url=url: context.open_url(url))))
+        fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.action_separator))
+        fragments.append(
+            (
+                _combine_styles(row_style, "class:transcript.link"),
+                "↗",
+                _mouse(lambda url=url: context.open_url(url)),
+            )
+        )
         fragments.append(("", "\n"))
-        line_idx += 1
     return fragments
 
 
@@ -291,19 +338,36 @@ def render_fetch_result(row: TranscriptRow, context: TranscriptRenderContext) ->
     row_style = _row_base_style(row, context)
     payload = row.content if isinstance(row.content, dict) else {}
     title = str(payload.get("title", "(no title)"))
-    snippet = textwrap.shorten(str(payload.get("snippet", "")), width=max(12, context.width // 2), placeholder="...")
     url = str(payload.get("url", ""))
     cached = _is_cached_url(url, context)
+    domain = _normalized_host(url)
+    layout = _search_row_layout(width=context.width, result_count=1)
 
-    _append_delete(fragments, row.row_number, context, row_style=row_style)
-    fragments.append((
-        _combine_styles(row_style, "class:transcript.link.cached" if cached else "class:transcript.tool.content"),
-        textwrap.shorten(title, width=max(12, context.width // 3), placeholder="..."),
-        _mouse(lambda url=url: context.copy_cached_fetch(url)) if cached else None,
-    ))
-    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-    fragments.append((_combine_styles(row_style, "class:transcript.fetch.snippet"), snippet, _mouse(lambda text=str(payload.get("snippet", "")): context.copy_text(text))))
-    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
+    fragments.append(
+        (
+            _combine_styles(row_style, "class:transcript.delete"),
+            " X  Fetch",
+            _mouse(lambda: context.delete_row(row.row_number)),
+        )
+    )
+    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.separator))
+    fragments.append(
+        (
+            _combine_styles(row_style, "class:transcript.tool.content"),
+            _fit_cell(domain, layout.domain_width),
+        )
+    )
+    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.separator))
+    title_style = _combine_styles(
+        row_style,
+        "class:transcript.link.cached" if cached else "class:transcript.tool.content",
+    )
+    title_text = _fit_cell(title, layout.title_width)
+    if cached:
+        fragments.append((title_style, title_text, _mouse(lambda url=url: context.copy_cached_fetch(url))))
+    else:
+        fragments.append((title_style, title_text))
+    fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.action_separator))
     fragments.append((_combine_styles(row_style, "class:transcript.link"), "↗", _mouse(lambda url=url: context.open_url(url))))
     fragments.append(("", "\n"))
     return fragments
@@ -369,6 +433,35 @@ def _append_prefixed_line(
     fragments.append(("", "\n"))
 
 
+def _append_chat_bubble_content_line(
+    fragments: StyleAndTextTuples,
+    row_number: int,
+    line_fragments: StyleAndTextTuples,
+    context: TranscriptRenderContext,
+    *,
+    row_style: str,
+    bubble_width: int,
+    show_delete: bool,
+    content_base_style: str,
+    left_pad: str = "",
+) -> None:
+    if show_delete:
+        _append_delete(fragments, row_number, context, row_style=row_style)
+    else:
+        _append_delete_padding(fragments, row_style=row_style)
+
+    if left_pad:
+        fragments.append((_combine_styles(row_style, content_base_style), left_pad))
+    fragments.append((_combine_styles(row_style, content_base_style), "│"))
+    for style, text in line_fragments:
+        fragments.append((_combine_styles(row_style, content_base_style, style), text))
+    pad_width = max(0, bubble_width - fragment_list_width(line_fragments))
+    if pad_width:
+        fragments.append((_combine_styles(row_style, content_base_style), " " * pad_width))
+    fragments.append((_combine_styles(row_style, content_base_style), "│"))
+    fragments.append(("", "\n"))
+
+
 def _content_as_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -391,6 +484,55 @@ def _wrap_text(text: str, width: int, *, max_lines: int | None = None) -> list[s
         if wrapped:
             wrapped[-1] = textwrap.shorten(f"{wrapped[-1]} [... {extra} more lines]", width=width, placeholder="...")
     return wrapped or [""]
+
+
+def _search_row_layout(*, width: int, result_count: int) -> SearchRowLayout:
+    count_width = max(2, len(str(max(result_count, 1))))
+    header_label_width = max(len("Search"), len("|") + count_width)
+    result_indent = header_label_width - (len("|") + count_width)
+    effective_width = min(width, 110)
+    fixed_width = 15 + count_width + result_indent
+    domain_width, title_width = _split_domain_title_widths(max(2, effective_width - fixed_width))
+    query_width = domain_width + len(" | ") + title_width
+    return SearchRowLayout(
+        count_width=count_width,
+        domain_width=domain_width,
+        title_width=title_width,
+        query_width=query_width,
+        header_label_width=header_label_width,
+        result_indent=result_indent,
+    )
+
+
+def _split_domain_title_widths(total_width: int) -> tuple[int, int]:
+    domain_width = max(1, int(round(total_width * 0.30)))
+    title_width = max(1, total_width - domain_width)
+    if domain_width + title_width > total_width:
+        title_width = max(1, total_width - domain_width)
+    return domain_width, title_width
+
+
+def _fit_cell(text: str, width: int) -> str:
+    normalized = " ".join(str(text).split())
+    if width <= 0:
+        return ""
+    if len(normalized) <= width:
+        return normalized.ljust(width)
+    if width == 1:
+        return "…"
+    return f"{normalized[: width - 1]}…"
+
+
+def _format_count_cell(text: str, width: int) -> str:
+    return str(text).rjust(width)
+
+
+def _normalized_host(url: str) -> str:
+    if not url:
+        return "(unknown)"
+    parsed = urlparse(url)
+    host = parsed.hostname or parsed.netloc
+    return host or "(unknown)"
 
 
 def _row_base_style(row: TranscriptRow, context: TranscriptRenderContext) -> str:

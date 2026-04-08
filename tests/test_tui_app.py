@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.data_structures import Point
 from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from prompt_toolkit.output import DummyOutput
 
@@ -12,7 +13,9 @@ from aunic.loop.types import LoopMetrics, LoopRunResult
 from aunic.modes.types import NoteModePromptResult, NoteModeRunResult
 from aunic.progress import ProgressEvent
 from aunic.tui.app import AunicTuiApp
+from aunic.tui.note_tables import NoteTablePreviewBufferControl
 from aunic.tui.types import PermissionPromptState
+import aunic.tui.transcript_view as transcript_view_module
 
 
 class _FakeNoteRunner:
@@ -201,6 +204,129 @@ async def test_tui_arrow_keys_move_through_wrapped_rows_in_editor(tmp_path: Path
         await task
 
 
+@pytest.mark.asyncio
+async def test_tui_home_end_follow_wrapped_segments_in_editor(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "This is a very long line that should wrap across multiple visual rows in the editor. " * 6,
+        encoding="utf-8",
+    )
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.application.layout.focus(app.editor)
+        app.application.invalidate()
+        await asyncio.sleep(0.1)
+
+        render_info = app.editor.window.render_info
+        assert render_info is not None
+        assert render_info.wrap_lines is True
+        segment_starts = render_info.visible_line_to_row_col
+        assert 1 in segment_starts
+        assert 2 in segment_starts
+        current_row, current_start = segment_starts[1]
+        next_row, next_start = segment_starts[2]
+        assert current_row == 0
+        assert next_row == current_row
+
+        processed_line = app.editor.control._last_get_processed_line(current_row)
+        target_display_col = min(current_start + 5, next_start - 1)
+        target_source_col = processed_line.display_to_source(target_display_col)
+        app.editor.buffer.cursor_position = app.editor.buffer.document.translate_row_col_to_index(
+            current_row, target_source_col
+        )
+        app.application.invalidate()
+        await asyncio.sleep(0.1)
+
+        pipe.send_bytes(b"\x1b[H")
+        await asyncio.sleep(0.1)
+        expected_home = app.editor.buffer.document.translate_row_col_to_index(
+            current_row, processed_line.display_to_source(current_start)
+        )
+        assert app.editor.buffer.cursor_position == expected_home
+
+        pipe.send_bytes(b"\x1b[F")
+        await asyncio.sleep(0.1)
+        expected_end = app.editor.buffer.document.translate_row_col_to_index(
+            current_row, processed_line.display_to_source(next_start)
+        )
+        assert app.editor.buffer.cursor_position == expected_end
+        assert expected_end < len(app.editor.buffer.text)
+
+        app.application.exit(result=0)
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sequence", [b"\x1b\x7f", b"\x1b[127;5u"])
+async def test_tui_ctrl_backspace_variants_delete_previous_word_in_prompt(
+    tmp_path: Path, sequence: bytes
+) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.application.layout.focus(app.prompt_field)
+        pipe.send_text("hello world")
+        await asyncio.sleep(0.05)
+        pipe.send_bytes(sequence)
+        await asyncio.sleep(0.05)
+
+        assert app.prompt_field.text == "hello "
+
+        app.application.exit(result=0)
+        await task
+
+
+@pytest.mark.asyncio
+async def test_tui_ctrl_backspace_deletes_previous_word_in_editor(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.application.layout.focus(app.editor)
+        app.editor.buffer.cursor_position = len(app.editor.buffer.text)
+        pipe.send_bytes(b"\x1b[127;5u")
+        await asyncio.sleep(0.05)
+
+        assert app.editor.buffer.text == "alpha "
+
+        app.application.exit(result=0)
+        await task
+
+
 def test_tui_title_click_opens_file_menu(tmp_path: Path) -> None:
     note = tmp_path / "note.md"
     note.write_text("body\n", encoding="utf-8")
@@ -297,6 +423,265 @@ async def test_tui_focus_toggle_cycles_through_transcript_when_present(tmp_path:
 
     app._toggle_focus_between_editor_and_prompt()
     assert app.application.layout.has_focus(app.prompt_field)
+
+
+@pytest.mark.asyncio
+async def test_transcript_toolbar_renders_separately_from_scroll_body(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "body\n\n"
+        "---\n"
+        "# Transcript\n"
+        "| # | role      | type        | tool_name  | tool_id  | content\n"
+        "|---|-----------|-------------|------------|----------|-------------------------------\n"
+        '| 1 | user      | message     |            |          | "Hello"\n',
+        encoding="utf-8",
+    )
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+
+    toolbar_text = "".join(fragment[1] for fragment in app._transcript_view._render_toolbar())
+    body_text = "".join(fragment[1] for fragment in app._transcript_view._render_body())
+
+    assert "[ Chat ]" in toolbar_text
+    assert "[ Tools ]" in toolbar_text
+    assert "[ Search ]" in toolbar_text
+    assert "[ Descending ]" in toolbar_text
+    assert "[ Chat ]" not in body_text
+    assert "[ Tools ]" not in body_text
+    assert "Hello" in body_text
+
+
+@pytest.mark.asyncio
+async def test_transcript_maximize_expands_height_and_persists_across_open_toggle(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "body\n\n"
+        "---\n"
+        "# Transcript\n"
+        "| # | role      | type        | tool_name  | tool_id  | content\n"
+        "|---|-----------|-------------|------------|----------|-------------------------------\n"
+        '| 1 | user      | message     |            |          | "Hello"\n',
+        encoding="utf-8",
+    )
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+
+    app._refresh_transcript_dimensions()
+    normal_height = app._transcript_view.window.height
+    normal_preferred = normal_height.preferred if hasattr(normal_height, "preferred") else normal_height
+
+    app.application.layout.focus(app.editor)
+    app.controller.toggle_transcript_maximized()
+    app._refresh_transcript_dimensions()
+    expanded_height = app._transcript_view.window.height
+    expanded_preferred = expanded_height.preferred if hasattr(expanded_height, "preferred") else expanded_height
+
+    assert app.controller.transcript_view_state.maximized is True
+    assert app._transcript_fills_editor_area() is True
+    assert app.application.layout.has_focus(app._transcript_view.window)
+    assert expanded_preferred > normal_preferred
+    assert "[ - ]" in "".join(fragment[1] for fragment in app._transcript_view._render_toolbar())
+
+    app.controller.toggle_transcript_open()
+    assert app.controller.state.transcript_open is False
+    assert app.controller.transcript_view_state.maximized is True
+    assert app._transcript_fills_editor_area() is False
+
+    app.controller.toggle_transcript_open()
+    assert app.controller.state.transcript_open is True
+    assert app.controller.transcript_view_state.maximized is True
+    assert app._transcript_fills_editor_area() is True
+
+
+def test_tui_registers_pre_run_layout_refresh() -> None:
+    note = Path("/tmp/aunic-pre-run-layout-refresh.md")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    assert any(
+        getattr(callback, "__self__", None) is app
+        and getattr(callback, "__func__", None) is app._invalidate.__func__
+        for callback in app.application.pre_run_callables
+    )
+
+
+@pytest.mark.asyncio
+async def test_tui_editor_uses_note_table_preview_buffer_control(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("| A | B |\n| --- | --- |\n| 1 | 2 |\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+
+    assert isinstance(app.editor.control, NoteTablePreviewBufferControl)
+
+
+@pytest.mark.asyncio
+async def test_tui_editor_renders_boxed_table_preview_when_cursor_is_outside_table(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "# Heading\n\n"
+        "| Protocol | Time |\n"
+        "| --- | --- |\n"
+        "| **STP** | *30-50 seconds* |\n",
+        encoding="utf-8",
+    )
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+
+    app.editor.buffer.cursor_position = 0
+    content = app.editor.control.create_content(width=80, height=40)
+    rendered = "\n".join(
+        "".join(fragment[1] for fragment in content.get_line(i)).rstrip()
+        for i in range(content.line_count)
+    )
+
+    assert "┌" in rendered
+    assert "┬" in rendered
+    assert "│ Protocol " in rendered
+    assert "STP" in rendered
+    assert "30-50 seconds" in rendered
+    assert "**STP**" not in rendered
+    assert "*30-50 seconds*" not in rendered
+    assert content.line_count > app.editor.buffer.document.line_count
+
+
+@pytest.mark.asyncio
+async def test_tui_editor_shows_raw_table_when_cursor_enters_table(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "# Heading\n\n"
+        "| Protocol | Time |\n"
+        "| --- | --- |\n"
+        "| STP | 30-50 seconds |\n",
+        encoding="utf-8",
+    )
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+
+    table_row_index = 2
+    app.editor.buffer.cursor_position = app.editor.buffer.document.translate_row_col_to_index(table_row_index, 0)
+    content = app.editor.control.create_content(width=80, height=40)
+    rendered = "\n".join(
+        "".join(fragment[1] for fragment in content.get_line(i)).rstrip()
+        for i in range(content.line_count)
+    )
+
+    assert "| Protocol | Time |" in rendered
+    assert "| --- | --- |" in rendered
+    assert "┌" not in rendered
+    assert content.line_count == app.editor.buffer.document.line_count
+
+
+@pytest.mark.asyncio
+async def test_transcript_blank_area_click_is_non_interactive(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "body\n\n"
+        "---\n"
+        "# Transcript\n"
+        "| # | role      | type        | tool_name  | tool_id  | content\n"
+        "|---|-----------|-------------|------------|----------|-------------------------------\n"
+        '| 1 | user      | message     |            |          | "Hello"\n',
+        encoding="utf-8",
+    )
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+    await app.controller.initialize()
+    app._transcript_view._render_body()
+
+    class _Layout:
+        def walk_through_modal_area(self):
+            return [app._transcript_view.window]
+
+    class _App:
+        layout = _Layout()
+
+    original_get_app = transcript_view_module.get_app
+    transcript_view_module.get_app = lambda: _App()
+    try:
+        handler = app._transcript_view.window._build_mouse_handler(
+            rowcol_to_yx={(0, 0): (0, 0)},
+            visible_line_to_row_col={0: (0, 0)},
+            write_position=type("WP", (), {"ypos": 0})(),
+        )
+
+        blank_click = MouseEvent(
+            position=Point(x=0, y=50),
+            event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT,
+            modifiers=(),
+        )
+
+        assert app._transcript_view._is_blank_body_mouse_event(blank_click) is True
+        assert handler(blank_click) is None
+    finally:
+        transcript_view_module.get_app = original_get_app
+
+
+def test_transcript_view_uses_tracked_body_width_for_render_context(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    class _App:
+        def invalidate(self):
+            return None
+
+    original_get_app = transcript_view_module.get_app
+    transcript_view_module.get_app = lambda: _App()
+    try:
+        app._transcript_view._on_body_width_changed(37)
+    finally:
+        transcript_view_module.get_app = original_get_app
+
+    assert app._transcript_view._build_render_context().width == 37
 
 
 def test_tui_indent_and_unindent_prompt_field(tmp_path: Path) -> None:

@@ -1,197 +1,209 @@
-# Plan: Web Fetch Modal Improvements
+# Plan: Context Window Usage Indicator
 
 ## Context
 
-The `@web` command's chunk selection modal (`web_mode == "chunks"`) has several UX issues:
-- Scroll doesn't follow the cursor when navigating past the visible area
-- Chunk headings show the full breadcrumb hierarchy ("Page > Section > Subsection") when only the leaf heading is useful
-- Each chunk only shows one line of preview text — not enough to judge relevance
-- The selected-row highlight only applies to characters, leaving a ragged background
-- There's no way to insert the entire page without selecting individual chunks
+The user wants a live visual indicator of how full the LLM context window is. The chosen display location is the horizontal separator line inside the prompt editor box (the `─` line between the text input area and the model/mode control buttons). Characters from left to right are rendered in blue in proportion to how full the context window is. A `/context` slash command outputs the exact token counts to the indicator area.
+
+---
 
 ## Files to Modify
 
 | File | Purpose |
 |------|---------|
-| `src/aunic/research/types.py` | Add `full_markdown` field to `FetchPacket` |
-| `src/aunic/research/fetch.py` | Populate `full_markdown` in `fetch_for_user_selection` |
-| `src/aunic/tui/web_search_view.py` | All rendering changes + scroll |
-| `src/aunic/tui/controller.py` | Cursor range, insert logic, height calc |
+| `src/aunic/tui/controller.py` | Context state tracking, fill fraction property, `/context` command |
+| `src/aunic/tui/app.py` | Replace static separator `Window` with dynamic `_ContextSeparatorWindow` |
+| `src/aunic/tui/rendering.py` | Add `context.separator` style class |
+| `src/aunic/providers/llama_cpp.py` | Extract `model_context_window` from OpenAI-compatible response payload |
 
 ---
 
 ## Changes
 
-### 1. Store full markdown in `FetchPacket` (types.py + fetch.py)
+### 1. Context state in `controller.py`
 
-**`research/types.py`** — append to `FetchPacket` dataclass:
+**In `__init__`**, add after `self._permission_future`:
 ```python
-full_markdown: str = ""
-```
-Must come after `chunks` (existing required fields) so the default doesn't cause a dataclass ordering error.
-
-**`research/fetch.py`** — in `fetch_for_user_selection`, update the `FetchPacket(...)` constructor call (line ~119) to pass:
-```python
-full_markdown=page.markdown,
-```
-`page` is already the `PageFetchResult` computed on line ~99 — no extra fetch needed.
-
----
-
-### 2. Scroll following (web_search_view.py)
-
-Add `ScrollbarMargin` to the chunks window and implement `_ensure_chunk_visible()`.
-
-**In `__init__`**, update Window construction:
-```python
-from prompt_toolkit.layout.margins import ScrollbarMargin
-self.window = Window(
-    FormattedTextControl(text=self._render, focusable=True, show_cursor=False),
-    height=Dimension(preferred=10, max=20, min=3),
-    dont_extend_height=True,
-    right_margins=[ScrollbarMargin(display_arrows=False)],
-)
+self._ctx_tokens_used: int | None = None       # input_tokens from last provider_response
+self._ctx_window_size: int | None = None        # context window size (API or hardcoded)
+self._ctx_last_file_len: int | None = None      # len(self._full_text) at last API call
 ```
 
-**Add `_ensure_chunk_visible()`** — line heights are fixed so no dict tracking needed:
+**Add module-level lookup dict and helper** (near `_TOOL_VERBS`):
 ```python
-_FULL_PAGE_LINES = 1
-_CHUNK_LINES = 4  # 1 heading + 3 content
+_KNOWN_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus":    200_000,
+    "claude-sonnet":  200_000,
+    "claude-haiku":   200_000,
+    "gpt-4o":         128_000,
+    "gpt-4-turbo":    128_000,
+    "o1":             200_000,
+    "o3":             200_000,
+}
 
-def _ensure_chunk_visible(self) -> None:
-    cursor = self._controller._web_chunk_cursor
-    if cursor == -1:
-        start_line, end_line = 0, _FULL_PAGE_LINES
-    else:
-        start_line = _FULL_PAGE_LINES + cursor * _CHUNK_LINES
-        end_line = start_line + _CHUNK_LINES
-    render_info = self.window.render_info
-    visible_height = render_info.window_height if render_info is not None else 10
-    scroll_top = self.window.vertical_scroll
-    scroll_bottom = scroll_top + max(1, visible_height - 1)
-    if start_line < scroll_top:
-        self.window.vertical_scroll = max(0, start_line)
-    elif end_line > scroll_bottom:
-        self.window.vertical_scroll = max(0, end_line - visible_height)
+def _known_context_window(model_option: ModelOption) -> int | None:
+    name = model_option.model.lower()
+    for prefix, size in _KNOWN_CONTEXT_WINDOWS.items():
+        if prefix in name:
+            return size
+    return None
 ```
 
-Call `self._ensure_chunk_visible()` at the end of `_render_chunks()`.
-
----
-
-### 3. Updated `_render_chunks()` (web_search_view.py)
-
-Replace the entire method body. Key changes vs. current code:
-
-**a) "Fetch full page" row at top** (cursor == -1 selects it):
+**Add two properties** on `TuiController`:
 ```python
-full_page_focused = (cursor == -1)
-fp_style = "class:control.active" if full_page_focused else ""
-fp_line = " [↵] Fetch full page"
-if full_page_focused:
-    fp_line = fp_line.ljust(w)
-fragments.append((fp_style, f"{fp_line}\n"))
+@property
+def context_fill_fraction(self) -> float | None:
+    """Returns 0.0–1.0, or None if unknown."""
+    used = self._effective_ctx_tokens()
+    window = self._ctx_window_size or _known_context_window(self.state.selected_model)
+    if used is None or window is None or window == 0:
+        return None
+    return min(1.0, used / window)
+
+@property
+def context_is_estimate(self) -> bool:
+    if self._ctx_tokens_used is None or self._ctx_last_file_len is None:
+        return False
+    return len(self._full_text) != self._ctx_last_file_len
+
+def _effective_ctx_tokens(self) -> int | None:
+    if self._ctx_tokens_used is None:
+        return None
+    if self._ctx_last_file_len is None:
+        return self._ctx_tokens_used
+    delta = len(self._full_text) - self._ctx_last_file_len
+    return max(0, self._ctx_tokens_used + delta // 4)
 ```
 
-**b) Heading = last element only**:
+**Update `handle_progress_event`** — in the `provider_response` branch, after setting the verb status:
 ```python
-heading = chunk.heading_path[-1] if chunk.heading_path else "(no heading)"
-heading = textwrap.shorten(heading, width=w - 5, placeholder="...")
+elif loop_kind == "provider_response":
+    usage = event.details.get("usage") or {}
+    input_tokens = usage.get("input_tokens")
+    model_context_window = usage.get("model_context_window")
+    if input_tokens is not None:
+        self._ctx_tokens_used = input_tokens
+        self._ctx_last_file_len = len(self._full_text)
+    if model_context_window is not None:
+        self._ctx_window_size = model_context_window
+    elif self._ctx_window_size is None:
+        self._ctx_window_size = _known_context_window(self.state.selected_model)
+    # existing verb display logic follows unchanged...
 ```
 
-**c) Up to 3 lines of preview** (wrapped, indented 4 spaces):
+**Add `/context` interception in `send_prompt`** — insert before the generic `"/"` check (currently at line ~419):
 ```python
-text = chunk.text.strip()
-preview_lines = textwrap.wrap(text, width=w - 4)[:3] or ["(empty)"]
+if stripped == "/context":
+    self._handle_context_command()
+    self._sync_prompt_text("")
+    self._invalidate()
+    return
 ```
 
-**d) Full-width background padding for focused row** — pad the last character of each line before `\n`:
+**Add `_handle_context_command` method**:
 ```python
-# Heading line
-heading_content = f" {checkbox} {heading}"
-if is_focused:
-    heading_content = heading_content.ljust(w)
-# Preview lines
-for pline in preview_lines:
-    ptext = f"    {pline}"
-    if is_focused:
-        ptext = ptext.ljust(w)
-    fragments.append((row_style, f"{ptext}\n"))
-```
-
-For the heading line, the checkbox and heading are separate fragments — so the padding goes on the last fragment before `\n`. Compute: `used = 1 + len(checkbox) + 1 + len(heading)` and append `" " * max(0, w - used)` before `\n`.
-
----
-
-### 4. Controller updates (controller.py)
-
-**`web_move_cursor`** — extend range to include -1:
-```python
-elif self.state.web_mode == "chunks" and self._web_packets:
-    n = len(self._web_packets[0].chunks)
-    if n:
-        self._web_chunk_cursor = max(-1, min(n - 1, self._web_chunk_cursor + delta))
-```
-
-**`send_prompt` validation** (around line 825) — allow insert when on full page row:
-```python
-elif self.state.web_mode == "chunks":
-    if self._web_chunk_cursor == -1 or self._web_chunk_selected:
-        self._run_task = asyncio.create_task(self._insert_web_chunks())
-    else:
-        self._set_error("Select chunks with [Space] or navigate to 'Fetch full page'.")
-        self._invalidate()
+def _handle_context_command(self) -> None:
+    used = self._effective_ctx_tokens()
+    window = self._ctx_window_size or _known_context_window(self.state.selected_model)
+    if used is None or window is None:
+        self._set_status("Context window: unknown (run the model first)")
         return
+    prefix = "~" if self.context_is_estimate else ""
+    self._set_status(f"Context window: {prefix}{used:,}/{window:,}")
 ```
 
-**`_insert_web_chunks`** — handle full page branch:
+---
+
+### 2. Extract `model_context_window` in `llama_cpp.py`
+
+In `_usage_from_payload` (line ~466), add to the `Usage(...)` constructor:
 ```python
-async def _insert_web_chunks(self) -> None:
-    packet = self._web_packets[0]
-    if self._web_chunk_cursor == -1:
-        content_block = f"# {packet.title}\n\n{packet.full_markdown}"
-        label = "full page"
-    else:
-        selected_texts = [packet.chunks[i].text for i in sorted(self._web_chunk_selected)]
-        content_block = f"# {packet.title}\n\n" + "\n\n".join(selected_texts)
-        label = f"{len(selected_texts)} chunk(s)"
-    updated_note = _append_block_to_note_content(self._note_content_text, content_block)
-    updated = join_note_and_transcript(updated_note, self._transcript_text)
-    if not await self._write_active_file_text(updated):
-        return
-    self._set_status(f"Inserted {label} from \"{packet.title[:40]}\".")
-    self._web_cancel(status_message=None)
+model_context_window=(
+    _coerce_int(usage.get("model_context_window"))
+    or _coerce_int(usage.get("context_window"))
+    or _coerce_int(usage.get("context_length"))
+),
+```
+These cover OpenRouter and other providers that may include a non-standard context window field.
+
+---
+
+### 3. Add style in `rendering.py`
+
+In `build_tui_style()`, add one entry:
+```python
+"context.separator": "ansiblue",
 ```
 
-**`web_view_preferred_height`** — update for new per-chunk line count:
+---
+
+### 4. Dynamic separator in `app.py`
+
+**Replace** the static `Window(height=1, char="─")` inside `prompt_box` (line 194):
 ```python
-if self.state.web_mode == "chunks" and self._web_packets:
-    return 1 + len(self._web_packets[0].chunks) * 4  # 1 full-page row + 4 lines/chunk
+# before:
+Window(height=1, char="─"),
+# after:
+_ContextSeparatorWindow(self.controller),
 ```
 
-**`web_space_pressed`** — make Space a no-op when on full page row:
+**Add** the `_ContextSeparatorWindow` class (at module level, near `ModelPickerView`):
 ```python
-elif self.state.web_mode == "chunks":
-    i = self._web_chunk_cursor
-    if i == -1:
-        return  # no toggle for full-page option
-    if i in self._web_chunk_selected:
-        self._web_chunk_selected.discard(i)
-    else:
-        self._web_chunk_selected.add(i)
+class _ContextSeparatorWindow(Window):
+    """Separator that fills left-to-right in blue proportional to context window fill."""
+
+    def __init__(self, controller: TuiController) -> None:
+        self._controller = controller
+        self._width = 1
+        super().__init__(
+            FormattedTextControl(text=self._render, focusable=False, show_cursor=False),
+            height=1,
+        )
+
+    def _render(self) -> StyleAndTextTuples:
+        w = max(1, self._width)
+        fill = self._controller.context_fill_fraction
+        if fill is None:
+            return [("", "─" * w)]
+        filled = max(0, min(w, round(fill * w)))
+        fragments: StyleAndTextTuples = []
+        if filled > 0:
+            fragments.append(("class:context.separator", "─" * filled))
+        if filled < w:
+            fragments.append(("", "─" * (w - filled)))
+        return fragments
+
+    def write_to_screen(self, screen, mouse_handlers, write_position,
+                        parent_style, erase_bg, z_index) -> None:
+        self._width = write_position.width
+        super().write_to_screen(screen, mouse_handlers, write_position,
+                                parent_style, erase_bg, z_index)
 ```
+
+**Add imports** at top of `app.py` if not already present:
+- `StyleAndTextTuples` from `prompt_toolkit.formatted_text`
+
+---
+
+## Behaviour Summary
+
+| Situation | Separator | `/context` output |
+|---|---|---|
+| No run yet | All `─` (no colour) | "Context window: unknown (run the model first)" |
+| After a run, file unchanged | Fraction blue, fraction plain | "Context window: 12,450/200,000" |
+| After a run, file edited | Fraction blue (estimated) | "Context window: ~13,200/200,000" |
+| Context window unknown (anon OpenRouter model) | No colour until API returns it | Same |
+
+The fill fraction updates after each `provider_response` event during a run (so it refreshes turn-by-turn in a multi-turn run). Between runs, the estimate drifts by ±1 token per 4 characters changed.
 
 ---
 
 ## Verification
 
-1. Run `python -c "from aunic.tui.web_search_view import WebSearchView; print('OK')"` to check imports
-2. In the app, trigger `@web` → search for something → select a result → enter chunk mode:
-   - Confirm "Fetch full page" appears as the top row
-   - Navigate up from row 0 to reach it; confirm it gets highlighted with full-width black background
-   - Confirm navigating down past the visible area scrolls the list
-   - Confirm headings show only the leaf name (not full breadcrumb)
-   - Confirm up to 3 lines of text are visible per chunk
-   - Confirm focused row has a clean rectangular background
-   - Navigate to "Fetch full page" and hit Ctrl+R; confirm full markdown inserted
-   - Select chunks with Space and hit Ctrl+R; confirm selected chunks inserted
+1. `(.venv) python -c "from aunic.tui.app import TuiApp; print('OK')"` — check imports
+2. Start the app; confirm separator is plain `─` with no colour before any run
+3. Run the model; watch separator gradually fill in blue as turns complete
+4. Edit some text after the run; confirm fill adjusts slightly (estimate)
+5. Type `/context` and hit Ctrl+R; confirm indicator shows token counts with `~` prefix if file changed
+6. Run again; confirm `/context` shows exact counts with no `~`
+7. With a Codex model: confirm `model_context_window` is populated from the API (non-None)
+8. With a Claude model: confirm fill works via hardcoded 200,000 limit

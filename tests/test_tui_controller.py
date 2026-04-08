@@ -8,6 +8,7 @@ import pytest
 from prompt_toolkit.buffer import Buffer
 
 from aunic.context.types import FileChange, FileSnapshot, PromptRun, TextSpan
+from aunic.domain import TranscriptRow
 from aunic.loop.types import LoopMetrics, LoopRunResult
 from aunic.modes.types import ChatModeMetrics, ChatModeRunResult, NoteModePromptResult, NoteModeRunResult
 from aunic.progress import ProgressEvent
@@ -21,7 +22,8 @@ from aunic.research.types import (
 )
 from aunic.tools.runtime import PermissionRequest
 from aunic.tui.controller import TuiController
-from aunic.transcript.parser import parse_transcript_rows
+from aunic.transcript.parser import parse_transcript_rows, split_note_and_transcript
+from aunic.tools.runtime import join_note_and_transcript
 
 
 def _snapshot(path: Path, text: str, revision_id: str = "rev-1") -> FileSnapshot:
@@ -46,13 +48,14 @@ def _prompt_run() -> PromptRun:
     )
 
 
-def _loop_result() -> LoopRunResult:
+def _loop_result(*, run_log: tuple[TranscriptRow, ...] = ()) -> LoopRunResult:
     return LoopRunResult(
         stop_reason="finished",
         events=(),
         metrics=LoopMetrics(stop_reason="finished"),
         tool_failures=(),
         final_file_snapshots=(),
+        run_log=run_log,
     )
 
 
@@ -99,6 +102,56 @@ class _SynthesisNoteRunner(_FakeNoteRunner):
             final_file_snapshots=(),
             stop_reason="finished",
             synthesis_ran=True,
+        )
+
+
+class _DeferredToolNoteRunner:
+    def __init__(
+        self,
+        note_path: Path,
+        *,
+        tool_name: str,
+        payload: dict[str, object],
+        written_note_content: str,
+    ) -> None:
+        self.note_path = note_path
+        self.tool_name = tool_name
+        self.payload = payload
+        self.written_note_content = written_note_content
+        self.requests = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(self, request) -> NoteModeRunResult:
+        self.requests.append(request)
+        self.started.set()
+        await self.release.wait()
+        _, transcript_text = split_note_and_transcript(self.note_path.read_text(encoding="utf-8"))
+        self.note_path.write_text(
+            join_note_and_transcript(self.written_note_content, transcript_text),
+            encoding="utf-8",
+        )
+        tool_row = TranscriptRow(
+            row_number=1,
+            role="tool",
+            type="tool_result",
+            tool_name=self.tool_name,
+            tool_id="tool-1",
+            content=self.payload,
+        )
+        return NoteModeRunResult(
+            initial_warnings=(),
+            prompt_results=(
+                NoteModePromptResult(
+                    prompt_index=0,
+                    prompt_run=_prompt_run(),
+                    loop_result=_loop_result(run_log=(tool_row,)),
+                ),
+            ),
+            completed_prompt_runs=1,
+            completed_all_prompts=True,
+            final_file_snapshots=(),
+            stop_reason="finished",
         )
 
 
@@ -223,6 +276,143 @@ async def test_controller_send_prompt_saves_buffer_and_dispatches_note_mode(tmp_
 
 
 @pytest.mark.asyncio
+async def test_controller_blocks_manual_save_while_run_is_in_progress(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    runner = _DeferredToolNoteRunner(
+        note,
+        tool_name="note_write",
+        payload={"type": "note_content_write", "content": "model\n"},
+        written_note_content="model\n",
+    )
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "Please update it."
+    await controller.send_prompt()
+    await runner.started.wait()
+    controller._editor_buffer.text = "User draft\n"
+
+    assert await controller.save_active_file() is False
+    assert note.read_text(encoding="utf-8") == "Original\n"
+
+    runner.release.set()
+    await controller._run_task
+
+
+@pytest.mark.asyncio
+async def test_controller_manual_save_does_not_normalize_markdown_tables(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    controller = TuiController(active_file=note, note_runner=_FakeNoteRunner(note), chat_runner=_FakeChatRunner())
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    messy_table = "| A | Long Header |\n| --- | --- |\n| 1 | 22 |\n"
+    controller._editor_buffer.text = messy_table
+
+    assert await controller.save_active_file() is True
+    assert note.read_text(encoding="utf-8") == messy_table
+
+
+@pytest.mark.asyncio
+async def test_controller_rebases_note_edit_onto_unsaved_user_changes(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    baseline = "alpha\nbeta\ngamma\n"
+    note.write_text(baseline, encoding="utf-8")
+    runner = _DeferredToolNoteRunner(
+        note,
+        tool_name="note_edit",
+        payload={
+            "type": "note_content_edit",
+            "old_string": "beta",
+            "new_string": "BETA",
+            "actual_old_string": "beta",
+            "replace_all": False,
+            "original_content": baseline,
+            "structured_patch": [],
+        },
+        written_note_content="alpha\nBETA\ngamma\n",
+    )
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "Please update it."
+    await controller.send_prompt()
+    await runner.started.wait()
+    controller._editor_buffer.text = "alpha\nbeta\ndelta\n"
+
+    runner.release.set()
+    await controller._run_task
+
+    assert controller.state.active_dialog is None
+    assert note.read_text(encoding="utf-8") == "alpha\nBETA\ndelta"
+    assert controller._editor_buffer.text == "alpha\nBETA\ndelta"
+
+
+@pytest.mark.asyncio
+async def test_controller_note_write_conflict_user_wins_and_backup_is_written(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    baseline = "alpha\nbeta\n"
+    note.write_text(baseline, encoding="utf-8")
+    (tmp_path / ".aunic").mkdir()
+    runner = _DeferredToolNoteRunner(
+        note,
+        tool_name="note_write",
+        payload={
+            "type": "note_content_write",
+            "content": "model rewrite\n",
+            "original_content": baseline,
+            "structured_patch": [],
+        },
+        written_note_content="model rewrite\n",
+    )
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "Please update it."
+    await controller.send_prompt()
+    await runner.started.wait()
+    controller._editor_buffer.text = "user rewrite\n"
+
+    runner.release.set()
+    await controller._run_task
+
+    assert controller.state.active_dialog == "note_conflict"
+    assert controller.state.note_conflict is not None
+    assert note.read_text(encoding="utf-8") == "model rewrite"
+
+    await controller.confirm_note_conflict(prefer_model=False)
+
+    assert controller.state.active_dialog is None
+    assert controller.state.note_conflict is None
+    assert note.read_text(encoding="utf-8") == "user rewrite"
+    assert controller._editor_buffer.text == "user rewrite"
+    conflict_dir = tmp_path / ".aunic" / "conflicts"
+    backups = list(conflict_dir.glob("*.md"))
+    assert backups
+    assert backups[0].read_text(encoding="utf-8") == "model rewrite"
+
+
+@pytest.mark.asyncio
 async def test_controller_initializes_missing_file_without_creating_it(tmp_path: Path) -> None:
     note = tmp_path / "new-note.md"
     controller = TuiController(
@@ -284,7 +474,7 @@ async def test_controller_save_new_file_creates_missing_parents_on_first_save(tm
 
 
 @pytest.mark.asyncio
-async def test_controller_blocks_model_runs_until_new_file_is_saved(tmp_path: Path) -> None:
+async def test_controller_send_prompt_auto_saves_new_file_before_running(tmp_path: Path) -> None:
     note = tmp_path / "new-note.md"
     note_runner = _FakeNoteRunner(note)
     controller = TuiController(
@@ -296,12 +486,40 @@ async def test_controller_blocks_model_runs_until_new_file_is_saved(tmp_path: Pa
     controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
     await controller.initialize()
 
+    controller._editor_buffer.text = "Body\n"
+    controller._prompt_buffer.text = "Do the thing."
+    await controller.send_prompt()
+
+    assert note.exists() is True
+    assert note.read_text(encoding="utf-8") == "Body\n"
+    assert controller.state.active_file_missing_on_disk is False
+    assert controller._run_task is not None
+
+    await controller._run_task
+
+    assert note_runner.requests
+
+
+@pytest.mark.asyncio
+async def test_controller_send_prompt_new_file_without_parents_flag_still_fails(tmp_path: Path) -> None:
+    note = tmp_path / "new" / "dir" / "note.md"
+    note_runner = _FakeNoteRunner(note)
+    controller = TuiController(
+        active_file=note,
+        allow_missing_active_file=True,
+        note_runner=note_runner,
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._editor_buffer.text = "Body\n"
     controller._prompt_buffer.text = "Do the thing."
     await controller.send_prompt()
 
     assert controller._run_task is None
     assert controller.state.indicator_kind == "error"
-    assert controller.state.indicator_message == "Save the new file before running Aunic."
+    assert "Reopen with -p/--parents" in controller.state.indicator_message
     assert note_runner.requests == []
 
 
@@ -533,7 +751,8 @@ async def test_controller_note_mode_status_mentions_completed_synthesis(tmp_path
     await controller.send_prompt()
     await controller._run_task
 
-    assert "Synthesis complete." in controller.state.indicator_message
+    assert "Finished!" in controller.state.indicator_message
+    assert "Edit complete." in controller.state.indicator_message
 
 
 @pytest.mark.asyncio

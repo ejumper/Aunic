@@ -15,7 +15,6 @@ from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from aunic.tui.transcript_renderers import (
     TranscriptRenderContext,
     get_renderer,
-    render_closed_transcript_bar,
     render_filter_toolbar,
 )
 
@@ -35,14 +34,26 @@ class TranscriptView:
         self._width = width or (lambda: 100)
         self._scroll_pos = 0
         self._row_start_lines: dict[int, int] = {}
+        self._toolbar_control = FormattedTextControl(
+            text=self._render_toolbar,
+            focusable=False,
+            show_cursor=False,
+        )
+        self.toolbar_window = Window(
+            self._toolbar_control,
+            height=1,
+            dont_extend_height=True,
+            wrap_lines=False,
+        )
         self._control = _ScrollableFormattedTextControl(
-            text=self._render,
+            text=self._render_body,
             focusable=True,
             show_cursor=False,
             scroll_callback=self._on_scroll,
+            blank_area_callback=self._is_blank_body_mouse_event,
             get_cursor_position=lambda: Point(0, self._scroll_pos),
         )
-        self.window = Window(
+        self.window = _TranscriptBodyWindow(
             self._control,
             height=Dimension(preferred=15, max=40, min=3),
             dont_extend_height=True,
@@ -50,20 +61,27 @@ class TranscriptView:
             right_margins=[ScrollbarMargin(display_arrows=False)],
             scroll_offsets=ScrollOffsets(top=0, bottom=0),
             get_vertical_scroll=lambda w: self._scroll_pos,
+            content_width_callback=self._on_body_width_changed,
         )
         self._selected_row_number: int | None = None
         self._scroll_to_selection = False
         self._row_cache: dict[int, tuple[str, StyleAndTextTuples]] = {}
         self._last_line_count = 1
+        self._content_width_override: int | None = None
+
+    @property
+    def toolbar_height(self) -> int:
+        return 1
 
     def preferred_height(self) -> int:
-        return max(3, min(20, self._estimate_line_count()))
+        body_height = max(2, min(19, self._estimate_body_line_count()))
+        return self.toolbar_height + body_height
 
-    def _estimate_line_count(self) -> int:
-        """Estimate total lines from current state without full rendering."""
+    def _estimate_body_line_count(self) -> int:
+        """Estimate body lines from current state without full rendering."""
         rows = self._controller.visible_transcript_rows()
         expanded = self._controller.transcript_view_state.expanded_rows
-        line_count = 1  # filter toolbar
+        line_count = 0
         for row in rows:
             renderer = get_renderer(row)
             if renderer is None:
@@ -132,15 +150,10 @@ class TranscriptView:
         rows = self._controller.visible_transcript_rows()
         self._selected_row_number = rows[0].row_number if rows else None
 
-    def _render(self) -> StyleAndTextTuples:
-        rows = self._controller.visible_transcript_rows()
-        prev_selection = self._selected_row_number
-        self.ensure_selection()
-        if self._selected_row_number != prev_selection:
-            self._scroll_to_selection = True
+    def _build_render_context(self) -> TranscriptRenderContext:
         tool_call_index = self._controller.tool_call_index()
-        context = TranscriptRenderContext(
-            width=max(20, self._width() - 2),
+        return TranscriptRenderContext(
+            width=self._content_width(),
             tool_call_index=tool_call_index,
             expanded_rows=self._controller.transcript_view_state.expanded_rows,
             cached_fetch_urls=self._controller.cached_fetch_urls(),
@@ -151,16 +164,28 @@ class TranscriptView:
             set_filter=self._controller.set_transcript_filter,
             toggle_sort=self._controller.toggle_transcript_sort,
             toggle_open=self._controller.toggle_transcript_open,
+            toggle_maximize=self._controller.toggle_transcript_maximized,
             open_url=self._controller.open_transcript_url,
             copy_text=self._controller.copy_text_to_clipboard,
             copy_cached_fetch=self._controller.copy_cached_fetch_url,
         )
 
-        fragments = render_filter_toolbar(self._controller.transcript_view_state, context)
+    def _render_toolbar(self) -> StyleAndTextTuples:
+        return render_filter_toolbar(self._controller.transcript_view_state, self._build_render_context())
+
+    def _render_body(self) -> StyleAndTextTuples:
+        rows = self._controller.visible_transcript_rows()
+        prev_selection = self._selected_row_number
+        self.ensure_selection()
+        if self._selected_row_number != prev_selection:
+            self._scroll_to_selection = True
+        tool_call_index = self._controller.tool_call_index()
+        context = self._build_render_context()
+        fragments: StyleAndTextTuples = []
         scroll_to = self._scroll_to_selection
         self._scroll_to_selection = False
 
-        line_count = 1
+        line_count = 0
         row_start_lines: dict[int, int] = {}
         active_cache_keys: set[int] = set()
 
@@ -195,7 +220,7 @@ class TranscriptView:
         if scroll_to and self._selected_row_number in row_start_lines:
             self._scroll_pos = row_start_lines[self._selected_row_number]
 
-        max_scroll = max(0, line_count - 3)
+        max_scroll = max(0, line_count - self._visible_body_lines())
         self._scroll_pos = max(0, min(self._scroll_pos, max_scroll))
 
         return fragments
@@ -220,12 +245,27 @@ class TranscriptView:
             "tool_call_content": tool_call_content,
             "expanded": row.row_number in self._controller.transcript_view_state.expanded_rows,
             "selected": row.row_number == self._selected_row_number,
-            "width": self._width(),
+            "width": self._content_width(),
             "cached_fetch_urls": sorted(self._controller.cached_fetch_urls()),
             "filter_mode": self._controller.transcript_view_state.filter_mode,
             "sort_order": self._controller.transcript_view_state.sort_order,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _content_width(self) -> int:
+        if self._content_width_override is not None:
+            return self._content_width_override
+        return max(20, self._width() - 2)
+
+    def _on_body_width_changed(self, width: int) -> None:
+        width = max(20, width)
+        if width == self._content_width_override:
+            return
+        self._content_width_override = width
+        try:
+            get_app().invalidate()
+        except Exception:
+            pass
 
     def _delete_row_from_mouse(self, row_number: int) -> None:
         app = get_app()
@@ -238,18 +278,35 @@ class TranscriptView:
     def _on_scroll(self, direction: int) -> None:
         scroll_lines = 3
         new_scroll = self._scroll_pos + direction * scroll_lines
-        max_scroll = max(0, self._last_line_count - 3)
+        max_scroll = max(0, self._last_line_count - self._visible_body_lines())
         self._scroll_pos = max(0, min(new_scroll, max_scroll))
         try:
             get_app().invalidate()
         except Exception:
             pass
 
+    def _visible_body_lines(self) -> int:
+        render_info = self.window.render_info
+        if render_info is None:
+            return 2
+        return max(1, render_info.window_height)
+
+    def _is_blank_body_mouse_event(self, mouse_event: MouseEvent) -> bool:
+        visible_content_lines = max(0, self._last_line_count - self._scroll_pos)
+        return mouse_event.position.y >= visible_content_lines
+
 
 class _ScrollableFormattedTextControl(FormattedTextControl):
-    def __init__(self, *args, scroll_callback: Callable[[int], None] | None = None, **kwargs):
+    def __init__(
+        self,
+        *args,
+        scroll_callback: Callable[[int], None] | None = None,
+        blank_area_callback: Callable[[MouseEvent], bool] | None = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self._scroll_callback = scroll_callback
+        self._blank_area_callback = blank_area_callback
 
     def mouse_handler(self, mouse_event: MouseEvent):
         if self._scroll_callback is not None:
@@ -259,7 +316,124 @@ class _ScrollableFormattedTextControl(FormattedTextControl):
             if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
                 self._scroll_callback(1)
                 return None
+        if self._blank_area_callback is not None and self._blank_area_callback(mouse_event):
+            return None
         return super().mouse_handler(mouse_event)
+
+
+class _TranscriptBodyWindow(Window):
+    def __init__(
+        self,
+        *args,
+        content_width_callback: Callable[[int], None] | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._content_width_callback = content_width_callback
+
+    def write_to_screen(
+        self,
+        screen,
+        mouse_handlers,
+        write_position,
+        parent_style,
+        erase_bg,
+        z_index,
+    ) -> None:
+        super().write_to_screen(
+            screen,
+            mouse_handlers,
+            write_position,
+            parent_style,
+            erase_bg,
+            z_index,
+        )
+
+        render_info = self.render_info
+        effective_write_position = screen.visible_windows_to_write_positions.get(self)
+        if render_info is None or effective_write_position is None:
+            return
+        rowcol_to_yx = getattr(render_info, "rowcol_to_yx", None)
+        if rowcol_to_yx is None:
+            rowcol_to_yx = getattr(render_info, "_rowcol_to_yx", None)
+        visible_line_to_row_col = getattr(render_info, "visible_line_to_row_col", None)
+        if rowcol_to_yx is None or visible_line_to_row_col is None:
+            return
+
+        left_margin_widths = [self._get_margin_width(m) for m in self.left_margins]
+        right_margin_widths = [self._get_margin_width(m) for m in self.right_margins]
+        total_margin_width = sum(left_margin_widths + right_margin_widths)
+        if self._content_width_callback is not None:
+            self._content_width_callback(max(1, effective_write_position.width - total_margin_width - 2))
+
+        mouse_handlers.set_mouse_handler_for_range(
+            x_min=effective_write_position.xpos + sum(left_margin_widths),
+            x_max=effective_write_position.xpos + effective_write_position.width - total_margin_width,
+            y_min=effective_write_position.ypos,
+            y_max=effective_write_position.ypos + effective_write_position.height,
+            handler=self._build_mouse_handler(
+                rowcol_to_yx=rowcol_to_yx,
+                visible_line_to_row_col=visible_line_to_row_col,
+                write_position=effective_write_position,
+            ),
+        )
+
+    def _build_mouse_handler(
+        self,
+        *,
+        rowcol_to_yx: dict[tuple[int, int], tuple[int, int]],
+        visible_line_to_row_col: dict[int, tuple[int, int]],
+        write_position,
+    ) -> Callable[[MouseEvent], object]:
+        def mouse_handler(mouse_event: MouseEvent):
+            if self not in get_app().layout.walk_through_modal_area():
+                return NotImplemented
+
+            yx_to_rowcol = {v: k for k, v in rowcol_to_yx.items()}
+            y = mouse_event.position.y
+            x = mouse_event.position.x
+
+            if not visible_line_to_row_col:
+                return None
+
+            max_y = write_position.ypos + len(visible_line_to_row_col) - 1
+            if mouse_event.event_type not in {MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN} and y > max_y:
+                return None
+
+            y = min(max_y, y)
+            result = NotImplemented
+
+            while x >= 0:
+                try:
+                    row, col = yx_to_rowcol[y, x]
+                except KeyError:
+                    x -= 1
+                else:
+                    result = self.content.mouse_handler(
+                        MouseEvent(
+                            position=Point(x=col, y=row),
+                            event_type=mouse_event.event_type,
+                            button=mouse_event.button,
+                            modifiers=mouse_event.modifiers,
+                        )
+                    )
+                    break
+            else:
+                result = self.content.mouse_handler(
+                    MouseEvent(
+                        position=Point(x=0, y=0),
+                        event_type=mouse_event.event_type,
+                        button=mouse_event.button,
+                        modifiers=mouse_event.modifiers,
+                    )
+                )
+
+            if result == NotImplemented:
+                result = self._mouse_handler(mouse_event)
+
+            return result
+
+        return mouse_handler
 
 
 def _line_count(fragments: StyleAndTextTuples) -> int:

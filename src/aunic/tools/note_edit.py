@@ -11,6 +11,7 @@ from aunic.tools.filesystem import (
     build_mutating_file_tool_registry,
     build_read_tool_registry,
 )
+from aunic.tui.note_tables import normalize_markdown_tables
 from aunic.tools.research import build_research_tool_registry
 from aunic.tools.runtime import RunToolContext, failure_from_payload, failure_payload
 
@@ -169,14 +170,16 @@ async def execute_note_edit(runtime: RunToolContext, args: NoteEditArgs) -> Tool
                 message="The live note changed after the model read it, so the edit could not be applied safely.",
             ),
         )
-    await runtime.write_live_note_content(updated, expected_revision=live_snapshot.revision_id)
+    touched_ranges = _touched_row_ranges_from_patch(_build_structured_patch(baseline, updated))
+    normalized = normalize_markdown_tables(updated, touched_row_ranges=touched_ranges)
+    await runtime.write_live_note_content(normalized, expected_revision=live_snapshot.revision_id)
     payload = {
         "type": "note_content_edit",
         "old_string": args.old_string,
         "new_string": args.new_string,
         "actual_old_string": actual_old,
         "original_content": baseline,
-        "structured_patch": _build_structured_patch(baseline, updated),
+        "structured_patch": _build_structured_patch(baseline, normalized),
         "replace_all": args.replace_all,
         "user_modified": False,
         "meta": {"content_source": "tool_call"},
@@ -201,12 +204,13 @@ async def execute_note_write(runtime: RunToolContext, args: NoteWriteArgs) -> To
                 message="The live note changed after the model read it, so the full-note write could not be applied safely.",
             ),
         )
-    await runtime.write_live_note_content(args.content, expected_revision=live_snapshot.revision_id)
+    normalized = normalize_markdown_tables(args.content)
+    await runtime.write_live_note_content(normalized, expected_revision=live_snapshot.revision_id)
     payload = {
         "type": "note_content_write",
-        "content": args.content,
+        "content": normalized,
         "original_content": baseline,
-        "structured_patch": _build_structured_patch(baseline, args.content),
+        "structured_patch": _build_structured_patch(baseline, normalized),
         "meta": {"content_source": "tool_call"},
     }
     return ToolExecutionResult(
@@ -215,6 +219,31 @@ async def execute_note_write(runtime: RunToolContext, args: NoteWriteArgs) -> To
         in_memory_content=payload,
         transcript_content=None,
     )
+
+
+def reapply_note_edit_payload_to_note_content(
+    current_note_content: str,
+    payload: dict[str, Any],
+) -> str | None:
+    old_string = payload.get("actual_old_string") or payload.get("old_string")
+    new_string = payload.get("new_string")
+    replace_all = bool(payload.get("replace_all", False))
+    if not isinstance(old_string, str) or not old_string:
+        return None
+    if not isinstance(new_string, str):
+        return None
+
+    updated, _, error = _apply_exact_edit(
+        current_note_content,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+    )
+    if error is not None or updated == current_note_content:
+        return None
+
+    touched_ranges = _touched_row_ranges_from_patch(_build_structured_patch(current_note_content, updated))
+    return normalize_markdown_tables(updated, touched_row_ranges=touched_ranges)
 
 
 def _note_tool_error(tool_name: str, payload: dict[str, Any]) -> ToolExecutionResult:
@@ -240,3 +269,14 @@ def _ensure_no_extra_keys(payload: dict[str, Any], expected: set[str]) -> None:
     extras = sorted(set(payload) - expected)
     if extras:
         raise ValueError(f"Unexpected fields: {', '.join(extras)}.")
+
+
+def _touched_row_ranges_from_patch(structured_patch: list[dict[str, Any]]) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    for op in structured_patch:
+        start = int(op.get("new_start_line", 1)) - 1
+        end = int(op.get("new_end_line", start + 1)) - 1
+        if end < start:
+            end = start
+        ranges.append((max(0, start), max(0, end)))
+    return tuple(ranges)
