@@ -34,6 +34,9 @@ class TranscriptRenderContext:
     open_url: Callable[[str], None]
     copy_text: Callable[[str], None]
     copy_cached_fetch: Callable[[str], None]
+    # Keyboard cursor state — None means no keyboard cursor active
+    focused_col: str | None = None          # "delete" or "action"
+    toolbar_focused_index: int | None = None  # 0-5 for toolbar buttons
 
 
 @dataclass(frozen=True)
@@ -56,13 +59,19 @@ def render_filter_toolbar(
     context: TranscriptRenderContext,
 ) -> StyleAndTextTuples:
     fragments: StyleAndTextTuples = []
+    btn_index = 0
 
     def append_button(
         label: str,
         style: str,
         callback: Callable[[], None],
     ) -> None:
-        fragments.append((style, f"[ {label} ]", _mouse(callback)))
+        nonlocal btn_index
+        s = style
+        if context.toolbar_focused_index == btn_index:
+            s = _combine_styles(s, "reverse")
+        fragments.append((s, f"[ {label} ]", _mouse(callback)))
+        btn_index += 1
 
     append_button("v", "class:transcript.filter", context.toggle_open)
     fragments.append(("", " "))
@@ -95,7 +104,9 @@ def render_closed_transcript_bar(context: TranscriptRenderContext) -> StyleAndTe
 
 
 def render_delete_button(row_number: int, context: TranscriptRenderContext) -> StyleAndTextTuples:
-    return [("class:transcript.delete", " X ", _mouse(lambda: context.delete_row(row_number)))]
+    focused = (row_number == context.selected_row_number and context.focused_col == "delete")
+    style = _combine_styles("class:transcript.delete", "reverse" if focused else None)
+    return [(style, " X ", _mouse(lambda: context.delete_row(row_number)))]
 
 
 def render_chat_message(row: TranscriptRow, context: TranscriptRenderContext) -> StyleAndTextTuples:
@@ -214,8 +225,10 @@ def render_bash_result(row: TranscriptRow, context: TranscriptRenderContext) -> 
     fragments.append((_combine_styles(row_style, "class:transcript.tool.name"), "bash"))
     fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
     fragments.append((_combine_styles(row_style, "class:transcript.bash.command"), command_preview))
+    action_focused = (row.row_number == context.selected_row_number and context.focused_col == "action")
+    toggle_style = _combine_styles(row_style, "class:transcript.toggle", "reverse" if action_focused else None)
     fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), " | "))
-    fragments.append((_combine_styles(row_style, "class:transcript.toggle"), toggle, _mouse(lambda: context.toggle_expand(row.row_number))))
+    fragments.append((toggle_style, toggle, _mouse(lambda: context.toggle_expand(row.row_number))))
     fragments.append(("", "\n"))
 
     if not expanded:
@@ -271,10 +284,12 @@ def render_search_result(row: TranscriptRow, context: TranscriptRenderContext) -
             _fit_cell(query, layout.query_width),
         )
     )
+    action_focused = (row.row_number == context.selected_row_number and context.focused_col == "action")
+    toggle_style = _combine_styles(row_style, "class:transcript.toggle", "reverse" if action_focused else None)
     fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.action_separator))
     fragments.append(
         (
-            _combine_styles(row_style, "class:transcript.toggle"),
+            toggle_style,
             toggle,
             _mouse(lambda: context.toggle_expand(row.row_number)),
         )
@@ -367,8 +382,10 @@ def render_fetch_result(row: TranscriptRow, context: TranscriptRenderContext) ->
         fragments.append((title_style, title_text, _mouse(lambda url=url: context.copy_cached_fetch(url))))
     else:
         fragments.append((title_style, title_text))
+    action_focused = (row.row_number == context.selected_row_number and context.focused_col == "action")
+    link_style = _combine_styles(row_style, "class:transcript.link", "reverse" if action_focused else None)
     fragments.append((_combine_styles(row_style, "class:transcript.tool.content"), layout.action_separator))
-    fragments.append((_combine_styles(row_style, "class:transcript.link"), "↗", _mouse(lambda url=url: context.open_url(url))))
+    fragments.append((link_style, "↗", _mouse(lambda url=url: context.open_url(url))))
     fragments.append(("", "\n"))
     return fragments
 

@@ -11,6 +11,7 @@ DialogMode = Literal["file_menu", "file_switch_confirm", "reload_confirm", "mode
 WebMode = Literal["idle", "results", "chunks"]
 TranscriptFilter = Literal["all", "chat", "tools", "search"]
 TranscriptSortOrder = Literal["descending", "ascending"]
+FindField = Literal["find", "replace", "buttons"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,22 @@ class TranscriptViewState:
 
 
 @dataclass
+class FindUiState:
+    active: bool = False
+    replace_mode: bool = False
+    case_sensitive: bool = False
+    find_text: str = ""
+    replace_text: str = ""
+    active_field: FindField = "find"
+    button_index: int = 0
+    saved_prompt_text: str = ""
+    current_match_index: int | None = None
+    current_match_start: int | None = None
+    current_match_end: int | None = None
+    match_count: int = 0
+
+
+@dataclass
 class TuiState:
     active_file: Path
     available_files: tuple[Path, ...]
@@ -73,6 +90,7 @@ class TuiState:
     transcript_open: bool = True
     active_file_missing_on_disk: bool = False
     create_parents_on_first_save: bool = False
+    find_ui: FindUiState = field(default_factory=FindUiState)
 
     @property
     def included_files(self) -> tuple[Path, ...]:

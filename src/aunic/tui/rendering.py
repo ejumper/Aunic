@@ -12,6 +12,15 @@ from prompt_toolkit.styles import Style
 from aunic.tui.folding import FOLD_PLACEHOLDER_PREFIX, is_fold_placeholder_line
 
 _THEMATIC_BREAK_RE = re.compile(r"^\s*(?:\*\*\*+|---+)\s*$")
+
+# Slash/prefix commands that are highlighted blue in the prompt editor
+PROMPT_ACTIVE_COMMANDS = frozenset({
+    "/context", "/note", "/chat", "/work", "/read", "/off", "/model", "/find", "@web",
+})
+_PROMPT_COMMAND_RE = re.compile(
+    r"(@web\b|/context\b|/note\b|/chat\b|/work\b|/read\b|/off\b|/model\b|/find\b|/clear-history\b)"
+)
+_DESTRUCTIVE_COMMANDS = frozenset({"/clear-history"})
 _LIST_RE = re.compile(r"^(\s*)(?:[-+*]|\d+[.)])\s+")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
@@ -52,6 +61,7 @@ def build_tui_style() -> Style:
             "md.thematic": "ansiblue",
             "md.fold": "ansibrightblack italic",
             "md.recent": "ansibrightblue",
+            "md.model_insert": "ansigreen",
             "marker.write": "ansicyan",
             "marker.include": "ansigreen",
             "marker.exclude": "ansired",
@@ -83,6 +93,9 @@ def build_tui_style() -> Style:
             "transcript.search.count": "ansiblue bold",
             "transcript.search.snippet": "ansibrightblack italic",
             "transcript.fetch.snippet": "ansibrightblack italic",
+            "prompt.command": "ansiblue bold",
+            "prompt.command.destructive": "ansired bold",
+            "prompt.find.label": "ansibrightblack",
             "context.separator.green":  "ansigreen bold",
             "context.separator.yellow": "ansiyellow bold",
             "context.separator.red":    "ansired bold",
@@ -108,6 +121,40 @@ class AunicMarkdownLexer(Lexer):
         return get_line
 
 
+class PromptLexer(Lexer):
+    """Lexer for the prompt input field — highlights active slash/@web commands in blue."""
+
+    def lex_document(self, document):
+        lines = document.lines
+
+        def get_line(lineno: int) -> StyleAndTextTuples:
+            if lineno >= len(lines):
+                return []
+            line = lines[lineno]
+            fragments: StyleAndTextTuples = []
+            pos = 0
+            for m in _PROMPT_COMMAND_RE.finditer(line):
+                start, end = m.span()
+                token = m.group(0)
+                # @web only highlighted when nothing precedes it in the entire prompt
+                if token == "@web" and not (lineno == 0 and not line[:start].strip()):
+                    if start > pos:
+                        fragments.append(("", line[pos:start]))
+                    fragments.append(("", line[start:end]))
+                    pos = end
+                    continue
+                if start > pos:
+                    fragments.append(("", line[pos:start]))
+                style = "class:prompt.command.destructive" if token in _DESTRUCTIVE_COMMANDS else "class:prompt.command"
+                fragments.append((style, line[start:end]))
+                pos = end
+            if pos < len(line):
+                fragments.append(("", line[pos:]))
+            return fragments
+
+        return get_line
+
+
 class ThematicBreakProcessor(Processor):
     def __init__(self, *, width: Callable[[], int] | None = None) -> None:
         self._width = width or (lambda: 60)
@@ -123,8 +170,14 @@ class ThematicBreakProcessor(Processor):
 
 
 class RecentChangeProcessor(Processor):
-    def __init__(self, *, spans: Callable[[], tuple[TextSpan, ...]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        spans: Callable[[], tuple[TextSpan, ...]] | None = None,
+        style: str = "class:md.recent",
+    ) -> None:
         self._spans = spans or (lambda: ())
+        self._style = style
 
     def apply_transformation(self, transformation_input) -> Transformation:
         spans = self._spans()
@@ -155,7 +208,7 @@ class RecentChangeProcessor(Processor):
             _apply_style_to_fragments(
                 transformation_input.fragments,
                 line_spans,
-                "class:md.recent",
+                self._style,
             )
         )
 

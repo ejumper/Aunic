@@ -35,6 +35,7 @@ from aunic.tui.transcript_view import TranscriptView
 from aunic.tui.note_tables import NoteTablePreviewBufferControl
 from aunic.tui.rendering import (
     AunicMarkdownLexer,
+    PromptLexer,
     RecentChangeProcessor,
     ThematicBreakProcessor,
     build_tui_style,
@@ -123,15 +124,38 @@ class AunicTuiApp:
             scrollbar=True,
             wrap_lines=True,
             focus_on_click=True,
-            read_only=Condition(lambda: self.controller.state.run_in_progress),
+
+            lexer=PromptLexer(),
         )
         self.prompt_field.window.right_margins = [ScrollbarMargin(display_arrows=False)]
+        self.find_field = TextArea(
+            multiline=False,
+            wrap_lines=False,
+            focus_on_click=True,
+        )
+        self.replace_field = TextArea(
+            multiline=False,
+            wrap_lines=False,
+            focus_on_click=True,
+        )
+        self.find_controls_window = Window(
+            FormattedTextControl(
+                text=self._find_controls_fragments,
+                focusable=True,
+                show_cursor=False,
+            ),
+            height=1,
+        )
         self.controller.attach_buffers(
             editor_buffer=self.editor.buffer,
             prompt_buffer=self.prompt_field.buffer,
         )
         self.editor.buffer.on_text_changed += self._coalesce_buffer_undo_history
         self.prompt_field.buffer.on_text_changed += self._coalesce_buffer_undo_history
+        self.find_field.buffer.on_text_changed += self._coalesce_buffer_undo_history
+        self.replace_field.buffer.on_text_changed += self._coalesce_buffer_undo_history
+        self.find_field.buffer.on_text_changed += self._handle_find_buffer_changed
+        self.replace_field.buffer.on_text_changed += self._handle_replace_buffer_changed
         original_editor_control = self.editor.control
         self.editor.control = NoteTablePreviewBufferControl(
             buffer=self.editor.buffer,
@@ -139,6 +163,10 @@ class AunicTuiApp:
             input_processors=[
                 ThematicBreakProcessor(width=lambda: self._editor_width()),
                 RecentChangeProcessor(spans=self.controller.recent_display_change_spans),
+                RecentChangeProcessor(
+                    spans=self.controller.model_insert_display_change_spans,
+                    style="class:md.model_insert",
+                ),
             ],
             search_buffer_control=original_editor_control.search_buffer_control,
             preview_search=original_editor_control.preview_search,
@@ -173,21 +201,7 @@ class AunicTuiApp:
             FormattedTextControl(text=self._indicator_fragments, focusable=False),
             height=1,
         )
-        self.control_row = VSplit(
-            [
-                VSplit(
-                    [
-                        self._control_window(self._model_control_fragments, self._open_model_picker),
-                        self._control_window(self._work_control_fragments, self.controller.toggle_work_mode),
-                        self._control_window(self._mode_control_fragments, self._toggle_mode_background),
-                    ],
-                    padding=1,
-                ),
-                Window(),
-                self._control_window(self._send_control_fragments, self._send_background),
-            ],
-            padding=1,
-        )
+        self.control_row = DynamicContainer(self._control_row_body)
         self.prompt_box = Frame(
             HSplit(
                 [
@@ -267,6 +281,7 @@ class AunicTuiApp:
             input=input,
             output=output,
         )
+        self.application.ttimeoutlen = 0.05
         self.application.pre_run_callables.append(self._invalidate)
         self.controller.set_invalidator(self._invalidate)
         set_title("Aunic")
@@ -275,8 +290,12 @@ class AunicTuiApp:
         self._last_text_by_buffer: dict[int, str] = {
             id(self.editor.buffer): self.editor.buffer.text,
             id(self.prompt_field.buffer): self.prompt_field.buffer.text,
+            id(self.find_field.buffer): self.find_field.buffer.text,
+            id(self.replace_field.buffer): self.replace_field.buffer.text,
         }
         self._suspend_undo_coalescing = False
+        self._syncing_find = False
+        self._syncing_replace = False
 
     async def run(self) -> int:
         await self.controller.initialize()
@@ -304,6 +323,8 @@ class AunicTuiApp:
 
         @bindings.add("c-r", eager=True)
         def _send(_event) -> None:
+            if self.controller.state.find_ui.active:
+                return
             self._background(self.controller.send_prompt())
 
         @bindings.add("c-s", eager=True)
@@ -323,23 +344,80 @@ class AunicTuiApp:
             self._toggle_mode_background()
 
         @bindings.add("f6")
-        @bindings.add("c-_", eager=True)
+        @bindings.add("c-e", eager=True)
         def _toggle_focus(_event) -> None:
             self._toggle_focus_between_editor_and_prompt()
 
-        @bindings.add("up", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        @bindings.add("escape", "e", eager=True)
+        def _focus_transcript(_event) -> None:
+            if self.controller.state.active_dialog is not None:
+                return
+            if not self.controller.has_transcript():
+                return
+            if not self.controller.state.transcript_open:
+                self.controller.toggle_transcript_open()
+            self._transcript_view.ensure_selection()
+            self._transcript_view._cursor_col = "delete"
+            self._transcript_view._toolbar_focused = False
+            self.application.layout.focus(self._transcript_view.window)
+
+        @bindings.add("c-f", eager=True, filter=Condition(self._can_toggle_find_ui))
+        def _open_find(_event) -> None:
+            self._handle_find_shortcut()
+
+        @bindings.add("up", eager=True, filter=Condition(lambda: self._editing_text_area_has_focus() and not self._find_text_field_has_focus()))
         def _move_visual_up(_event) -> None:
             self._move_active_text_area_visual(-1)
 
-        @bindings.add("down", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        @bindings.add("down", eager=True, filter=Condition(lambda: self._editing_text_area_has_focus() and not self._find_text_field_has_focus()))
         def _move_visual_down(_event) -> None:
             self._move_active_text_area_visual(1)
 
-        @bindings.add("tab", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        @bindings.add("c-m", eager=True, filter=Condition(self._find_field_has_focus))
+        @bindings.add("enter", eager=True, filter=Condition(self._find_field_has_focus))
+        def _find_next(_event) -> None:
+            self.controller.find_next_match()
+
+        @bindings.add("up", eager=True, filter=Condition(self._find_text_field_has_focus))
+        def _find_prev(_event) -> None:
+            self.controller.find_previous_match()
+
+        @bindings.add("down", eager=True, filter=Condition(self._find_text_field_has_focus))
+        def _find_next_from_arrow(_event) -> None:
+            self.controller.find_next_match()
+
+        @bindings.add("c-m", eager=True, filter=Condition(self._replace_field_has_focus))
+        @bindings.add("enter", eager=True, filter=Condition(self._replace_field_has_focus))
+        def _replace_current(_event) -> None:
+            self._replace_current_find_match()
+
+        @bindings.add("c-i", eager=True, filter=Condition(self._find_ui_active))
+        @bindings.add("tab", eager=True, filter=Condition(self._find_ui_active))
+        def _find_cycle_forward(_event) -> None:
+            self._cycle_find_focus(forward=True)
+
+        @bindings.add("s-tab", eager=True, filter=Condition(self._find_ui_active))
+        def _find_cycle_backward(_event) -> None:
+            self._cycle_find_focus(forward=False)
+
+        @bindings.add("left", eager=True, filter=Condition(self._find_buttons_have_focus))
+        def _find_button_left(_event) -> None:
+            self._move_find_button_selection(-1)
+
+        @bindings.add("right", eager=True, filter=Condition(self._find_buttons_have_focus))
+        def _find_button_right(_event) -> None:
+            self._move_find_button_selection(1)
+
+        @bindings.add("c-m", eager=True, filter=Condition(self._find_buttons_have_focus))
+        @bindings.add("enter", eager=True, filter=Condition(self._find_buttons_have_focus))
+        def _find_button_activate(_event) -> None:
+            self._activate_selected_find_button()
+
+        @bindings.add("tab", eager=True, filter=Condition(lambda: self._editing_text_area_has_focus() and not self._find_ui_active()))
         def _indent(_event) -> None:
             self._indent_active_text_area()
 
-        @bindings.add("s-tab", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        @bindings.add("s-tab", eager=True, filter=Condition(lambda: self._editing_text_area_has_focus() and not self._find_ui_active()))
         def _unindent(_event) -> None:
             self._unindent_active_text_area()
 
@@ -369,9 +447,17 @@ class AunicTuiApp:
         def _unfold(_event) -> None:
             self.controller.unfold_at_cursor()
 
+        @bindings.add("escape", eager=True, filter=Condition(self._find_ui_control_has_focus))
+        def _close_find(_event) -> None:
+            self.controller.close_find_ui()
+
         @bindings.add("escape")
         def _close_dialog(_event) -> None:
             self.controller.close_dialog()
+
+        @bindings.add("escape", filter=Condition(lambda: self._find_ui_active() and not self._find_ui_control_has_focus()))
+        def _close_find_from_editor(_event) -> None:
+            self.controller.close_find_ui()
 
         @bindings.add("c-a", eager=True, filter=Condition(self._editing_text_area_has_focus))
         def _select_all(_event) -> None:
@@ -387,6 +473,14 @@ class AunicTuiApp:
         @bindings.add("escape", "c-h", eager=True, filter=Condition(self._editing_text_area_has_focus))
         def _backward_kill_word(event) -> None:
             get_by_name("backward-kill-word").handler(event)
+
+        @bindings.add("escape", "up", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        def _move_line_up(_event) -> None:
+            self._move_line_active_text_area(-1)
+
+        @bindings.add("escape", "down", eager=True, filter=Condition(self._editing_text_area_has_focus))
+        def _move_line_down(_event) -> None:
+            self._move_line_active_text_area(1)
 
         @bindings.add("home", eager=True, filter=Condition(self._editing_text_area_has_focus))
         def _visual_home(_event) -> None:
@@ -491,43 +585,54 @@ class AunicTuiApp:
 
         @bindings.add("up", eager=True, filter=Condition(self._transcript_has_focus))
         def _transcript_up(_event) -> None:
-            self._transcript_view.move_selection(-1)
+            self._transcript_view.move_up()
 
         @bindings.add("down", eager=True, filter=Condition(self._transcript_has_focus))
         def _transcript_down(_event) -> None:
-            self._transcript_view.move_selection(1)
+            self._transcript_view.move_down()
+
+        @bindings.add("left", eager=True, filter=Condition(self._transcript_has_focus))
+        def _transcript_left(_event) -> None:
+            self._transcript_view.move_left()
+
+        @bindings.add("right", eager=True, filter=Condition(self._transcript_has_focus))
+        def _transcript_right(_event) -> None:
+            self._transcript_view.move_right()
 
         @bindings.add("enter", eager=True, filter=Condition(self._transcript_has_focus))
-        @bindings.add("space", eager=True, filter=Condition(self._transcript_has_focus))
-        def _transcript_toggle(_event) -> None:
-            self._transcript_view.toggle_selected_expand()
+        def _transcript_activate(_event) -> None:
+            self._transcript_view.activate()
+
+        @bindings.add("home", eager=True, filter=Condition(self._transcript_has_focus))
+        def _transcript_home(_event) -> None:
+            self._transcript_view.go_home()
+
+        @bindings.add("end", eager=True, filter=Condition(self._transcript_has_focus))
+        def _transcript_end(_event) -> None:
+            self._transcript_view.go_end()
 
         @bindings.add("delete", eager=True, filter=Condition(self._transcript_has_focus))
         @bindings.add("backspace", eager=True, filter=Condition(self._transcript_has_focus))
         def _transcript_delete(_event) -> None:
             self._background(self._transcript_view.delete_selected_row())
 
-        @bindings.add("f", eager=True, filter=Condition(self._transcript_has_focus))
-        def _transcript_filter(_event) -> None:
-            self.controller.cycle_transcript_filter()
-
-        @bindings.add("s", eager=True, filter=Condition(self._transcript_has_focus))
-        def _transcript_sort(_event) -> None:
-            self.controller.toggle_transcript_sort()
-
         return bindings
 
     def _invalidate(self) -> None:
+        self._sync_find_buffers_from_state()
         self._refresh_dimensions()
         self._refresh_web_view_height()
         self._refresh_transcript_dimensions()
         self._update_web_focus()
+        self._update_find_focus()
         self._update_dialog_focus()
         self._update_transcript_focus()
         self.application.invalidate()
 
     def _refresh_dimensions(self) -> None:
         self.prompt_field.window.height = self.controller.prompt_height()
+        self.find_field.window.height = 1
+        self.replace_field.window.height = 1
         self.indicator_window.height = self.controller.indicator_height()
 
     def _refresh_web_view_height(self) -> None:
@@ -541,6 +646,8 @@ class AunicTuiApp:
             return self._model_picker_view.window
         if self.controller.state.active_dialog == "permission_prompt":
             return self._permission_prompt_view.window
+        if self.controller.state.find_ui.active:
+            return self._find_ui_container()
         if self.controller.state.web_mode == "idle":
             return self.prompt_field
         return self._web_view.window
@@ -552,8 +659,37 @@ class AunicTuiApp:
         self._last_web_mode = current
         if current != "idle":
             self.application.layout.focus(self._web_view.window)
-        else:
+        elif not self.controller.state.find_ui.active:
             self.application.layout.focus(self.prompt_field)
+
+    def _update_find_focus(self) -> None:
+        state = self.controller.state.find_ui
+        if not state.active:
+            if (
+                self.application.layout.has_focus(self.find_field)
+                or self.application.layout.has_focus(self.replace_field)
+                or self.application.layout.has_focus(self.find_controls_window)
+            ):
+                self.application.layout.focus(self.prompt_field)
+            return
+        if not self._find_ui_control_has_focus():
+            if self.application.layout.has_focus(self.prompt_field):
+                self._focus_find_active_field()
+            return
+        self._focus_find_active_field()
+
+    def _focus_find_active_field(self) -> None:
+        state = self.controller.state.find_ui
+        if state.active_field == "buttons":
+            if not self.application.layout.has_focus(self.find_controls_window):
+                self.application.layout.focus(self.find_controls_window)
+            return
+        if state.active_field == "replace" and state.replace_mode:
+            if not self.application.layout.has_focus(self.replace_field):
+                self.application.layout.focus(self.replace_field)
+            return
+        if not self.application.layout.has_focus(self.find_field):
+            self.application.layout.focus(self.find_field)
 
     def _update_dialog_focus(self) -> None:
         dialog = self.controller.state.active_dialog
@@ -607,8 +743,193 @@ class AunicTuiApp:
         )
 
     def _prompt_box_height(self) -> int:
+        if self.controller.state.find_ui.active:
+            prompt_body_height = 1 + (1 if self.controller.state.find_ui.replace_mode else 0)
+            return prompt_body_height + 1 + 1 + 2
         prompt_body_height = _dimension_value(self._prompt_area_body(), 3)
         return prompt_body_height + 1 + 1 + 2
+
+    def _find_ui_container(self):
+        lines = [self._find_input_row("find")]
+        if self.controller.state.find_ui.replace_mode:
+            lines.append(self._find_input_row("replace"))
+        return HSplit(lines)
+
+    def _find_input_row(self, field: str):
+        label = "find: " if field == "find" else "replace: "
+        area = self.find_field if field == "find" else self.replace_field
+        return VSplit(
+            [
+                Window(
+                    FormattedTextControl(
+                        text=lambda label=label: [("class:prompt.find.label", label)]
+                    ),
+                    width=len(label),
+                    dont_extend_width=True,
+                    height=1,
+                ),
+                area,
+            ]
+        )
+
+    def _control_row_body(self):
+        if self.controller.state.find_ui.active:
+            return self._find_control_row()
+        return VSplit(
+            [
+                VSplit(
+                    [
+                        self._control_window(self._model_control_fragments, self._open_model_picker),
+                        self._control_window(self._work_control_fragments, self.controller.toggle_work_mode),
+                        self._control_window(self._mode_control_fragments, self._toggle_mode_background),
+                    ],
+                    padding=1,
+                ),
+                Window(),
+                self._control_window(self._send_control_fragments, self._send_background),
+            ],
+            padding=1,
+        )
+
+    def _find_control_row(self):
+        return self.find_controls_window
+
+    def _cycle_find_focus(self, *, forward: bool) -> None:
+        state = self.controller.state.find_ui
+        if not state.active:
+            return
+        order = ["find"]
+        if state.replace_mode:
+            order.append("replace")
+        order.append("buttons")
+        try:
+            current_index = order.index(state.active_field)
+        except ValueError:
+            current_index = 0
+        delta = 1 if forward else -1
+        next_field = order[(current_index + delta) % len(order)]
+        self.controller.set_find_active_field(next_field)
+
+    def _handle_find_shortcut(self) -> None:
+        state = self.controller.state.find_ui
+        if not state.active:
+            self.controller.open_find_ui()
+            self.application.layout.focus(self.find_field)
+            return
+        if self._find_text_field_has_focus():
+            self.controller.set_find_replace_mode(not state.replace_mode)
+            self.application.layout.focus(self.find_field)
+            return
+        self.controller.set_find_active_field("find")
+        self.application.layout.focus(self.find_field)
+
+    def _find_button_specs(self) -> list[tuple[str, bool, Callable[[], object]]]:
+        specs: list[tuple[str, bool, Callable[[], object]]] = [
+            ("[ X ]", True, self._close_find_ui),
+            ("[ Aa: on ]" if self.controller.state.find_ui.case_sensitive else "[ Aa: off ]", True, self.controller.toggle_find_case_sensitive),
+            ("[ next ]", bool(self.controller.state.find_ui.find_text), self.controller.find_next_match),
+            ("[ prev ]", bool(self.controller.state.find_ui.find_text), self.controller.find_previous_match),
+        ]
+        if self.controller.state.find_ui.replace_mode:
+            specs.extend(
+                [
+                    ("[ repl. ]", bool(self.controller.state.find_ui.match_count), self._replace_current_find_match),
+                    ("[ repl. all ]", bool(self.controller.state.find_ui.match_count), self._replace_all_find_matches),
+                    ("[ find ]", True, self._open_find_mode),
+                ]
+            )
+        else:
+            specs.append(("[ replace ]", True, self._open_replace_mode))
+        return specs
+
+    def _find_controls_fragments(self):
+        specs = self._find_button_specs()
+        selected_index = self._valid_find_button_index(self.controller.state.find_ui.button_index, specs=specs) if specs else 0
+        self.controller.state.find_ui.button_index = selected_index
+        focused = self.controller.state.find_ui.active_field == "buttons"
+        left_specs = specs[:-1]
+        right_spec = specs[-1] if specs else None
+        fragments: StyleAndTextTuples = []
+
+        def _style_for(index: int, enabled: bool) -> str:
+            if focused and index == selected_index and enabled:
+                return "class:control.active"
+            if not enabled:
+                return "class:control.disabled"
+            return "class:control"
+
+        left_width = 0
+        for index, (label, enabled, _callback) in enumerate(left_specs):
+            if fragments:
+                fragments.append(("", " "))
+                left_width += 1
+            fragments.append((_style_for(index, enabled), label, lambda event, index=index: self._click_find_button(event, index)))
+            left_width += len(label)
+
+        right_width = len(right_spec[0]) if right_spec is not None else 0
+        row_width = self._find_controls_width()
+        gap = max(1, row_width - left_width - right_width)
+        fragments.append(("", " " * gap))
+        if right_spec is not None:
+            index = len(specs) - 1
+            label, enabled, _callback = right_spec
+            fragments.append((_style_for(index, enabled), label, lambda event, index=index: self._click_find_button(event, index)))
+        return fragments
+
+    def _find_controls_width(self) -> int:
+        try:
+            return max(20, self.application.output.get_size().columns - 4)
+        except Exception:
+            return 76
+
+    def _move_find_button_selection(self, delta: int) -> None:
+        specs = self._find_button_specs()
+        if not specs:
+            return
+        state = self.controller.state.find_ui
+        state.active_field = "buttons"
+        state.button_index = self._valid_find_button_index(state.button_index + delta, delta=delta, specs=specs)
+        self._invalidate()
+
+    def _activate_selected_find_button(self) -> None:
+        specs = self._find_button_specs()
+        if not specs:
+            return
+        index = self._valid_find_button_index(self.controller.state.find_ui.button_index, specs=specs)
+        self.controller.state.find_ui.button_index = index
+        _label, enabled, callback = specs[index]
+        if not enabled:
+            return
+        result = callback()
+        if asyncio.iscoroutine(result):
+            self._background(result)
+
+    def _click_find_button(self, mouse_event, index: int) -> None:
+        self.controller.state.find_ui.active_field = "buttons"
+        self.controller.state.find_ui.button_index = index
+        self.application.layout.focus(self.find_controls_window)
+        if mouse_event.event_type != MouseEventType.MOUSE_UP:
+            self._invalidate()
+            return
+        self._activate_selected_find_button()
+
+    def _valid_find_button_index(
+        self,
+        index: int,
+        *,
+        delta: int = 1,
+        specs: list[tuple[str, bool, Callable[[], object]]] | None = None,
+    ) -> int:
+        specs = self._find_button_specs() if specs is None else specs
+        if not specs:
+            return 0
+        direction = 1 if delta >= 0 else -1
+        index %= len(specs)
+        for _ in range(len(specs)):
+            if specs[index][1]:
+                return index
+            index = (index + direction) % len(specs)
+        return 0
 
     def _editor_line_prefix(self, line_number: int, wrap_count: int):
         lines = self.controller.current_display_lines()
@@ -635,17 +956,29 @@ class AunicTuiApp:
     def _toggle_focus_between_editor_and_prompt(self) -> None:
         if self.controller.state.active_dialog is not None:
             return
+        prompt_target = self.prompt_field
+        if self.controller.state.find_ui.active:
+            if self.controller.state.find_ui.active_field == "buttons":
+                prompt_target = self.find_controls_window
+            else:
+                prompt_target = self.replace_field if (
+                    self.controller.state.find_ui.replace_mode and self.controller.state.find_ui.active_field == "replace"
+                ) else self.find_field
         if self.application.layout.has_focus(self.editor):
             if self.controller.has_transcript() and self.controller.state.transcript_open:
                 self._transcript_view.ensure_selection()
                 self.application.layout.focus(self._transcript_view.window)
                 return
-            self.application.layout.focus(self.prompt_field)
+            self.application.layout.focus(prompt_target)
             return
         if self.application.layout.has_focus(self._transcript_view.window):
-            self.application.layout.focus(self.prompt_field)
+            self.application.layout.focus(prompt_target)
             return
-        if self.application.layout.has_focus(self.prompt_field):
+        if (
+            self.application.layout.has_focus(self.prompt_field)
+            or self.application.layout.has_focus(self.find_field)
+            or self.application.layout.has_focus(self.replace_field)
+        ):
             if self._transcript_fills_editor_area():
                 self._transcript_view.ensure_selection()
                 self.application.layout.focus(self._transcript_view.window)
@@ -662,6 +995,8 @@ class AunicTuiApp:
         return (
             self.application.layout.has_focus(self.editor)
             or self.application.layout.has_focus(self.prompt_field)
+            or self.application.layout.has_focus(self.find_field)
+            or self.application.layout.has_focus(self.replace_field)
         )
 
     def _editing_text_area_has_selection(self) -> bool:
@@ -696,11 +1031,47 @@ class AunicTuiApp:
     def _in_web_results(self) -> bool:
         return self.controller.state.web_mode == "results"
 
+    def _find_ui_active(self) -> bool:
+        return self.controller.state.find_ui.active
+
+    def _find_ui_replace_mode_active(self) -> bool:
+        return self.controller.state.find_ui.active and self.controller.state.find_ui.replace_mode
+
+    def _find_field_has_focus(self) -> bool:
+        return self.controller.state.find_ui.active and self.application.layout.has_focus(self.find_field)
+
+    def _replace_field_has_focus(self) -> bool:
+        return (
+            self.controller.state.find_ui.active
+            and self.controller.state.find_ui.replace_mode
+            and self.application.layout.has_focus(self.replace_field)
+        )
+
+    def _find_text_field_has_focus(self) -> bool:
+        return self._find_field_has_focus() or self._replace_field_has_focus()
+
+    def _find_buttons_have_focus(self) -> bool:
+        return self.controller.state.find_ui.active and self.application.layout.has_focus(self.find_controls_window)
+
+    def _find_ui_control_has_focus(self) -> bool:
+        return (
+            self._find_field_has_focus()
+            or self._replace_field_has_focus()
+            or self._find_buttons_have_focus()
+        )
+
+    def _can_toggle_find_ui(self) -> bool:
+        return self.controller.state.active_dialog is None and self.controller.state.web_mode == "idle"
+
     def _active_text_area(self) -> TextArea | None:
         if self.application.layout.has_focus(self.editor):
             return self.editor
         if self.application.layout.has_focus(self.prompt_field):
             return self.prompt_field
+        if self.application.layout.has_focus(self.find_field):
+            return self.find_field
+        if self.application.layout.has_focus(self.replace_field):
+            return self.replace_field
         return None
 
     def _indent_active_text_area(self) -> None:
@@ -784,11 +1155,76 @@ class AunicTuiApp:
     def _background(self, coroutine) -> None:
         self.application.create_background_task(coroutine)
 
+    def _handle_find_buffer_changed(self, _event) -> None:
+        if self._syncing_find:
+            return
+        self.controller.set_find_field_text("find", self.find_field.text)
+
+    def _handle_replace_buffer_changed(self, _event) -> None:
+        if self._syncing_replace:
+            return
+        self.controller.set_find_field_text("replace", self.replace_field.text)
+
+    def _sync_find_buffers_from_state(self) -> None:
+        state = self.controller.state.find_ui
+        if self.find_field.text != state.find_text:
+            self._syncing_find = True
+            try:
+                self.find_field.buffer.set_document(
+                    Document(text=state.find_text, cursor_position=len(state.find_text)),
+                    bypass_readonly=True,
+                )
+            finally:
+                self._syncing_find = False
+        if self.replace_field.text != state.replace_text:
+            self._syncing_replace = True
+            try:
+                self.replace_field.buffer.set_document(
+                    Document(text=state.replace_text, cursor_position=len(state.replace_text)),
+                    bypass_readonly=True,
+                )
+            finally:
+                self._syncing_replace = False
+
+    def _close_find_ui(self) -> None:
+        self.controller.close_find_ui()
+
+    def _open_replace_mode(self) -> None:
+        self.controller.set_find_replace_mode(True)
+
+    def _open_find_mode(self) -> None:
+        self.controller.set_find_replace_mode(False)
+
+    def _replace_current_find_match(self) -> None:
+        if self.controller.state.find_ui.current_match_index is None:
+            self.controller.find_next_match()
+        if self.controller.state.find_ui.current_match_index is None:
+            return
+        self._reset_undo_coalescing_for_buffer(self.editor.buffer)
+        self.editor.buffer.save_to_undo_stack()
+        if self.controller.replace_current_find_match():
+            self._reset_undo_coalescing_for_buffer(self.editor.buffer)
+            self.application.layout.focus(self.editor)
+
+    def _replace_all_find_matches(self) -> None:
+        if self.controller.state.find_ui.match_count <= 0:
+            self.controller.replace_all_find_matches()
+            return
+        self._reset_undo_coalescing_for_buffer(self.editor.buffer)
+        self.editor.buffer.save_to_undo_stack()
+        if self.controller.replace_all_find_matches() > 0:
+            self._reset_undo_coalescing_for_buffer(self.editor.buffer)
+            self.application.layout.focus(self.editor)
+
     def _active_text_buffer(self):
         if self.application.layout.has_focus(self.editor):
             return self.editor.buffer
         if self.application.layout.has_focus(self.prompt_field):
             return self.prompt_field.buffer
+        if self.application.layout.has_focus(self.find_field):
+            return self.find_field.buffer
+        if self.application.layout.has_focus(self.replace_field):
+            return self.replace_field.buffer
         return None
 
     def _move_active_text_area_visual(self, direction: int) -> None:
@@ -814,6 +1250,8 @@ class AunicTuiApp:
             return self.controller.editor_is_read_only()
         if self.application.layout.has_focus(self.prompt_field):
             return self.controller.state.run_in_progress
+        if self.application.layout.has_focus(self.find_field) or self.application.layout.has_focus(self.replace_field):
+            return False
         return True
 
     def _coalesce_buffer_undo_history(self, buffer) -> None:
@@ -843,6 +1281,10 @@ class AunicTuiApp:
             return self.controller._syncing_editor
         if buffer is self.prompt_field.buffer:
             return self.controller._syncing_prompt
+        if buffer is self.find_field.buffer:
+            return self._syncing_find
+        if buffer is self.replace_field.buffer:
+            return self._syncing_replace
         return False
 
     def _reset_undo_coalescing_for_buffer(self, buffer, *, text: str | None = None) -> None:
@@ -873,6 +1315,29 @@ class AunicTuiApp:
             self._suspend_undo_coalescing = False
         self._reset_undo_coalescing_for_buffer(buffer)
 
+    def _move_line_active_text_area(self, direction: int) -> None:
+        """Move the current line up (direction=-1) or down (direction=1)."""
+        buffer = self._active_text_buffer()
+        if buffer is None or self._active_text_area_is_read_only():
+            return
+        lines = buffer.text.splitlines(keepends=True)
+        if not lines:
+            return
+        row = buffer.document.cursor_position_row
+        col = buffer.document.cursor_position_col
+        swap = row + direction
+        if swap < 0 or swap >= len(lines):
+            return
+        self._reset_undo_coalescing_for_buffer(buffer)
+        buffer.save_to_undo_stack()
+        lines[row], lines[swap] = lines[swap], lines[row]
+        updated_text = "".join(lines)
+        new_cursor = _cursor_position_for_row_col(updated_text, swap, col)
+        buffer.set_document(
+            Document(text=updated_text, cursor_position=new_cursor),
+            bypass_readonly=True,
+        )
+
     def _control_window(self, text_getter, callback) -> Window:
         return Window(
             FormattedTextControl(
@@ -898,12 +1363,38 @@ class AunicTuiApp:
         return [(style, self.controller.state.indicator_message)]
 
     def _send_control_fragments(self):
-        style = (
-            "class:control.send.disabled"
-            if self.controller.state.run_in_progress
-            else "class:control.send"
-        )
-        return [(style, "[↑]", lambda event: self._fragment_click(event, self._send_background))]
+        if self.controller.state.run_in_progress:
+            return [("class:control.send", "[x]", lambda event: self._fragment_click(event, self.controller.force_stop_run))]
+        return [("class:control.send", "[↑]", lambda event: self._fragment_click(event, self._send_background))]
+
+    def _find_close_fragments(self):
+        return [("class:control", "[ X ]", lambda event: self._fragment_click(event, self._close_find_ui))]
+
+    def _find_case_fragments(self):
+        state = self.controller.state.find_ui
+        return [("class:control", f"[ Aa: {'on' if state.case_sensitive else 'off'} ]", lambda event: self._fragment_click(event, self.controller.toggle_find_case_sensitive))]
+
+    def _find_next_fragments(self):
+        style = "class:control" if self.controller.state.find_ui.find_text else "class:control.disabled"
+        return [(style, "[ next ]", lambda event: self._fragment_click(event, self.controller.find_next_match))]
+
+    def _find_prev_fragments(self):
+        style = "class:control" if self.controller.state.find_ui.find_text else "class:control.disabled"
+        return [(style, "[ prev ]", lambda event: self._fragment_click(event, self.controller.find_previous_match))]
+
+    def _find_open_replace_fragments(self):
+        return [("class:control", "[ replace ]", lambda event: self._fragment_click(event, self._open_replace_mode))]
+
+    def _find_open_find_fragments(self):
+        return [("class:control", "[ find ]", lambda event: self._fragment_click(event, self._open_find_mode))]
+
+    def _replace_current_fragments(self):
+        style = "class:control" if self.controller.state.find_ui.match_count else "class:control.disabled"
+        return [(style, "[ repl. ]", lambda event: self._fragment_click(event, self._replace_current_find_match))]
+
+    def _replace_all_fragments(self):
+        style = "class:control" if self.controller.state.find_ui.match_count else "class:control.disabled"
+        return [(style, "[ repl. all ]", lambda event: self._fragment_click(event, self._replace_all_find_matches))]
 
     def _mode_control_fragments(self):
         if self.controller.state.web_mode != "idle":
@@ -912,8 +1403,8 @@ class AunicTuiApp:
 
     def _work_control_fragments(self):
         if self.controller.state.web_mode != "idle":
-            return [("class:control.disabled", f"[ Work: {self.controller.state.work_mode} ]")]
-        return [("class:control", f"[ Work: {self.controller.state.work_mode} ]", lambda event: self._fragment_click(event, self.controller.toggle_work_mode))]
+            return [("class:control.disabled", f"[ Agent: {self.controller.state.work_mode} ]")]
+        return [("class:control", f"[ Agent: {self.controller.state.work_mode} ]", lambda event: self._fragment_click(event, self.controller.toggle_work_mode))]
 
     def _model_control_fragments(self):
         if self.controller.state.web_mode != "idle":

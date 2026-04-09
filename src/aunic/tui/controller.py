@@ -4,6 +4,7 @@ import asyncio
 import difflib
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,7 @@ from typing import Callable
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
+from prompt_toolkit.selection import SelectionType
 
 from aunic.config import SETTINGS
 from aunic.context import FileManager
@@ -40,8 +42,9 @@ from aunic.tui.folding import (
     reconstruct_full_text,
     toggle_fold_for_line,
 )
-from aunic.tui.rendering import soft_wrap_prefix_for_line
+from aunic.tui.rendering import soft_wrap_prefix_for_line, _PROMPT_COMMAND_RE
 from aunic.tui.types import (
+    FindField,
     ModelOption,
     NoteConflictState,
     PermissionPromptState,
@@ -142,6 +145,7 @@ class TuiController:
         self._invalidate: Callable[[], None] = lambda: None
         self._watch_task: asyncio.Task[None] | None = None
         self._run_task: asyncio.Task[None] | None = None
+        self._force_stopped: bool = False
         self._syncing_editor = False
         self._syncing_prompt = False
         self._full_text = ""
@@ -156,6 +160,7 @@ class TuiController:
         self._on_transcript_maximized_changed: Callable[[bool], None] | None = None
         self._cached_fetch_urls: set[str] = set()
         self._recent_display_change_spans: tuple[TextSpan, ...] = ()
+        self._model_insert_display_change_spans: tuple[TextSpan, ...] = ()
         # @web ephemeral navigation state
         self._web_query: str = ""
         self._web_results: tuple[SearchResult, ...] = ()
@@ -166,6 +171,7 @@ class TuiController:
         self._web_chunk_cursor: int = 0
         self._web_chunk_selected: set[int] = set()
         self._permission_future: asyncio.Future[str] | None = None
+        self._pending_prompt_restore: str | None = None
         self._run_start_time: float | None = None
         self._run_turn_count: int = 0
         self._run_error_count: int = 0
@@ -298,6 +304,9 @@ class TuiController:
     def recent_display_change_spans(self) -> tuple[TextSpan, ...]:
         return self._recent_display_change_spans
 
+    def model_insert_display_change_spans(self) -> tuple[TextSpan, ...]:
+        return self._model_insert_display_change_spans
+
     def editor_is_read_only(self) -> bool:
         return self.cursor_on_placeholder_line()
 
@@ -338,10 +347,14 @@ class TuiController:
             return
         if self.state.active_dialog == "note_conflict":
             return
+        was_model_picker = self.state.active_dialog == "model_picker"
         self.state.active_dialog = None
         self.state.pending_switch_path = None
         self.state.permission_prompt = None
         self.state.note_conflict = None
+        if was_model_picker and self._pending_prompt_restore is not None:
+            self._sync_prompt_text(self._pending_prompt_restore)
+            self._pending_prompt_restore = None
         self._invalidate()
 
     def move_dialog_selection(self, delta: int) -> None:
@@ -432,11 +445,20 @@ class TuiController:
         )
         updated_text = join_note_and_transcript(chosen_note, conflict.transcript_text)
         try:
+            previous_display_text = self._fold_render.display_text
             await self._persist_active_file_text(
                 updated_text,
                 expected_revision=conflict.model_revision_id,
             )
-            await self._load_active_file(reset_dirty=True, highlight_recent=prefer_model)
+            await self._load_active_file(
+                reset_dirty=True,
+                highlight_recent=prefer_model and conflict.tool_name != "note_edit",
+            )
+            if prefer_model and conflict.tool_name == "note_edit":
+                self._set_model_insert_highlight_from_display_diff(
+                    previous_display_text,
+                    self._fold_render.display_text,
+                )
         except OptimisticWriteError:
             self.state.pending_external_reload = True
             self.state.active_dialog = "reload_confirm"
@@ -475,10 +497,170 @@ class TuiController:
         self._invalidate()
         return True
 
+    def open_find_ui(
+        self,
+        *,
+        replace_mode: bool = False,
+        saved_prompt_text: str | None = None,
+        find_text: str | None = None,
+        replace_text: str | None = None,
+    ) -> None:
+        state = self.state.find_ui
+        was_active = state.active
+        if not was_active:
+            state.saved_prompt_text = self.current_prompt_text() if saved_prompt_text is None else saved_prompt_text
+            state.case_sensitive = False
+        elif saved_prompt_text is not None:
+            state.saved_prompt_text = saved_prompt_text
+        state.active = True
+        state.replace_mode = replace_mode
+        state.active_field = "find"
+        state.button_index = 0
+        if find_text is not None:
+            state.find_text = find_text
+        if replace_text is not None:
+            state.replace_text = replace_text
+        self._refresh_find_matches(auto_select=bool(state.find_text))
+        if replace_mode:
+            self._set_status("Find/replace active. Esc closes. Enter replaces. Replace all is on the button row.")
+        else:
+            self._set_status("Find active. Enter/Down jumps next. Up jumps previous. Esc closes.")
+        self._invalidate()
+
+    def close_find_ui(self) -> None:
+        state = self.state.find_ui
+        if not state.active:
+            return
+        restored_prompt = state.saved_prompt_text
+        state.active = False
+        state.replace_mode = False
+        state.case_sensitive = False
+        state.find_text = ""
+        state.replace_text = ""
+        state.active_field = "find"
+        state.button_index = 0
+        state.saved_prompt_text = ""
+        state.current_match_index = None
+        state.current_match_start = None
+        state.current_match_end = None
+        state.match_count = 0
+        self._clear_editor_selection()
+        self._sync_prompt_text(restored_prompt)
+        self._set_status("Closed find.")
+        self._invalidate()
+
+    def set_find_field_text(self, field: FindField, text: str) -> None:
+        if field == "find":
+            self.state.find_ui.find_text = text
+            self._refresh_find_matches(auto_select=bool(text))
+        else:
+            self.state.find_ui.replace_text = text
+        self._invalidate()
+
+    def toggle_find_case_sensitive(self) -> None:
+        self.state.find_ui.case_sensitive = not self.state.find_ui.case_sensitive
+        self._refresh_find_matches(auto_select=bool(self.state.find_ui.find_text))
+        self._invalidate()
+
+    def set_find_active_field(self, field: FindField) -> None:
+        if field == "replace" and not self.state.find_ui.replace_mode:
+            return
+        self.state.find_ui.active_field = field
+        self._invalidate()
+
+    def set_find_replace_mode(self, replace_mode: bool) -> None:
+        self.state.find_ui.replace_mode = replace_mode
+        self.state.find_ui.active_field = "find"
+        self.state.find_ui.button_index = 0
+        if replace_mode:
+            self._set_status("Find/replace active. Esc closes. Enter replaces. Replace all is on the button row.")
+        else:
+            self._set_status("Find active. Enter/Down jumps next. Up jumps previous. Esc closes.")
+        self._invalidate()
+
+    def find_next_match(self) -> None:
+        self._move_find_match(direction=1)
+
+    def find_previous_match(self) -> None:
+        self._move_find_match(direction=-1)
+
+    def replace_current_find_match(self) -> bool:
+        state = self.state.find_ui
+        matches = self._find_matches()
+        match_index = state.current_match_index
+        if match_index is None or match_index >= len(matches):
+            self._set_error("No active match to replace.")
+            self._invalidate()
+            return False
+        match = matches[match_index]
+        replacement = state.replace_text
+        updated_note = (
+            self._note_content_text[:match.start]
+            + replacement
+            + self._note_content_text[match.end:]
+        )
+        next_start = match.start + len(replacement)
+        self._apply_note_content_edit(updated_note)
+        updated_matches = _find_literal_matches(updated_note, state.find_text, case_sensitive=state.case_sensitive)
+        if updated_matches:
+            next_index = next((i for i, span in enumerate(updated_matches) if span.start >= next_start), 0)
+            self._activate_find_match(updated_matches, next_index)
+        else:
+            self._clear_find_match_state()
+            self._clear_editor_selection()
+            self._set_status("Replaced match. No more matches.")
+        self._invalidate()
+        return True
+
+    def replace_all_find_matches(self) -> int:
+        state = self.state.find_ui
+        matches = self._find_matches()
+        if not matches:
+            self._set_error("No matches to replace.")
+            self._invalidate()
+            return 0
+
+        replacement = state.replace_text
+        parts: list[str] = []
+        last_end = 0
+        replaced = 0
+        for match in matches:
+            matched_text = self._note_content_text[match.start:match.end]
+            parts.append(self._note_content_text[last_end:match.start])
+            if matched_text != replacement:
+                parts.append(replacement)
+                replaced += 1
+            else:
+                parts.append(matched_text)
+            last_end = match.end
+        parts.append(self._note_content_text[last_end:])
+
+        if replaced <= 0:
+            self._set_status("All matches already use the replacement text.")
+            self._invalidate()
+            return 0
+
+        updated_note = "".join(parts)
+        self._apply_note_content_edit(updated_note)
+        updated_matches = _find_literal_matches(updated_note, state.find_text, case_sensitive=state.case_sensitive)
+        if updated_matches:
+            self._activate_find_match(updated_matches, 0)
+        else:
+            self._clear_find_match_state()
+            self._clear_editor_selection()
+        self._set_status(f"Replaced {replaced} matches.")
+        self._invalidate()
+        return replaced
+
     async def send_prompt(self) -> None:
         # Dispatch to web flow if already in web mode (prompt is hidden, Ctrl+R = confirm)
         if self.state.web_mode != "idle":
             self._handle_web_send()
+            return
+
+        if self.state.find_ui.active:
+            self._set_error("Close find before running the model.")
+            self._invalidate()
             return
 
         if self.state.run_in_progress:
@@ -492,24 +674,67 @@ class TuiController:
         if self.state.active_file_missing_on_disk and not await self.save_active_file():
             return
 
-        # Intercept @web prefix
-        if stripped.startswith("@web"):
-            query = stripped[len("@web"):].strip()
-            if not query:
-                self._set_error("Usage: @web <search query>")
+        # Detect active slash/@web commands anywhere in the prompt text
+        cmd_match = _PROMPT_COMMAND_RE.search(prompt_text)
+        if cmd_match is not None:
+            cmd = cmd_match.group(0)
+            remaining = (prompt_text[:cmd_match.start()] + prompt_text[cmd_match.end():]).strip()
+
+            if cmd == "@web":
+                query = remaining
+                if not query:
+                    self._set_error("Usage: @web <search query>")
+                    self._invalidate()
+                    return
+                if self.state.editor_dirty and not await self.save_active_file():
+                    return
+                self._sync_prompt_text("")
+                self._run_task = asyncio.create_task(self._run_web_search(query))
+                return
+
+            if cmd == "/context":
+                self._handle_context_command()
+                self._sync_prompt_text(remaining)
                 self._invalidate()
                 return
-            if self.state.editor_dirty and not await self.save_active_file():
-                return
-            self._sync_prompt_text("")
-            self._run_task = asyncio.create_task(self._run_web_search(query))
-            return
 
-        if stripped == "/context":
-            self._handle_context_command()
-            self._sync_prompt_text("")
-            self._invalidate()
-            return
+            if cmd in ("/note", "/chat"):
+                new_mode = cmd[1:]
+                self.state.mode = new_mode  # type: ignore[assignment]
+                self._set_status(f"Switched to {new_mode} mode.")
+                self._sync_prompt_text(remaining)
+                self._invalidate()
+                return
+
+            if cmd in ("/work", "/read", "/off"):
+                new_work_mode = cmd[1:]
+                self.state.work_mode = new_work_mode  # type: ignore[assignment]
+                self._set_status(f"Agent mode set to {new_work_mode}.")
+                self._sync_prompt_text(remaining)
+                self._invalidate()
+                return
+
+            if cmd == "/model":
+                self._pending_prompt_restore = remaining
+                self._sync_prompt_text("")
+                self.open_model_picker()
+                return
+
+            if cmd == "/clear-history":
+                await self._handle_clear_history_command()
+                self._sync_prompt_text(remaining)
+                self._invalidate()
+                return
+
+            if cmd == "/find":
+                find_text, replace_text = _parse_find_prompt_text(remaining)
+                self.open_find_ui(
+                    replace_mode=replace_text is not None,
+                    saved_prompt_text="",
+                    find_text=find_text,
+                    replace_text=replace_text or "",
+                )
+                return
 
         if stripped.startswith("/"):
             self._set_error("That slash command is not available in the terminal UI yet.")
@@ -527,6 +752,13 @@ class TuiController:
         self._set_status("Starting model run.")
         self._invalidate()
         self._run_task = asyncio.create_task(self._run_current_mode(prompt_text))
+
+    def force_stop_run(self) -> None:
+        if not self.state.run_in_progress or self._run_task is None:
+            return
+        self._force_stopped = True
+        self._run_task.cancel()
+        self._invalidate()
 
     async def toggle_mode(self) -> None:
         if self.state.run_in_progress:
@@ -670,12 +902,15 @@ class TuiController:
         if self._syncing_editor or self._editor_buffer is None:
             return
         self._clear_recent_change_highlight()
+        self._clear_model_insert_highlight()
         self._note_content_text = reconstruct_full_text(
             self._editor_buffer.text,
             self._fold_render.placeholder_map,
         )
         self._full_text = self._compose_full_text(self._note_content_text)
         self.state.editor_dirty = self._full_text != self._last_saved_text
+        if self.state.find_ui.active:
+            self._refresh_find_matches(auto_select=False)
         self._invalidate()
 
     def _handle_prompt_buffer_changed(self, _event) -> None:
@@ -688,6 +923,7 @@ class TuiController:
         self._invalidate()
 
     async def _run_current_mode(self, prompt_text: str) -> None:
+        self._force_stopped = False
         try:
             provider = self._build_provider()
             if self.state.mode == "note":
@@ -750,39 +986,56 @@ class TuiController:
             if self._ctx_tokens_used is not None:
                 self._ctx_last_file_len = len(self._full_text)
                 self._save_ctx_cache()
+        except asyncio.CancelledError:
+            elapsed = _format_elapsed(self._run_start_time)
+            stats = f" [time={elapsed}] [turns={self._run_turn_count} errors={self._run_error_count}]"
+            self._set_error(f"Forced Stop!{stats}")
+            await self._load_active_file(reset_dirty=True)
         except (NoteModeError, ChatModeError, FileReadError) as exc:
             self._set_error(str(exc))
         except Exception as exc:  # pragma: no cover - live provider/path safety
             self._set_error(f"TUI run failed: {exc}")
         finally:
             self.state.run_in_progress = False
+            self._force_stopped = False
             self._run_note_baseline_content = None
             self._invalidate()
 
     async def _reconcile_note_mode_result(self, result: NoteModeRunResult) -> None:
         baseline_note = self._run_note_baseline_content
         note_result = _latest_note_tool_result(result)
+        previous_display_text = self._fold_render.display_text
 
         if note_result is None:
             if baseline_note is None or self._note_content_text == baseline_note:
                 await self._load_active_file(reset_dirty=True)
             return
 
+        tool_name, payload = note_result
+
         snapshot = await self._file_manager.read_snapshot(self.state.active_file)
         model_note_content, transcript_text = split_note_and_transcript(snapshot.raw_text)
         current_user_note = self._note_content_text
 
         if baseline_note is None or current_user_note == baseline_note or current_user_note == model_note_content:
-            await self._load_active_file(reset_dirty=True, highlight_recent=True)
+            await self._load_active_file(reset_dirty=True, highlight_recent=tool_name != "note_edit")
+            if tool_name == "note_edit":
+                self._set_model_insert_highlight_from_display_diff(
+                    previous_display_text,
+                    self._fold_render.display_text,
+                )
             return
 
-        tool_name, payload = note_result
         if tool_name == "note_edit":
             merged_note = reapply_note_edit_payload_to_note_content(current_user_note, payload)
             if merged_note is not None:
                 updated_text = join_note_and_transcript(merged_note, transcript_text)
                 await self._persist_active_file_text(updated_text, expected_revision=snapshot.revision_id)
-                await self._load_active_file(reset_dirty=True, highlight_recent=True)
+                await self._load_active_file(reset_dirty=True)
+                self._set_model_insert_highlight_from_display_diff(
+                    previous_display_text,
+                    self._fold_render.display_text,
+                )
                 return
 
         self.state.note_conflict = NoteConflictState(
@@ -853,6 +1106,11 @@ class TuiController:
             )
         elif current_display_text != previous_display_text:
             self._recent_display_change_spans = ()
+        self._model_insert_display_change_spans = ()
+        if self.state.find_ui.active:
+            self._refresh_find_matches(auto_select=False)
+        else:
+            self._clear_editor_selection()
 
     async def _switch_active_file(self, path: Path) -> None:
         self.state.active_file = path
@@ -933,6 +1191,129 @@ class TuiController:
             self._syncing_prompt = False
         self.state.prompt_text = text
 
+    def _find_matches(self) -> tuple[TextSpan, ...]:
+        state = self.state.find_ui
+        return _find_literal_matches(
+            self._note_content_text,
+            state.find_text,
+            case_sensitive=state.case_sensitive,
+        )
+
+    def _refresh_find_matches(self, *, auto_select: bool) -> None:
+        matches = self._find_matches()
+        self.state.find_ui.match_count = len(matches)
+        if not matches:
+            self._clear_find_match_state()
+            self._clear_editor_selection()
+            if self.state.find_ui.find_text:
+                self._set_error("No matches found.")
+            return
+        if auto_select:
+            self._activate_find_match(matches, 0)
+            return
+        self._clear_find_match_state()
+        self._clear_editor_selection()
+        self._set_status(f"Found {len(matches)} matches.")
+
+    def _move_find_match(self, *, direction: int) -> None:
+        matches = self._find_matches()
+        self.state.find_ui.match_count = len(matches)
+        if not matches:
+            self._clear_find_match_state()
+            self._clear_editor_selection()
+            self._set_error("No matches found.")
+            self._invalidate()
+            return
+        current = self.state.find_ui.current_match_index
+        if current is None or current >= len(matches):
+            next_index = 0 if direction >= 0 else len(matches) - 1
+        else:
+            next_index = (current + direction) % len(matches)
+        self._activate_find_match(matches, next_index)
+        self._invalidate()
+
+    def _activate_find_match(self, matches: tuple[TextSpan, ...], index: int) -> None:
+        index = max(0, min(index, len(matches) - 1))
+        match = matches[index]
+        self._ensure_editor_visible_for_find()
+        self._unfold_for_raw_note_span(match.start, match.end)
+        self._select_raw_note_span(match.start, match.end)
+        self.state.find_ui.current_match_index = index
+        self.state.find_ui.current_match_start = match.start
+        self.state.find_ui.current_match_end = match.end
+        self.state.find_ui.match_count = len(matches)
+        self._set_status(f"Match {index + 1}/{len(matches)}.")
+
+    def _clear_find_match_state(self) -> None:
+        self.state.find_ui.current_match_index = None
+        self.state.find_ui.current_match_start = None
+        self.state.find_ui.current_match_end = None
+
+    def _apply_note_content_edit(self, new_note_content: str) -> None:
+        self._clear_recent_change_highlight()
+        self._clear_model_insert_highlight()
+        self._note_content_text = new_note_content
+        self._full_text = self._compose_full_text(self._note_content_text)
+        self.state.editor_dirty = self._full_text != self._last_saved_text
+        self._sync_editor_from_note_content(preserve_cursor=False)
+
+    def _ensure_editor_visible_for_find(self) -> None:
+        if not self.transcript_view_state.maximized:
+            return
+        self.transcript_view_state.maximized = False
+        if self._on_transcript_maximized_changed is not None:
+            self._on_transcript_maximized_changed(False)
+
+    def _unfold_for_raw_note_span(self, start: int, end: int) -> None:
+        if start >= end:
+            return
+        document = Document(text=self._note_content_text)
+        start_row, _ = document.translate_index_to_position(start)
+        end_row, _ = document.translate_index_to_position(max(start, end - 1))
+        folded_ids = set(
+            self.state.fold_state.setdefault(
+                self.state.active_file,
+                default_folded_anchor_ids(self._note_content_text),
+            )
+        )
+        changed = True
+        while changed:
+            changed = False
+            render = apply_folds(self._note_content_text, folded_ids)
+            for region in render.regions:
+                if (
+                    region.anchor_id in folded_ids
+                    and region.hidden_start_line <= end_row
+                    and region.hidden_end_line >= start_row
+                ):
+                    folded_ids.remove(region.anchor_id)
+                    changed = True
+        if folded_ids != set(self.state.fold_state.get(self.state.active_file, set())):
+            self.state.fold_state[self.state.active_file] = folded_ids
+            self._sync_editor_from_note_content(preserve_cursor=False)
+
+    def _select_raw_note_span(self, start: int, end: int) -> None:
+        if self._editor_buffer is None or start >= end:
+            return
+        document = Document(text=self._note_content_text)
+        start_row, start_col = document.translate_index_to_position(start)
+        end_row, end_col = document.translate_index_to_position(end)
+        folded_ids = set(self.state.fold_state.get(self.state.active_file, set()))
+        start_display_row = _display_row_for_raw_row(self._note_content_text, folded_ids, start_row)
+        end_display_row = _display_row_for_raw_row(self._note_content_text, folded_ids, end_row)
+        start_position = _cursor_position_for_row_col(self._fold_render.display_text, start_display_row, start_col)
+        end_position = _cursor_position_for_row_col(self._fold_render.display_text, end_display_row, end_col)
+        self._editor_buffer.exit_selection()
+        self._editor_buffer.cursor_position = start_position
+        self._editor_buffer.start_selection(selection_type=SelectionType.CHARACTERS)
+        self._editor_buffer.cursor_position = end_position
+
+    def _clear_editor_selection(self) -> None:
+        if self._editor_buffer is None:
+            return
+        if self._editor_buffer.selection_state is not None:
+            self._editor_buffer.exit_selection()
+
     def _maybe_fetch_openrouter_context_window(self) -> None:
         model = self.state.selected_model
         if model.provider_name != "openai_compatible" or model.profile_id is None:
@@ -971,6 +1352,16 @@ class TuiController:
                 break
         except Exception:
             pass
+
+    async def _handle_clear_history_command(self) -> None:
+        if not self._transcript_rows:
+            self._set_status("Transcript is already empty.")
+            return
+        count = len(self._transcript_rows)
+        new_text = self._note_content_text
+        await self._persist_active_file_text(new_text)
+        await self._load_active_file(reset_dirty=True)
+        self._set_status(f"Cleared {count} transcript item(s).")
 
     def _handle_context_command(self) -> None:
         used = self._effective_ctx_tokens()
@@ -1019,6 +1410,19 @@ class TuiController:
 
     def _clear_recent_change_highlight(self) -> None:
         self._recent_display_change_spans = ()
+
+    def _clear_model_insert_highlight(self) -> None:
+        self._model_insert_display_change_spans = ()
+
+    def _set_model_insert_highlight_from_display_diff(
+        self,
+        previous_display_text: str,
+        current_display_text: str,
+    ) -> None:
+        self._model_insert_display_change_spans = _novel_text_spans(
+            previous_display_text,
+            current_display_text,
+        )
 
     def _set_fold_at_cursor(self, *, folded: bool) -> None:
         if self._editor_buffer is None:
@@ -1501,6 +1905,7 @@ class TuiController:
         self.transcript_view_state.expanded_rows.clear()
         self._cached_fetch_urls = set()
         self._recent_display_change_spans = ()
+        self._model_insert_display_change_spans = ()
         self.state.editor_dirty = False
         self.state.note_conflict = None
         self.state.pending_external_reload = False
@@ -1650,6 +2055,25 @@ def _latest_note_tool_result(result: NoteModeRunResult) -> tuple[str, dict[str, 
     return None
 
 
+def _parse_find_prompt_text(text: str) -> tuple[str, str | None]:
+    if " /replace " not in text:
+        return text.strip(), None
+    find_text, replace_text = text.split(" /replace ", 1)
+    return find_text.strip(), replace_text
+
+
+def _literal_search_pattern(text: str, *, case_sensitive: bool) -> re.Pattern[str]:
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.compile(re.escape(text), flags)
+
+
+def _find_literal_matches(text: str, query: str, *, case_sensitive: bool) -> tuple[TextSpan, ...]:
+    if not query:
+        return ()
+    pattern = _literal_search_pattern(query, case_sensitive=case_sensitive)
+    return tuple(TextSpan(match.start(), match.end()) for match in pattern.finditer(text))
+
+
 def _tool_error_payload(*, reason: str, message: str, **details: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "category": "validation_error",
@@ -1667,6 +2091,35 @@ def _cursor_position_for_row_col(text: str, row: int, col: int) -> int:
     clamped_row = min(max(row, 0), len(lines) - 1)
     position = sum(len(line) for line in lines[:clamped_row])
     return min(position + col, position + len(lines[clamped_row].rstrip("\r\n")))
+
+
+def _display_row_for_raw_row(text: str, folded_ids: set[str], raw_row: int) -> int:
+    raw_lines = text.splitlines(keepends=True)
+    if not raw_lines:
+        return 0
+    raw_row = max(0, min(raw_row, len(raw_lines) - 1))
+    render = apply_folds(text, folded_ids)
+    hidden_start_map = {
+        region.hidden_start_line: region
+        for region in render.regions
+        if region.anchor_id in folded_ids
+    }
+
+    display_row = 0
+    line_index = 0
+    while line_index < len(raw_lines):
+        if line_index == raw_row:
+            return display_row
+        hidden_region = hidden_start_map.get(line_index)
+        if hidden_region is not None:
+            if raw_row <= hidden_region.hidden_end_line:
+                return display_row
+            display_row += 1
+            line_index = hidden_region.hidden_end_line + 1
+            continue
+        display_row += 1
+        line_index += 1
+    return max(0, display_row - 1)
 
 
 def _format_elapsed(start_time: float | None) -> str:
@@ -1728,6 +2181,39 @@ def _display_change_spans(previous_text: str, current_text: str) -> tuple[TextSp
         else:
             spans.append(TextSpan(b0, b1))
     return tuple(spans)
+
+
+def _novel_text_spans(previous_text: str, current_text: str) -> tuple[TextSpan, ...]:
+    if previous_text == current_text:
+        return ()
+
+    spans: list[TextSpan] = []
+    matcher = difflib.SequenceMatcher(a=previous_text, b=current_text, autojunk=False)
+    for tag, a0, a1, b0, b1 in matcher.get_opcodes():
+        if tag == "insert":
+            _append_span(spans, b0, b1)
+            continue
+        if tag != "replace" or b0 == b1:
+            continue
+        local_matcher = difflib.SequenceMatcher(
+            a=previous_text[a0:a1],
+            b=current_text[b0:b1],
+            autojunk=False,
+        )
+        for local_tag, _la0, _la1, lb0, lb1 in local_matcher.get_opcodes():
+            if local_tag not in {"replace", "insert"}:
+                continue
+            _append_span(spans, b0 + lb0, b0 + lb1)
+    return tuple(spans)
+
+
+def _append_span(spans: list[TextSpan], start: int, end: int) -> None:
+    if start >= end:
+        return
+    if spans and start <= spans[-1].end:
+        spans[-1] = TextSpan(spans[-1].start, max(spans[-1].end, end))
+    else:
+        spans.append(TextSpan(start, end))
 
 
 def _should_highlight_recent_change(event: ProgressEvent) -> bool:

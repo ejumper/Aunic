@@ -169,6 +169,314 @@ async def test_tui_ctrl_z_and_ctrl_y_use_grouped_undo_redo(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_tui_ctrl_f_opens_find_ui_and_close_restores_prompt_draft(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta gamma\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.application.layout.focus(app.prompt_field)
+        pipe.send_text("draft prompt")
+        await asyncio.sleep(0.05)
+
+        pipe.send_bytes(b"\x06")
+        await asyncio.sleep(0.05)
+
+        assert app.controller.state.find_ui.active is True
+        assert app.application.layout.has_focus(app.find_field)
+        assert app.prompt_field.text == "draft prompt"
+
+        pipe.send_bytes(b"\x1b")
+        await asyncio.sleep(0.1)
+
+        assert app.controller.state.find_ui.active is False
+        assert app.application.layout.has_focus(app.prompt_field)
+        assert app.prompt_field.text == "draft prompt"
+
+        app.application.exit(result=0)
+        await task
+
+
+@pytest.mark.asyncio
+async def test_tui_find_ui_does_not_steal_focus_back_from_editor_after_typing(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.controller.open_find_ui(find_text="beta")
+        app.application.layout.focus(app.editor)
+        app.editor.buffer.cursor_position = len(app.editor.buffer.text)
+        app._invalidate()
+        await asyncio.sleep(0.05)
+
+        app.editor.buffer.insert_text("!")
+        await asyncio.sleep(0.05)
+
+        assert app.application.layout.has_focus(app.editor)
+        assert app.editor.buffer.text.endswith("!\n") or app.editor.buffer.text.endswith("\n!")
+
+        app.application.exit(result=0)
+        await task
+
+
+def test_tui_ctrl_f_focuses_existing_replace_ui_without_closing_it_from_editor(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    app.controller.open_find_ui(replace_mode=True, find_text="beta", replace_text="BETA")
+    app.application.layout.focus(app.editor)
+
+    app._handle_find_shortcut()
+
+    assert app.controller.state.find_ui.replace_mode is True
+    assert app.application.layout.has_focus(app.find_field)
+
+
+def test_tui_ctrl_f_closes_replace_mode_from_find_or_replace_field(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    app.controller.open_find_ui(replace_mode=True, find_text="beta", replace_text="BETA")
+    app.application.layout.focus(app.replace_field)
+
+    app._handle_find_shortcut()
+
+    assert app.controller.state.find_ui.active is True
+    assert app.controller.state.find_ui.replace_mode is False
+    assert app.application.layout.has_focus(app.find_field)
+
+
+def test_tui_ctrl_f_opens_replace_mode_from_find_field(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    app.controller.open_find_ui(find_text="beta")
+    app.application.layout.focus(app.find_field)
+
+    app._handle_find_shortcut()
+
+    assert app.controller.state.find_ui.active is True
+    assert app.controller.state.find_ui.replace_mode is True
+    assert app.application.layout.has_focus(app.find_field)
+
+
+@pytest.mark.asyncio
+async def test_tui_find_field_uses_grouped_undo_redo(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta gamma\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.controller.open_find_ui()
+        app._invalidate()
+        await asyncio.sleep(0.05)
+
+        pipe.send_text("beta")
+        await asyncio.sleep(0.05)
+        assert app.find_field.text == "beta"
+
+        pipe.send_bytes(b"\x1a")
+        await asyncio.sleep(0.05)
+        assert app.find_field.text == ""
+
+        pipe.send_bytes(b"\x19")
+        await asyncio.sleep(0.05)
+        assert app.find_field.text == "beta"
+
+        app.application.exit(result=0)
+        await task
+
+
+@pytest.mark.asyncio
+async def test_tui_replace_current_focuses_editor_and_ctrl_z_undoes_note_change(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.controller.open_find_ui(replace_mode=True, find_text="beta", replace_text="BETA")
+        app.controller.set_find_active_field("replace")
+        app.application.layout.focus(app.replace_field)
+        app._invalidate()
+        await asyncio.sleep(0.05)
+
+        app._replace_current_find_match()
+        await asyncio.sleep(0.05)
+
+        assert app.application.layout.has_focus(app.editor)
+        assert app.editor.buffer.text == "alpha BETA\n"
+
+        pipe.send_bytes(b"\x1a")
+        await asyncio.sleep(0.05)
+        assert app.editor.buffer.text == "alpha beta\n"
+
+        app.application.exit(result=0)
+        await task
+
+
+@pytest.mark.asyncio
+async def test_tui_find_ui_tab_cycles_to_button_row_and_enter_activates_selected_button(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+
+    with create_pipe_input() as pipe:
+        app = AunicTuiApp(
+            active_file=note,
+            note_runner=_FakeNoteRunner(note),
+            chat_runner=_FakeChatRunner(),
+            file_manager=_QuietFileManager(),
+            input=pipe,
+            output=DummyOutput(),
+        )
+        task = asyncio.create_task(app.run())
+        await asyncio.sleep(0.1)
+
+        app.controller.open_find_ui(replace_mode=True, find_text="beta", replace_text="BETA")
+        app._invalidate()
+        await asyncio.sleep(0.05)
+
+        assert app.application.layout.has_focus(app.find_field)
+
+        pipe.send_bytes(b"\t")
+        await asyncio.sleep(0.05)
+        assert app.application.layout.has_focus(app.replace_field)
+
+        pipe.send_bytes(b"\t")
+        await asyncio.sleep(0.05)
+        assert app.application.layout.has_focus(app.find_controls_window)
+        assert app.controller.state.find_ui.button_index == 0
+
+        pipe.send_bytes(b"\x1b[C")
+        pipe.send_bytes(b"\x1b[C")
+        pipe.send_bytes(b"\x1b[C")
+        pipe.send_bytes(b"\x1b[C")
+        await asyncio.sleep(0.05)
+        assert app.controller.state.find_ui.button_index == 4
+
+        pipe.send_bytes(b"\r")
+        await asyncio.sleep(0.05)
+
+        assert app.application.layout.has_focus(app.editor)
+        assert app.editor.buffer.text == "alpha BETA\n"
+
+        app.application.exit(result=0)
+        await task
+
+
+def test_tui_find_button_keyboard_navigation_skips_disabled_buttons(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    app.controller.open_find_ui()
+    app.controller.set_find_active_field("buttons")
+
+    app._move_find_button_selection(1)
+    assert app.controller.state.find_ui.button_index == 1
+
+    app._move_find_button_selection(1)
+    assert app.controller.state.find_ui.button_index == 4
+
+    app._move_find_button_selection(-1)
+    assert app.controller.state.find_ui.button_index == 1
+
+
+def test_tui_find_ui_mouse_click_on_button_works(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta\n", encoding="utf-8")
+    app = AunicTuiApp(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        file_manager=_QuietFileManager(),
+        output=DummyOutput(),
+    )
+
+    app.controller.open_find_ui(find_text="beta")
+    fragments = app._find_controls_fragments()
+    replace_fragment = next(fragment for fragment in fragments if len(fragment) == 3 and fragment[1] == "[ replace ]")
+    handler = replace_fragment[2]
+    handler(
+        MouseEvent(
+            position=Point(x=0, y=0),
+            event_type=MouseEventType.MOUSE_UP,
+            button=MouseButton.LEFT,
+            modifiers=(),
+        )
+    )
+
+    assert app.controller.state.find_ui.replace_mode is True
+
+
+@pytest.mark.asyncio
 async def test_tui_arrow_keys_move_through_wrapped_rows_in_editor(tmp_path: Path) -> None:
     note = tmp_path / "note.md"
     note.write_text("This is a very long line that should wrap across multiple visual rows in the editor. " * 4, encoding="utf-8")
@@ -479,6 +787,7 @@ async def test_transcript_maximize_expands_height_and_persists_across_open_toggl
     )
     await app.controller.initialize()
 
+    app.controller.transcript_view_state.maximized = False
     app._refresh_transcript_dimensions()
     normal_height = app._transcript_view.window.height
     normal_preferred = normal_height.preferred if hasattr(normal_height, "preferred") else normal_height
@@ -559,6 +868,7 @@ async def test_tui_editor_renders_boxed_table_preview_when_cursor_is_outside_tab
     await app.controller.initialize()
 
     app.editor.buffer.cursor_position = 0
+    app.editor.buffer.load_history_if_not_yet_loaded = lambda: None
     content = app.editor.control.create_content(width=80, height=40)
     rendered = "\n".join(
         "".join(fragment[1] for fragment in content.get_line(i)).rstrip()
@@ -596,6 +906,7 @@ async def test_tui_editor_shows_raw_table_when_cursor_enters_table(tmp_path: Pat
 
     table_row_index = 2
     app.editor.buffer.cursor_position = app.editor.buffer.document.translate_row_col_to_index(table_row_index, 0)
+    app.editor.buffer.load_history_if_not_yet_loaded = lambda: None
     content = app.editor.control.create_content(width=80, height=40)
     rendered = "\n".join(
         "".join(fragment[1] for fragment in content.get_line(i)).rstrip()

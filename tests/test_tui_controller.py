@@ -22,6 +22,7 @@ from aunic.research.types import (
 )
 from aunic.tools.runtime import PermissionRequest
 from aunic.tui.controller import TuiController
+from aunic.tui.folding import heading_anchor_ids_for_title
 from aunic.transcript.parser import parse_transcript_rows, split_note_and_transcript
 from aunic.tools.runtime import join_note_and_transcript
 
@@ -360,6 +361,177 @@ async def test_controller_rebases_note_edit_onto_unsaved_user_changes(tmp_path: 
     assert controller.state.active_dialog is None
     assert note.read_text(encoding="utf-8") == "alpha\nBETA\ndelta"
     assert controller._editor_buffer.text == "alpha\nBETA\ndelta"
+
+
+@pytest.mark.asyncio
+async def test_controller_highlights_only_novel_text_for_note_edit(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    baseline = "she sells sea shells\n"
+    note.write_text(baseline, encoding="utf-8")
+    runner = _DeferredToolNoteRunner(
+        note,
+        tool_name="note_edit",
+        payload={
+            "type": "note_content_edit",
+            "old_string": "she sells sea shells",
+            "new_string": "she sells sea shells by the sea shore",
+            "actual_old_string": "she sells sea shells",
+            "replace_all": False,
+            "original_content": baseline,
+            "structured_patch": [],
+        },
+        written_note_content="she sells sea shells by the sea shore\n",
+    )
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "Please update it."
+    await controller.send_prompt()
+    await runner.started.wait()
+
+    runner.release.set()
+    await controller._run_task
+
+    highlighted = "".join(
+        controller._editor_buffer.text[span.start:span.end]
+        for span in controller.model_insert_display_change_spans()
+    )
+    assert highlighted == " by the sea shore"
+
+
+@pytest.mark.asyncio
+async def test_controller_send_prompt_does_not_clear_model_insert_highlight(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    runner = _DeferredToolNoteRunner(
+        note,
+        tool_name="note_write",
+        payload={
+            "type": "note_content_write",
+            "content": "Original\n",
+            "original_content": "Original\n",
+            "structured_patch": [],
+        },
+        written_note_content="Original\n",
+    )
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._model_insert_display_change_spans = (TextSpan(1, 4),)
+    controller._prompt_buffer.text = "Please update it."
+
+    await controller.send_prompt()
+    await runner.started.wait()
+
+    assert controller.model_insert_display_change_spans() == (TextSpan(1, 4),)
+
+    runner.release.set()
+    await controller._run_task
+
+
+@pytest.mark.asyncio
+async def test_controller_find_command_opens_seeded_find_replace_ui(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta gamma\n", encoding="utf-8")
+    note_runner = _FakeNoteRunner(note)
+    controller = TuiController(active_file=note, note_runner=note_runner, chat_runner=_FakeChatRunner())
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "/find beta /replace BETA"
+    await controller.send_prompt()
+
+    assert controller._run_task is None
+    assert controller.state.find_ui.active is True
+    assert controller.state.find_ui.replace_mode is True
+    assert controller.state.find_ui.find_text == "beta"
+    assert controller.state.find_ui.replace_text == "BETA"
+    assert controller.state.find_ui.match_count == 1
+    assert note_runner.requests == []
+
+
+@pytest.mark.asyncio
+async def test_controller_find_unfolds_folded_match_and_unmaximizes_transcript(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text(
+        "# Heading\n"
+        "alpha\n"
+        "target value\n"
+        "omega\n",
+        encoding="utf-8",
+    )
+    controller = TuiController(active_file=note, note_runner=_FakeNoteRunner(note), chat_runner=_FakeChatRunner())
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    anchor_id = next(iter(heading_anchor_ids_for_title(controller._note_content_text, "Heading")))
+    controller.state.fold_state[note] = {anchor_id}
+    controller._sync_editor_from_note_content(preserve_cursor=False)
+    controller.transcript_view_state.maximized = True
+
+    controller.open_find_ui(find_text="target")
+
+    assert controller.transcript_view_state.maximized is False
+    assert anchor_id not in controller.state.fold_state[note]
+    assert controller._editor_buffer.selection_state is not None
+
+
+@pytest.mark.asyncio
+async def test_controller_replace_current_and_replace_all_update_raw_note_content(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha beta beta\n", encoding="utf-8")
+    controller = TuiController(active_file=note, note_runner=_FakeNoteRunner(note), chat_runner=_FakeChatRunner())
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller.open_find_ui(replace_mode=True, find_text="beta", replace_text="BETA")
+    assert controller.replace_current_find_match() is True
+    assert controller._note_content_text == "alpha BETA beta\n"
+    assert controller.state.editor_dirty is True
+
+    replaced = controller.replace_all_find_matches()
+    assert replaced == 1
+    assert controller._note_content_text == "alpha BETA BETA\n"
+
+
+@pytest.mark.asyncio
+async def test_controller_clears_model_insert_highlight_on_file_reload(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    manager = _FakeWatchingFileManager(note, "Original\n", "Updated\n")
+    controller = TuiController(
+        active_file=note,
+        file_manager=manager,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._model_insert_display_change_spans = (TextSpan(0, 4),)
+    manager.current_text = "Updated\n"
+
+    await controller.handle_progress_event(
+        ProgressEvent(
+            kind="file_written",
+            message="Applied a tool result to disk.",
+            path=note,
+            details={"tool_name": "write"},
+        )
+    )
+
+    assert controller.model_insert_display_change_spans() == ()
 
 
 @pytest.mark.asyncio

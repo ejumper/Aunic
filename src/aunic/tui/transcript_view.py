@@ -64,6 +64,9 @@ class TranscriptView:
             content_width_callback=self._on_body_width_changed,
         )
         self._selected_row_number: int | None = None
+        self._cursor_col: str = "delete"   # "delete" or "action"
+        self._toolbar_focused: bool = False
+        self._toolbar_index: int = 0
         self._scroll_to_selection = False
         self._row_cache: dict[int, tuple[str, StyleAndTextTuples]] = {}
         self._last_line_count = 1
@@ -119,18 +122,154 @@ class TranscriptView:
         visible_numbers = {row.row_number for row in rows}
         if self._selected_row_number not in visible_numbers:
             self._selected_row_number = rows[0].row_number
+            self._cursor_col = "delete"
+            self._toolbar_focused = False
 
-    def move_selection(self, delta: int) -> None:
+    def move_up(self) -> None:
+        if self._toolbar_focused:
+            # Leave toolbar, go to first row
+            self._toolbar_focused = False
+            self._cursor_col = "delete"
+            rows = self._controller.visible_transcript_rows()
+            if rows:
+                self._selected_row_number = rows[0].row_number
+            self._scroll_to_selection = True
+            self._invalidate()
+            return
         rows = self._controller.visible_transcript_rows()
         if not rows:
-            self._selected_row_number = None
             return
         self.ensure_selection()
         row_numbers = [row.row_number for row in rows]
         index = row_numbers.index(self._selected_row_number) if self._selected_row_number in row_numbers else 0
-        index = max(0, min(len(row_numbers) - 1, index + delta))
-        self._selected_row_number = row_numbers[index]
+        if index == 0:
+            # Go to toolbar
+            self._toolbar_focused = True
+            self._toolbar_index = 0
+        else:
+            index -= 1
+            self._selected_row_number = row_numbers[index]
+            if self._cursor_col == "action":
+                row = next((r for r in rows if r.row_number == self._selected_row_number), None)
+                if row is None or not _row_has_action(row):
+                    self._cursor_col = "delete"
+            self._scroll_to_selection = True
+        self._invalidate()
+
+    def move_down(self) -> None:
+        if self._toolbar_focused:
+            self._toolbar_focused = False
+            self._cursor_col = "delete"
+            rows = self._controller.visible_transcript_rows()
+            if rows:
+                self._selected_row_number = rows[0].row_number
+            self._scroll_to_selection = True
+            self._invalidate()
+            return
+        rows = self._controller.visible_transcript_rows()
+        if not rows:
+            return
+        self.ensure_selection()
+        row_numbers = [row.row_number for row in rows]
+        index = row_numbers.index(self._selected_row_number) if self._selected_row_number in row_numbers else 0
+        if index >= len(row_numbers) - 1:
+            # Wrap to top
+            self._selected_row_number = row_numbers[0]
+            self._cursor_col = "delete"
+        else:
+            index += 1
+            self._selected_row_number = row_numbers[index]
+            if self._cursor_col == "action":
+                row = next((r for r in rows if r.row_number == self._selected_row_number), None)
+                if row is None or not _row_has_action(row):
+                    self._cursor_col = "delete"
         self._scroll_to_selection = True
+        self._invalidate()
+
+    def move_right(self) -> None:
+        if self._toolbar_focused:
+            self._toolbar_index = min(5, self._toolbar_index + 1)
+            self._invalidate()
+            return
+        self.ensure_selection()
+        if self._selected_row_number is None:
+            return
+        rows = self._controller.visible_transcript_rows()
+        row = next((r for r in rows if r.row_number == self._selected_row_number), None)
+        if row is not None and _row_has_action(row):
+            self._cursor_col = "action"
+            self._invalidate()
+
+    def move_left(self) -> None:
+        if self._toolbar_focused:
+            self._toolbar_index = max(0, self._toolbar_index - 1)
+            self._invalidate()
+            return
+        self._cursor_col = "delete"
+        self._invalidate()
+
+    def activate(self) -> None:
+        if self._toolbar_focused:
+            self._activate_toolbar_button()
+            return
+        self.ensure_selection()
+        if self._selected_row_number is None:
+            return
+        if self._cursor_col == "delete":
+            try:
+                get_app().create_background_task(self.delete_selected_row())
+            except Exception:
+                pass
+        else:
+            rows = self._controller.visible_transcript_rows()
+            row = next((r for r in rows if r.row_number == self._selected_row_number), None)
+            if row is None:
+                return
+            if row.tool_name in {"bash", "web_search"}:
+                self._controller.toggle_transcript_expand(row.row_number)
+            elif row.tool_name == "web_fetch":
+                payload = row.content if isinstance(row.content, dict) else {}
+                url = str(payload.get("url", ""))
+                if url:
+                    self._controller.open_transcript_url(url)
+        self._invalidate()
+
+    def go_home(self) -> None:
+        self._toolbar_focused = False
+        rows = self._controller.visible_transcript_rows()
+        if rows:
+            self._selected_row_number = rows[0].row_number
+            self._cursor_col = "delete"
+            self._scroll_to_selection = True
+        self._invalidate()
+
+    def go_end(self) -> None:
+        self._toolbar_focused = False
+        rows = self._controller.visible_transcript_rows()
+        if rows:
+            self._selected_row_number = rows[-1].row_number
+            self._cursor_col = "delete"
+            self._scroll_to_selection = True
+        self._invalidate()
+
+    def _activate_toolbar_button(self) -> None:
+        idx = self._toolbar_index
+        state = self._controller.transcript_view_state
+        if idx == 0:
+            self._controller.toggle_transcript_open()
+        elif idx == 1:
+            self._controller.toggle_transcript_maximized()
+        elif idx == 2:
+            self._controller.set_transcript_filter("all" if state.filter_mode == "chat" else "chat")
+        elif idx == 3:
+            self._controller.set_transcript_filter("all" if state.filter_mode == "tools" else "tools")
+        elif idx == 4:
+            self._controller.set_transcript_filter("all" if state.filter_mode == "search" else "search")
+        elif idx == 5:
+            self._controller.toggle_transcript_sort()
+        self._invalidate()
+
+    def _invalidate(self) -> None:
         try:
             get_app().invalidate()
         except Exception:
@@ -149,9 +288,12 @@ class TranscriptView:
         await self._controller.delete_transcript_row(self._selected_row_number)
         rows = self._controller.visible_transcript_rows()
         self._selected_row_number = rows[0].row_number if rows else None
+        self._cursor_col = "delete"
 
     def _build_render_context(self) -> TranscriptRenderContext:
         tool_call_index = self._controller.tool_call_index()
+        focused_col = self._cursor_col if not self._toolbar_focused else None
+        toolbar_idx = self._toolbar_index if self._toolbar_focused else None
         return TranscriptRenderContext(
             width=self._content_width(),
             tool_call_index=tool_call_index,
@@ -168,6 +310,8 @@ class TranscriptView:
             open_url=self._controller.open_transcript_url,
             copy_text=self._controller.copy_text_to_clipboard,
             copy_cached_fetch=self._controller.copy_cached_fetch_url,
+            focused_col=focused_col,
+            toolbar_focused_index=toolbar_idx,
         )
 
     def _render_toolbar(self) -> StyleAndTextTuples:
@@ -249,6 +393,7 @@ class TranscriptView:
             "cached_fetch_urls": sorted(self._controller.cached_fetch_urls()),
             "filter_mode": self._controller.transcript_view_state.filter_mode,
             "sort_order": self._controller.transcript_view_state.sort_order,
+            "focused_col": self._cursor_col if (row.row_number == self._selected_row_number and not self._toolbar_focused) else None,
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
@@ -438,3 +583,8 @@ class _TranscriptBodyWindow(Window):
 
 def _line_count(fragments: StyleAndTextTuples) -> int:
     return max(1, sum(fragment[1].count("\n") for fragment in fragments))
+
+
+def _row_has_action(row) -> bool:
+    """Returns True if the row has a secondary action button (toggle/open link)."""
+    return row.tool_name in {"bash", "web_search", "web_fetch"} and row.type in {"tool_result", "tool_error"}
