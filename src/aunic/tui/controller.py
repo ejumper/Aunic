@@ -191,6 +191,7 @@ class TuiController:
         self._web_packets: tuple[FetchPacket, ...] = ()
         self._web_chunk_cursor: int = 0
         self._web_chunk_selected: set[int] = set()
+        self._web_chunk_expanded: set[int] = set()
         # @rag ephemeral navigation state
         self._rag_active: bool = False
         self._rag_scope: str | None = None
@@ -1991,11 +1992,20 @@ class TuiController:
         self._invalidate()
 
     def web_toggle_expand(self) -> None:
-        i = self._web_result_cursor
-        if i in self._web_result_expanded:
-            self._web_result_expanded.discard(i)
+        if self.state.web_mode == "chunks":
+            i = self._web_chunk_cursor
+            if i < 0:
+                return
+            if i in self._web_chunk_expanded:
+                self._web_chunk_expanded.discard(i)
+            else:
+                self._web_chunk_expanded.add(i)
         else:
-            self._web_result_expanded.add(i)
+            i = self._web_result_cursor
+            if i in self._web_result_expanded:
+                self._web_result_expanded.discard(i)
+            else:
+                self._web_result_expanded.add(i)
         self._invalidate()
 
     def web_space_pressed(self) -> None:
@@ -2036,6 +2046,7 @@ class TuiController:
         self._web_packets = ()
         self._web_chunk_cursor = 0
         self._web_chunk_selected = set()
+        self._web_chunk_expanded = set()
         self._rag_active = False
         self._rag_scope = None
         self._rag_results = ()
@@ -2233,7 +2244,11 @@ class TuiController:
                 for i in range(len(self._web_results))
             )
         if self.state.web_mode == "chunks" and self._web_packets:
-            return 1 + len(self._web_packets[0].chunks) * 4  # 1 full-page row + 4 lines/chunk
+            chunks = self._web_packets[0].chunks
+            return 1 + sum(
+                (11 if i in self._web_chunk_expanded else 6)
+                for i in range(len(chunks))
+            )
         return 3
 
     # ── provider ───────────────────────────────────────────────────────────────

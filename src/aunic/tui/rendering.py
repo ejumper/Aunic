@@ -1,22 +1,34 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Callable
 
 from aunic.context.types import TextSpan
 from prompt_toolkit.formatted_text import StyleAndTextTuples
 from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.lexers import Lexer
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.styles import Style
 
 from aunic.tui.folding import FOLD_PLACEHOLDER_PREFIX, is_fold_placeholder_line
 
 _THEMATIC_BREAK_RE = re.compile(r"^\s*(?:\*\*\*+|---+)\s*$")
 
+# Markdown link: [label](url) or [label](url "title") — negative lookbehind skips images ![...]
+_LINK_RE = re.compile(
+    r"(?<!!)"                                           # not preceded by ! (image)
+    r"\[([^\]]+)\]"                                     # [label]
+    r"\("                                               # (
+    r"([^)\s\"'<>]+)"                                   # url/path
+    r"""(?:\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?"""       # optional title attribute
+    r"\)"                                               # )
+)
+
 # Slash/prefix commands that are highlighted blue in the prompt editor.
 # Mutable set — extended at runtime by register_rag_scopes().
 _prompt_active_commands: set[str] = {
-    "/context", "/note", "/chat", "/work", "/read", "/off", "/model", "/find", "@web",
+    "/context", "/note", "/chat", "/work", "/read", "/off", "/model", "/find", "/replace", "@web",
     "/include", "/exclude", "/isolate", "/map",
 }
 
@@ -117,6 +129,7 @@ def build_tui_style() -> Style:
             "transcript.error": "ansired",
             "transcript.delete": "ansired bold",
             "transcript.toggle": "ansibrightblack",
+            "md.link": "ansiblue underline",
             "transcript.link": "ansiblue underline",
             "transcript.link.cached": "ansiblue underline bold",
             "transcript.filter": "",
@@ -135,6 +148,81 @@ def build_tui_style() -> Style:
             "context.separator.red":    "ansired bold",
         }
     )
+
+
+def _slice_fragments(fragments: StyleAndTextTuples, start: int, end: int) -> StyleAndTextTuples:
+    """Return fragments covering character positions [start, end) of the joined line text."""
+    result: list = []
+    pos = 0
+    for fragment in fragments:
+        style = fragment[0]
+        text = fragment[1]
+        rest = fragment[2:]
+        frag_end = pos + len(text)
+        if frag_end > start and pos < end:
+            slice_start = max(0, start - pos)
+            slice_end = min(len(text), end - pos)
+            sliced = text[slice_start:slice_end]
+            if sliced:
+                result.append((style, sliced, *rest))
+        pos = frag_end
+    return result
+
+
+def _make_mouse_up_handler(callback: Callable[[], None]):
+    def handler(mouse_event) -> None:
+        if mouse_event.event_type == MouseEventType.MOUSE_UP:
+            callback()
+    return handler
+
+
+class MarkdownLinkProcessor(Processor):
+    """Collapse markdown links to their label text (blue/underlined, clickable) on non-cursor lines."""
+
+    def __init__(
+        self,
+        *,
+        open_target: Callable[[str], None] | None = None,
+        active_file: Callable[[], Path | None] | None = None,
+    ) -> None:
+        self._open_target = open_target or (lambda _: None)
+        self._active_file = active_file or (lambda: None)
+
+    def apply_transformation(self, transformation_input) -> Transformation:
+        line_text = "".join(f[1] for f in transformation_input.fragments)
+        if not _LINK_RE.search(line_text):
+            return Transformation(transformation_input.fragments)
+        if transformation_input.document.cursor_position_row == transformation_input.lineno:
+            return Transformation(transformation_input.fragments)
+
+        fragments: list = []
+        pos = 0
+        for m in _LINK_RE.finditer(line_text):
+            start, end = m.span()
+            if start > pos:
+                fragments.extend(_slice_fragments(transformation_input.fragments, pos, start))
+            label = m.group(1)
+            raw_target = m.group(2)
+            resolved = self._resolve(raw_target)
+            open_fn = self._open_target
+            handler = _make_mouse_up_handler(lambda t=resolved: open_fn(t))
+            fragments.append(("class:md.link", label, handler))
+            pos = end
+        if pos < len(line_text):
+            fragments.extend(_slice_fragments(transformation_input.fragments, pos, len(line_text)))
+
+        return Transformation(fragments)
+
+    def _resolve(self, target: str) -> str:
+        """Resolve relative paths against the active file's directory; pass URLs through."""
+        if "://" in target or target.startswith("mailto:"):
+            return target
+        if target.startswith("/"):
+            return target
+        active = self._active_file()
+        if active is not None:
+            return str((active.parent / target).resolve())
+        return target
 
 
 class AunicMarkdownLexer(Lexer):

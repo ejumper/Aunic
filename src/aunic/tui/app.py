@@ -34,8 +34,10 @@ from aunic.tui.types import IncludeEntry
 from aunic.tui.web_search_view import WebSearchView
 from aunic.tui.transcript_view import TranscriptView
 from aunic.tui.note_tables import NoteTablePreviewBufferControl
+from aunic.tui.controller import _open_url_focused
 from aunic.tui.rendering import (
     AunicMarkdownLexer,
+    MarkdownLinkProcessor,
     PromptLexer,
     RecentChangeProcessor,
     ThematicBreakProcessor,
@@ -193,6 +195,10 @@ class AunicTuiApp:
                 RecentChangeProcessor(
                     spans=self.controller.model_insert_display_change_spans,
                     style="class:md.model_insert",
+                ),
+                MarkdownLinkProcessor(
+                    open_target=_open_url_focused,
+                    active_file=lambda: self.controller.state.active_file,
                 ),
             ],
             search_buffer_control=original_editor_control.search_buffer_control,
@@ -549,6 +555,8 @@ class AunicTuiApp:
 
         @bindings.add("left", eager=True, filter=Condition(self._in_web_results))
         @bindings.add("right", eager=True, filter=Condition(self._in_web_results))
+        @bindings.add("left", eager=True, filter=Condition(self._in_web_chunks))
+        @bindings.add("right", eager=True, filter=Condition(self._in_web_chunks))
         def _web_toggle_expand(_event) -> None:
             self.controller.web_toggle_expand()
 
@@ -1076,6 +1084,9 @@ class AunicTuiApp:
 
     def _in_web_results(self) -> bool:
         return self.controller.state.web_mode == "results"
+
+    def _in_web_chunks(self) -> bool:
+        return self.controller.state.web_mode == "chunks"
 
     def _find_ui_active(self) -> bool:
         return self.controller.state.find_ui.active
