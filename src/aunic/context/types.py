@@ -127,7 +127,7 @@ class ContextBuildRequest:
     included_files: tuple[Path, ...] = ()
     user_prompt: str = ""
     prompt_mode: PromptMode = "direct"
-    total_turn_budget: int = 8
+    total_turn_budget: int = 100_000
     display_root: Path | None = None
 
 

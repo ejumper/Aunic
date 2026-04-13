@@ -12,9 +12,9 @@ from aunic.providers.codex import (
     build_codex_history_items,
     extract_assistant_text,
     extract_generated_rows_from_thread_items,
-    normalize_codex_reasoning_effort,
     usage_from_codex_token_usage,
 )
+from aunic.providers.shared import normalize_reasoning_effort
 from aunic.providers.codex_client import CodexTurnResult
 
 
@@ -41,9 +41,10 @@ def test_usage_from_codex_token_usage_maps_fields() -> None:
     assert usage.model_context_window == 128000
 
 
-def test_codex_reasoning_effort_normalizes_minimal() -> None:
-    assert normalize_codex_reasoning_effort("minimal") == "low"
-    assert normalize_codex_reasoning_effort("medium") == "medium"
+def test_reasoning_effort_normalizes_minimal() -> None:
+    assert normalize_reasoning_effort("minimal") == "low"
+    assert normalize_reasoning_effort("medium") == "medium"
+    assert normalize_reasoning_effort(None) == "medium"
 
 
 def test_build_codex_history_items_preserves_tool_call_and_result_shape() -> None:

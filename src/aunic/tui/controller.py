@@ -4,6 +4,7 @@ import asyncio
 import difflib
 import hashlib
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
@@ -28,7 +31,7 @@ from aunic.proto_settings import get_openai_compatible_profiles, resolve_openai_
 from aunic.providers import ClaudeProvider, CodexProvider, OpenAICompatibleProvider
 from aunic.research.fetch import FetchService
 from aunic.research.search import SearchService, canonicalize_url
-from aunic.research.types import FetchPacket, ResearchState, SearchResult
+from aunic.research.types import FetchedChunk, FetchPacket, ResearchState, SearchResult
 from aunic.tools.note_edit import reapply_note_edit_payload_to_note_content
 from aunic.tools.runtime import PermissionRequest, join_note_and_transcript
 from aunic.transcript.parser import parse_transcript_rows, split_note_and_transcript
@@ -42,9 +45,11 @@ from aunic.tui.folding import (
     reconstruct_full_text,
     toggle_fold_for_line,
 )
-from aunic.tui.rendering import soft_wrap_prefix_for_line, _PROMPT_COMMAND_RE
+from aunic.tui import rendering as tui_rendering
+from aunic.tui.rendering import soft_wrap_prefix_for_line, register_rag_scopes
 from aunic.tui.types import (
     FindField,
+    IncludeEntry,
     ModelOption,
     NoteConflictState,
     PermissionPromptState,
@@ -140,12 +145,24 @@ class TuiController:
             initial_profile_id,
         )
 
+        # Register RAG scopes for prompt highlighting (optional — RAG config may not exist)
+        try:
+            from aunic.rag.config import load_rag_config
+            _rag_cfg = load_rag_config(self._cwd)
+            if _rag_cfg is not None:
+                _tui_scopes = _rag_cfg.tui_scopes if _rag_cfg.tui_scopes is not None else _rag_cfg.scopes
+                register_rag_scopes(tuple(s.name for s in _tui_scopes))
+        except Exception:
+            pass
+
         self._editor_buffer: Buffer | None = None
         self._prompt_buffer: Buffer | None = None
         self._invalidate: Callable[[], None] = lambda: None
         self._watch_task: asyncio.Task[None] | None = None
         self._run_task: asyncio.Task[None] | None = None
         self._force_stopped: bool = False
+        self._tool_status_set_at: float = 0.0
+        self._pontificating_task: asyncio.Task[None] | None = None
         self._syncing_editor = False
         self._syncing_prompt = False
         self._full_text = ""
@@ -158,6 +175,10 @@ class TuiController:
         self.transcript_view_state = TranscriptViewState()
         self._on_transcript_open_changed: Callable[[bool], None] | None = None
         self._on_transcript_maximized_changed: Callable[[bool], None] | None = None
+        self._on_includes_changed: Callable[[], None] | None = None
+        self._on_file_switched: Callable[[Path], None] | None = None
+        self._on_mode_changed: Callable[[], None] | None = None
+        self._isolate_override: tuple[Path, ...] | None = None
         self._cached_fetch_urls: set[str] = set()
         self._recent_display_change_spans: tuple[TextSpan, ...] = ()
         self._model_insert_display_change_spans: tuple[TextSpan, ...] = ()
@@ -170,6 +191,11 @@ class TuiController:
         self._web_packets: tuple[FetchPacket, ...] = ()
         self._web_chunk_cursor: int = 0
         self._web_chunk_selected: set[int] = set()
+        # @rag ephemeral navigation state
+        self._rag_active: bool = False
+        self._rag_scope: str | None = None
+        self._rag_results: tuple = ()  # tuple[RagSearchResult, ...]
+        self._rag_client = None  # RagClient | None, lazy-initialized
         self._permission_future: asyncio.Future[str] | None = None
         self._pending_prompt_restore: str | None = None
         self._run_start_time: float | None = None
@@ -330,6 +356,45 @@ class TuiController:
             wrap_count,
             in_code_block=in_code_block,
         )
+
+    def _rebuild_available_files(self) -> None:
+        """Resolve include_entries to concrete paths and update available_files."""
+        active = self.state.active_file
+        base = active.parent
+        seen: set[Path] = set()
+        resolved: list[Path] = []
+        for entry in self.state.include_entries:
+            if not entry.active:
+                continue
+            raw = Path(entry.path)
+            target = (base / raw).resolve() if not raw.is_absolute() else raw.resolve()
+            if entry.is_dir:
+                pattern = "**/*.md" if entry.recursive else "*.md"
+                for p in sorted(target.glob(pattern)):
+                    rp = p.resolve()
+                    if rp != active and rp not in seen:
+                        seen.add(rp)
+                        resolved.append(rp)
+            else:
+                if target != active and target not in seen:
+                    seen.add(target)
+                    resolved.append(target)
+        self.state.available_files = (active, *resolved)
+        if self._on_includes_changed is not None:
+            self._on_includes_changed()
+
+    def toggle_include_active(self, index: int) -> None:
+        entry = self.state.include_entries[index]
+        self.state.include_entries[index] = IncludeEntry(
+            path=entry.path, is_dir=entry.is_dir, recursive=entry.recursive, active=not entry.active
+        )
+        self._rebuild_available_files()
+        self._invalidate()
+
+    def remove_include(self, index: int) -> None:
+        self.state.include_entries.pop(index)
+        self._rebuild_available_files()
+        self._invalidate()
 
     def open_file_menu(self) -> None:
         self.state.active_dialog = "file_menu"
@@ -674,8 +739,9 @@ class TuiController:
         if self.state.active_file_missing_on_disk and not await self.save_active_file():
             return
 
-        # Detect active slash/@web commands anywhere in the prompt text
-        cmd_match = _PROMPT_COMMAND_RE.search(prompt_text)
+        # Detect active slash/@ commands anywhere in the prompt text. Read the
+        # regex from the module so runtime RAG scope registration is visible.
+        cmd_match = tui_rendering._PROMPT_COMMAND_RE.search(prompt_text)
         if cmd_match is not None:
             cmd = cmd_match.group(0)
             remaining = (prompt_text[:cmd_match.start()] + prompt_text[cmd_match.end():]).strip()
@@ -692,6 +758,26 @@ class TuiController:
                 self._run_task = asyncio.create_task(self._run_web_search(query))
                 return
 
+            if cmd == "@rag" or (cmd.startswith("@") and cmd[1:] in self._rag_scope_names()):
+                scope = "rag" if cmd == "@rag" else cmd[1:]
+                query = remaining
+                if not query:
+                    self._set_error(f"Usage: {cmd} <search query>")
+                    self._invalidate()
+                    return
+                client = self._ensure_rag_client()
+                if client is None:
+                    self._set_error(
+                        "RAG not configured. Add a \"rag\" section to proto-settings.json with a server URL."
+                    )
+                    self._invalidate()
+                    return
+                if self.state.editor_dirty and not await self.save_active_file():
+                    return
+                self._sync_prompt_text("")
+                self._run_task = asyncio.create_task(self._run_rag_search(query, scope))
+                return
+
             if cmd == "/context":
                 self._handle_context_command()
                 self._sync_prompt_text(remaining)
@@ -702,6 +788,8 @@ class TuiController:
                 new_mode = cmd[1:]
                 self.state.mode = new_mode  # type: ignore[assignment]
                 self._set_status(f"Switched to {new_mode} mode.")
+                if self._on_mode_changed is not None:
+                    self._on_mode_changed()
                 self._sync_prompt_text(remaining)
                 self._invalidate()
                 return
@@ -710,6 +798,8 @@ class TuiController:
                 new_work_mode = cmd[1:]
                 self.state.work_mode = new_work_mode  # type: ignore[assignment]
                 self._set_status(f"Agent mode set to {new_work_mode}.")
+                if self._on_mode_changed is not None:
+                    self._on_mode_changed()
                 self._sync_prompt_text(remaining)
                 self._invalidate()
                 return
@@ -736,10 +826,40 @@ class TuiController:
                 )
                 return
 
-        if stripped.startswith("/"):
-            self._set_error("That slash command is not available in the terminal UI yet.")
-            self._invalidate()
-            return
+            if cmd == "/include":
+                self._handle_include_command(remaining)
+                self._sync_prompt_text("")
+                self._invalidate()
+                return
+
+            if cmd == "/exclude":
+                self._handle_exclude_command(remaining)
+                self._sync_prompt_text("")
+                self._invalidate()
+                return
+
+            if cmd == "/isolate":
+                prompt_text = self._handle_isolate_command(remaining)
+                self._sync_prompt_text("")
+                if prompt_text:
+                    if self.state.editor_dirty and not await self.save_active_file():
+                        return
+                    self._run_note_baseline_content = self._note_content_text
+                    self._clear_recent_change_highlight()
+                    if self._prompt_buffer is not None:
+                        self._sync_prompt_text("")
+                    self.state.run_in_progress = True
+                    self._set_status("Starting model run (isolate).")
+                    self._invalidate()
+                    self._run_task = asyncio.create_task(self._run_current_mode(prompt_text))
+                self._invalidate()
+                return
+
+            if cmd == "/map":
+                await self._handle_map_command(remaining)
+                self._sync_prompt_text("")
+                self._invalidate()
+                return
 
         if self.state.editor_dirty and not await self.save_active_file():
             return
@@ -754,11 +874,23 @@ class TuiController:
         self._run_task = asyncio.create_task(self._run_current_mode(prompt_text))
 
     def force_stop_run(self) -> None:
+        if self._pontificating_task is not None:
+            self._pontificating_task.cancel()
+            self._pontificating_task = None
         if not self.state.run_in_progress or self._run_task is None:
             return
         self._force_stopped = True
         self._run_task.cancel()
         self._invalidate()
+
+    async def _delayed_set_status(self, message: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            self._pontificating_task = None
+            self._set_status(message)
+            self._invalidate()
+        except asyncio.CancelledError:
+            pass
 
     async def toggle_mode(self) -> None:
         if self.state.run_in_progress:
@@ -767,6 +899,8 @@ class TuiController:
             return
         self.state.mode = "chat" if self.state.mode == "note" else "note"
         self._set_status(f"Switched to {self.state.mode} mode.")
+        if self._on_mode_changed is not None:
+            self._on_mode_changed()
         self._invalidate()
 
     async def toggle_work_mode(self) -> None:
@@ -778,6 +912,8 @@ class TuiController:
         current = order.index(self.state.work_mode)
         self.state.work_mode = order[(current + 1) % len(order)]  # type: ignore[assignment]
         self._set_status(f"Work mode set to {self.state.work_mode}.")
+        if self._on_mode_changed is not None:
+            self._on_mode_changed()
         self._invalidate()
 
     def cycle_model(self) -> None:
@@ -853,7 +989,17 @@ class TuiController:
         elif event.kind == "loop_event":
             loop_kind = event.details.get("loop_kind")
             if loop_kind == "provider_request":
-                self._set_status(f"Pontificating... ({self._run_turn_count})")
+                msg = f"Pontificating... ({self._run_turn_count})"
+                elapsed = time.monotonic() - self._tool_status_set_at
+                remaining = _MIN_TOOL_STATUS_SECONDS - elapsed
+                if remaining > 0:
+                    if self._pontificating_task is not None:
+                        self._pontificating_task.cancel()
+                    self._pontificating_task = asyncio.create_task(
+                        self._delayed_set_status(msg, remaining)
+                    )
+                else:
+                    self._set_status(msg)
             elif loop_kind == "provider_response":
                 usage = event.details.get("usage") or {}
                 input_tokens = usage.get("input_tokens")
@@ -869,7 +1015,11 @@ class TuiController:
                     self._save_ctx_cache()
                 tool_calls = event.details.get("tool_calls") or []
                 if tool_calls:
+                    if self._pontificating_task is not None:
+                        self._pontificating_task.cancel()
+                        self._pontificating_task = None
                     verb = _TOOL_VERBS.get(tool_calls[0], tool_calls[0].replace("_", " ").title())
+                    self._tool_status_set_at = time.monotonic()
                     self._set_status(f"{verb}...")
                 else:
                     self._set_status(event.message)
@@ -924,13 +1074,19 @@ class TuiController:
 
     async def _run_current_mode(self, prompt_text: str) -> None:
         self._force_stopped = False
+        isolate = self._isolate_override
+        self._isolate_override = None
+        if isolate is not None:
+            run_included = isolate  # may be empty (active file only) or explicit list
+        else:
+            run_included = self.state.included_files
         try:
             provider = self._build_provider()
             if self.state.mode == "note":
                 result = await self._note_runner.run(
                     NoteModeRunRequest(
                         active_file=self.state.active_file,
-                        included_files=self.state.included_files,
+                        included_files=run_included,
                         provider=provider,
                         user_prompt=prompt_text,
                         model=self.state.selected_model.model,
@@ -960,7 +1116,7 @@ class TuiController:
                 result = await self._chat_runner.run(
                     ChatModeRunRequest(
                         active_file=self.state.active_file,
-                        included_files=self.state.included_files,
+                        included_files=run_included,
                         provider=provider,
                         user_prompt=prompt_text,
                         model=self.state.selected_model.model,
@@ -996,6 +1152,9 @@ class TuiController:
         except Exception as exc:  # pragma: no cover - live provider/path safety
             self._set_error(f"TUI run failed: {exc}")
         finally:
+            if self._pontificating_task is not None:
+                self._pontificating_task.cancel()
+                self._pontificating_task = None
             self.state.run_in_progress = False
             self._force_stopped = False
             self._run_note_baseline_content = None
@@ -1112,13 +1271,28 @@ class TuiController:
         else:
             self._clear_editor_selection()
 
+        try:
+            from aunic.map.builder import refresh_map_entry_if_stale
+            refresh_map_entry_if_stale(self.state.active_file)
+        except Exception as exc:
+            logger.warning("map refresh on file open failed: %s", exc)
+
     async def _switch_active_file(self, path: Path) -> None:
+        try:
+            from aunic.map.builder import refresh_map_entry_if_stale
+            refresh_map_entry_if_stale(self.state.active_file)
+        except Exception as exc:
+            logger.warning("map refresh on file switch-away failed: %s", exc)
+
         self.state.active_file = path
         self.state.active_dialog = None
         self.state.pending_switch_path = None
         self.state.pending_external_reload = False
         self.state.ignored_external_revision = None
         self.state.active_file_missing_on_disk = not path.exists()
+        # Load per-file include entries for the new active file
+        if self._on_file_switched is not None:
+            self._on_file_switched(path)
         if self.state.active_file_missing_on_disk:
             self._bootstrap_missing_active_file()
         else:
@@ -1363,6 +1537,124 @@ class TuiController:
         await self._load_active_file(reset_dirty=True)
         self._set_status(f"Cleared {count} transcript item(s).")
 
+    def _handle_include_command(self, arg: str) -> None:
+        arg = arg.strip()
+        recursive = False
+        if arg.startswith("-r "):
+            recursive = True
+            arg = arg[3:].strip()
+        if not arg:
+            self._set_error("Usage: /include [-r] <path>")
+            return
+        raw_path = arg
+        base = self.state.active_file.parent
+        target = (base / raw_path).resolve() if not Path(raw_path).is_absolute() else Path(raw_path).resolve()
+        is_dir = raw_path.endswith("/") or target.is_dir()
+        # Normalize stored path (keep as typed)
+        existing_paths = {e.path for e in self.state.include_entries}
+        if raw_path in existing_paths:
+            self._set_status(f"Already included: {raw_path}")
+            return
+        self.state.include_entries.append(IncludeEntry(path=raw_path, is_dir=is_dir, recursive=recursive))
+        self._rebuild_available_files()
+        kind = "directory" if is_dir else "file"
+        self._set_status(f"Included {kind}: {raw_path}")
+
+    def _handle_exclude_command(self, arg: str) -> None:
+        arg = arg.strip()
+        if not arg:
+            self._set_error("Usage: /exclude <path>")
+            return
+        before = len(self.state.include_entries)
+        self.state.include_entries = [e for e in self.state.include_entries if e.path != arg]
+        if len(self.state.include_entries) == before:
+            self._set_error(f"Not in include list: {arg}")
+            return
+        self._rebuild_available_files()
+        self._set_status(f"Excluded: {arg}")
+
+    def _handle_isolate_command(self, remaining: str) -> str:
+        """Parse /isolate args, set _isolate_override, return prompt text."""
+        tokens = remaining.split()
+        path_tokens: list[str] = []
+        text_tokens: list[str] = []
+        for tok in tokens:
+            if (tok.startswith("/") or tok.startswith("./") or tok.startswith("../")) and not text_tokens:
+                path_tokens.append(tok)
+            else:
+                text_tokens.append(tok)
+        base = self.state.active_file.parent
+        if path_tokens:
+            paths = []
+            for pt in path_tokens:
+                p = Path(pt)
+                resolved = (base / p).resolve() if not p.is_absolute() else p.resolve()
+                paths.append(resolved)
+            self._isolate_override = tuple(paths)
+        else:
+            self._isolate_override = ()  # empty → only active file
+        prompt_text = " ".join(text_tokens)
+        if prompt_text:
+            self._set_status("Isolating run to specified files.")
+        else:
+            self._set_status("Isolate set; enter a prompt to run.")
+        return prompt_text
+
+    async def _handle_map_command(self, remaining: str) -> None:
+        """Dispatch /map subcommands: walk, --set-summary, --clear-summary, --generate-summary."""
+        tokens = remaining.split(None, 1)
+        first = tokens[0] if tokens else ""
+
+        if first == "--generate-summary":
+            self._set_error("--generate-summary is deferred to a follow-up; use --set-summary <text> for now.")
+            return
+
+        if first == "--set-summary":
+            text = tokens[1].strip() if len(tokens) > 1 else ""
+            if not text:
+                self._set_error("Usage: /map --set-summary <text>")
+                return
+            try:
+                from aunic.map.builder import set_summary
+                set_summary(self.state.active_file, text)
+                self._set_status(f"Summary locked for {self.state.active_file.name}.")
+            except Exception as exc:
+                self._set_error(f"/map --set-summary failed: {exc}")
+            return
+
+        if first == "--clear-summary":
+            try:
+                from aunic.map.builder import clear_summary
+                clear_summary(self.state.active_file)
+                self._set_status(f"Summary cleared for {self.state.active_file.name}.")
+            except Exception as exc:
+                self._set_error(f"/map --clear-summary failed: {exc}")
+            return
+
+        # Walk subcommand: /map or /map <path>
+        scope: Path | None = None
+        if first:
+            raw = Path(first).expanduser()
+            if not raw.is_absolute():
+                raw = self.state.active_file.parent / raw
+            scope = raw.resolve()
+            if not scope.exists() or not scope.is_dir():
+                self._set_error(f"/map: path not found or not a directory: {scope}")
+                return
+
+        try:
+            from aunic.map.builder import build_map
+            result = build_map(scope)
+            scope_label = f" under {scope}" if scope is not None else ""
+            self._set_status(
+                f"Mapped {result.entry_count} notes{scope_label}"
+                f" (+{result.entries_added} -{result.entries_removed}"
+                f", {result.entries_reused_from_cache} unchanged)"
+                f" in {result.elapsed_seconds:.1f}s."
+            )
+        except Exception as exc:
+            self._set_error(f"/map failed: {exc}")
+
     def _handle_context_command(self) -> None:
         used = self._effective_ctx_tokens()
         window = self._ctx_window_size or _known_context_window(self.state.selected_model)
@@ -1517,6 +1809,20 @@ class TuiController:
         if self.state.run_in_progress:
             self._set_error("Search/fetch in progress.")
             self._invalidate()
+            return
+        if self._rag_active:
+            if self.state.web_mode == "results":
+                if self._web_selected_result is None:
+                    self._set_error("Select a result with [Space] first.")
+                    self._invalidate()
+                    return
+                self._run_task = asyncio.create_task(self._run_rag_fetch())
+            elif self.state.web_mode == "chunks":
+                if self._web_chunk_cursor == -1 or self._web_chunk_selected:
+                    self._run_task = asyncio.create_task(self._insert_web_chunks())
+                else:
+                    self._set_error("Select chunks with [Space] or navigate to 'Fetch full page'.")
+                    self._invalidate()
             return
         if self.state.web_mode == "results":
             if self._web_selected_result is None:
@@ -1730,9 +2036,195 @@ class TuiController:
         self._web_packets = ()
         self._web_chunk_cursor = 0
         self._web_chunk_selected = set()
+        self._rag_active = False
+        self._rag_scope = None
+        self._rag_results = ()
         if status_message is not None:
             self._set_status(status_message)
         self._invalidate()
+
+    # ── @rag flow ──────────────────────────────────────────────────────────────
+
+    def _rag_scope_names(self) -> frozenset[str]:
+        try:
+            from aunic.rag.config import load_rag_config
+            cfg = load_rag_config(self._cwd)
+            if cfg is None:
+                return frozenset()
+            scopes = cfg.tui_scopes if cfg.tui_scopes is not None else cfg.scopes
+            return frozenset(s.name for s in scopes)
+        except Exception:
+            return frozenset()
+
+    def _ensure_rag_client(self):
+        if self._rag_client is not None:
+            return self._rag_client
+        try:
+            from aunic.rag.config import load_rag_config
+            cfg = load_rag_config(self._cwd)
+            if cfg is None:
+                return None
+            from aunic.rag.client import RagClient
+            self._rag_client = RagClient(cfg.server)
+            return self._rag_client
+        except Exception:
+            return None
+
+    async def _run_rag_search(self, query: str, scope: str | None) -> None:
+        self._rag_active = True
+        self._rag_scope = scope
+        self._web_query = query
+        self.state.run_in_progress = True
+        scope_label = f"@{scope}" if scope else "@rag"
+        self._set_status(f"Searching {scope_label}...")
+        self._invalidate()
+        client = self._ensure_rag_client()
+        if client is None:
+            self._set_error("RAG client unavailable.")
+            self._web_cancel(status_message=None)
+            self.state.run_in_progress = False
+            self._invalidate()
+            return
+        try:
+            rag_results = await client.search(query, scope=scope, limit=10)
+            tool_call = {"query": query, "scope": scope}
+            if not rag_results:
+                await self._append_user_tool_transcript_pair(
+                    "rag_search",
+                    tool_call,
+                    {"results": []},
+                )
+                self._set_error(f"No results for '{query}'.")
+                self._web_cancel(status_message=None)
+                return
+            self._rag_results = rag_results
+            self._web_results = tuple(
+                SearchResult(
+                    source_id=f"r{i}",
+                    title=r.title,
+                    url=r.url or r.local_path or f"[{r.source}] {r.result_id}",
+                    canonical_url=r.result_id,
+                    snippet=r.snippet,
+                    rank=i,
+                    refined_score=r.score,
+                )
+                for i, r in enumerate(rag_results)
+            )
+            payload = [
+                {
+                    "doc_id": r.doc_id,
+                    "result_id": r.result_id,
+                    "chunk_id": r.chunk_id,
+                    "title": r.title,
+                    "source": r.source,
+                    "snippet": r.snippet,
+                    "score": r.score,
+                    "url": r.url,
+                    "local_path": r.local_path,
+                }
+                for r in rag_results
+            ]
+            if not await self._append_user_tool_transcript_pair("rag_search", tool_call, payload):
+                self._web_cancel(status_message=None)
+                return
+            self._web_result_cursor = 0
+            self._web_result_expanded = set()
+            self._web_selected_result = None
+            self.state.web_mode = "results"
+            count = len(rag_results)
+            self._set_status(
+                f"Found {count} result{'s' if count != 1 else ''} from {scope_label}. "
+                "Space=select  Ctrl+R=fetch  Esc=cancel"
+            )
+        except Exception as exc:
+            await self._append_user_tool_transcript_pair(
+                "rag_search",
+                {"query": query, "scope": scope},
+                _tool_error_payload(
+                    reason="search_failed",
+                    message=str(exc),
+                    query=query,
+                    scope=scope,
+                ),
+                response_type="tool_error",
+            )
+            self._set_error(f"RAG search error: {exc}")
+            self._web_cancel(status_message=None)
+        finally:
+            self.state.run_in_progress = False
+            self._invalidate()
+
+    async def _run_rag_fetch(self) -> None:
+        rag_result = self._rag_results[self._web_selected_result]  # type: ignore[index]
+        self.state.run_in_progress = True
+        self._set_status(f"Fetching \"{rag_result.title[:50]}\"...")
+        self._invalidate()
+        client = self._ensure_rag_client()
+        if client is None:
+            self._set_error("RAG client unavailable.")
+            self.state.run_in_progress = False
+            self._invalidate()
+            return
+        try:
+            fetch_result = await client.fetch(rag_result.result_id, mode="document_chunks", max_chunks=20)
+            chunks = tuple(
+                FetchedChunk(
+                    source_id=f"r{i}",
+                    title=sec.heading,
+                    url=rag_result.url or rag_result.local_path or rag_result.result_id,
+                    canonical_url=rag_result.result_id,
+                    text=sec.text,
+                    score=1.0 if sec.is_match else 0.0,
+                    heading_path=sec.heading_path,
+                    chunk_id=sec.chunk_id,
+                    chunk_order=sec.chunk_order,
+                    is_match=sec.is_match,
+                )
+                for i, sec in enumerate(fetch_result.sections)
+            )
+            packet = FetchPacket(
+                source_id="r0",
+                title=fetch_result.title,
+                url=fetch_result.url or fetch_result.local_path or rag_result.result_id,
+                canonical_url=rag_result.result_id,
+                desired_info=self._web_query,
+                chunks=chunks,
+                full_markdown=fetch_result.full_text,
+            )
+            if not await self._append_user_tool_transcript_pair(
+                "rag_fetch",
+                {"result_id": rag_result.result_id, "source": rag_result.source},
+                {"title": fetch_result.title, "sections": len(fetch_result.sections)},
+            ):
+                return
+            self._web_packets = (packet,)
+            self._web_chunk_cursor = next((i for i, chunk in enumerate(chunks) if chunk.is_match), 0)
+            self._web_chunk_selected = set()
+            self.state.web_mode = "chunks"
+            count = len(chunks)
+            if fetch_result.truncated and fetch_result.total_chunks:
+                chunk_count_label = f"{count} of {fetch_result.total_chunks} chunks"
+            else:
+                chunk_count_label = f"{count} chunk{'s' if count != 1 else ''}"
+            self._set_status(
+                f"{chunk_count_label} from \"{fetch_result.title[:40]}\". "
+                "Matched chunk is highlighted. Space=select  Ctrl+R=insert  Esc=back"
+            )
+        except Exception as exc:
+            await self._append_user_tool_transcript_pair(
+                "rag_fetch",
+                {"result_id": rag_result.result_id, "source": rag_result.source},
+                _tool_error_payload(
+                    reason="fetch_failed",
+                    message=str(exc),
+                    result_id=rag_result.result_id,
+                ),
+                response_type="tool_error",
+            )
+            self._set_error(f"RAG fetch error: {exc}")
+        finally:
+            self.state.run_in_progress = False
+            self._invalidate()
 
     def web_view_preferred_height(self) -> int:
         if self.state.web_mode == "results":
@@ -1950,6 +2442,13 @@ class TuiController:
         self.state.active_file_missing_on_disk = False
         if was_missing:
             await self.start_watch_task()
+
+        try:
+            from aunic.map.builder import mark_map_entry_stale
+            mark_map_entry_stale(self.state.active_file)
+        except Exception as exc:
+            logger.warning("map stale-mark on save failed: %s", exc)
+
         return snapshot
 
 
@@ -2151,6 +2650,8 @@ def _known_context_window(model_option: ModelOption) -> int | None:
             return size
     return None
 
+
+_MIN_TOOL_STATUS_SECONDS: float = 1.5
 
 _TOOL_VERBS: dict[str, str] = {
     "bash": "Bashing",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from aunic.domain import ToolSpec, WorkMode
@@ -12,8 +13,10 @@ from aunic.tools.filesystem import (
     build_read_tool_registry,
 )
 from aunic.tui.note_tables import normalize_markdown_tables
+from aunic.tools.memory_manifest import build_memory_manifest as _build_memory_manifest  # noqa: F401
 from aunic.tools.research import build_research_tool_registry
 from aunic.tools.runtime import RunToolContext, failure_from_payload, failure_payload
+from aunic.tools.memory_tools import build_memory_tool_registry
 
 try:
     from aunic.tools.bash import build_bash_tool_registry
@@ -38,8 +41,11 @@ WORK_MODE_TOOL_NAMES: frozenset[str] = frozenset({"edit", "write", "bash"})
 OUTSIDE_NOTE_TOOL_NAMES: frozenset[str] = READ_MODE_TOOL_NAMES | WORK_MODE_TOOL_NAMES
 
 
-def build_note_tool_registry(*, work_mode: WorkMode = "off") -> tuple[ToolDefinition[Any], ...]:
+def build_note_tool_registry(
+    *, work_mode: WorkMode = "off", project_root: Path | None = None
+) -> tuple[ToolDefinition[Any], ...]:
     registry: list[ToolDefinition[Any]] = []
+    registry.extend(build_memory_tool_registry(project_root=project_root))
     registry.extend(build_note_only_registry())
     registry.extend(build_research_tool_registry())
     if work_mode in {"read", "work"}:
@@ -50,8 +56,11 @@ def build_note_tool_registry(*, work_mode: WorkMode = "off") -> tuple[ToolDefini
     return tuple(registry)
 
 
-def build_chat_tool_registry(*, work_mode: WorkMode = "off") -> tuple[ToolDefinition[Any], ...]:
-    registry: list[ToolDefinition[Any]] = list(build_research_tool_registry())
+def build_chat_tool_registry(
+    *, work_mode: WorkMode = "off", project_root: Path | None = None
+) -> tuple[ToolDefinition[Any], ...]:
+    registry: list[ToolDefinition[Any]] = list(build_memory_tool_registry(project_root=project_root))
+    registry.extend(build_research_tool_registry())
     if work_mode in {"read", "work"}:
         registry.extend(build_read_tool_registry())
     if work_mode == "work":

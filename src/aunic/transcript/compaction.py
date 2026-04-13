@@ -11,6 +11,8 @@ MODEL_COMPACTION_TOOLS = frozenset(
     {
         "web_search",
         "web_fetch",
+        "rag_search",
+        "rag_fetch",
         "read",
         "bash",
         "grep",

@@ -86,7 +86,7 @@ class WebSearchView:
         # "Fetch full page" row (cursor == -1)
         full_page_focused = cursor == -1
         fp_style = "class:control.active" if full_page_focused else ""
-        fp_line = " [↵] Fetch full page"
+        fp_line = " [↵] Insert fetched chunks" if c._rag_active else " [↵] Fetch full page"
         if full_page_focused:
             # [SetCursorPosition] tells prompt_toolkit the cursor is here; it auto-scrolls.
             fragments.append(("[SetCursorPosition]", ""))
@@ -96,7 +96,9 @@ class WebSearchView:
         for i, chunk in enumerate(chunks):
             is_focused = i == cursor
             is_selected = i in selected
-            row_style = "class:control.active" if is_focused else ""
+            row_style = "class:web.chunk.match" if chunk.is_match else ""
+            if is_focused:
+                row_style = _combine(row_style, "class:control.active")
 
             checkbox = "[x]" if is_selected else "[ ]"
             checkbox_style = "class:web.checkbox.checked" if is_selected else "class:web.checkbox.unchecked"

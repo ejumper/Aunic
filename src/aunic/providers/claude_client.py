@@ -110,6 +110,9 @@ class ClaudeSession:
             except Exception:
                 pass
             self._client = None
+        if self._bridge is not None:
+            await self._bridge.aclose()
+            self._bridge = None
 
     async def query(
         self,

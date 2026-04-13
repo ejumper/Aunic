@@ -48,6 +48,9 @@ class FetchedChunk:
     text: str
     score: float
     heading_path: tuple[str, ...] = ()
+    chunk_id: str = ""
+    chunk_order: int | None = None
+    is_match: bool = False
 
 
 @dataclass(frozen=True)

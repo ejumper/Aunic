@@ -20,7 +20,7 @@ def test_build_note_tool_registry_defaults_to_note_and_research_tools() -> None:
     registry = build_note_tool_registry()
     tool_names = {definition.spec.name for definition in registry}
 
-    assert tool_names == {"note_edit", "note_write", "web_search", "web_fetch"}
+    assert tool_names == {"note_edit", "note_write", "web_search", "web_fetch", "search_transcripts", "grep_notes", "read_map"}
 
 
 def test_tool_registries_expand_with_work_mode() -> None:

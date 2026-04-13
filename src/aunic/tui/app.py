@@ -30,6 +30,7 @@ from prompt_toolkit.document import Document
 from aunic.context import FileManager
 from aunic.modes import ChatModeRunner, NoteModeRunner
 from aunic.tui.controller import TuiController
+from aunic.tui.types import IncludeEntry
 from aunic.tui.web_search_view import WebSearchView
 from aunic.tui.transcript_view import TranscriptView
 from aunic.tui.note_tables import NoteTablePreviewBufferControl
@@ -97,18 +98,44 @@ class AunicTuiApp:
             self.controller.state.transcript_open = file_ui_state["transcript_open"]
         if isinstance(file_ui_state.get("transcript_maximized"), bool):
             self.controller.transcript_view_state.maximized = file_ui_state["transcript_maximized"]
+        if isinstance(file_ui_state.get("mode"), str):
+            self.controller.state.mode = file_ui_state["mode"]  # type: ignore[assignment]
+        if isinstance(file_ui_state.get("work_mode"), str):
+            self.controller.state.work_mode = file_ui_state["work_mode"]  # type: ignore[assignment]
+        raw_includes = file_ui_state.get("includes")
+        if isinstance(raw_includes, list):
+            self.controller.state.include_entries = _deserialize_include_entries(raw_includes)
+            self.controller._rebuild_available_files()
 
-        def _save_transcript_ui_state() -> None:
+        def _save_file_ui_state(path: Path) -> None:
             _save_tui_file_state(
-                active_file,
+                path,
                 {
                     "transcript_open": self.controller.state.transcript_open,
                     "transcript_maximized": self.controller.transcript_view_state.maximized,
+                    "mode": self.controller.state.mode,
+                    "work_mode": self.controller.state.work_mode,
+                    "includes": _serialize_include_entries(self.controller.state.include_entries),
                 },
             )
 
-        self.controller._on_transcript_open_changed = lambda _open_state: _save_transcript_ui_state()
-        self.controller._on_transcript_maximized_changed = lambda _maximized: _save_transcript_ui_state()
+        def _on_file_switched(new_path: Path) -> None:
+            new_state = _load_tui_file_state(new_path)
+            self.controller.state.transcript_open = bool(new_state.get("transcript_open", True))
+            self.controller.transcript_view_state.maximized = bool(new_state.get("transcript_maximized", False))
+            if isinstance(new_state.get("mode"), str):
+                self.controller.state.mode = new_state["mode"]  # type: ignore[assignment]
+            if isinstance(new_state.get("work_mode"), str):
+                self.controller.state.work_mode = new_state["work_mode"]  # type: ignore[assignment]
+            raw = new_state.get("includes")
+            self.controller.state.include_entries = _deserialize_include_entries(raw) if isinstance(raw, list) else []
+            self.controller._rebuild_available_files()
+
+        self.controller._on_transcript_open_changed = lambda _open_state: _save_file_ui_state(self.controller.state.active_file)
+        self.controller._on_transcript_maximized_changed = lambda _maximized: _save_file_ui_state(self.controller.state.active_file)
+        self.controller._on_includes_changed = lambda: _save_file_ui_state(self.controller.state.active_file)
+        self.controller._on_mode_changed = lambda: _save_file_ui_state(self.controller.state.active_file)
+        self.controller._on_file_switched = _on_file_switched
 
         self.editor = TextArea(
             multiline=True,
@@ -201,6 +228,10 @@ class AunicTuiApp:
             FormattedTextControl(text=self._indicator_fragments, focusable=False),
             height=1,
         )
+        self._model_control_window = self._control_window(self._model_control_fragments, self._open_model_picker)
+        self._work_control_window = self._control_window(self._work_control_fragments, self.controller.toggle_work_mode)
+        self._mode_control_window = self._control_window(self._mode_control_fragments, self._toggle_mode_background)
+        self._send_control_window = self._control_window(self._send_control_fragments, self._send_background)
         self.control_row = DynamicContainer(self._control_row_body)
         self.prompt_box = Frame(
             HSplit(
@@ -630,10 +661,25 @@ class AunicTuiApp:
         self.application.invalidate()
 
     def _refresh_dimensions(self) -> None:
-        self.prompt_field.window.height = self.controller.prompt_height()
+        self.prompt_field.window.height = self._compute_prompt_visual_height()
         self.find_field.window.height = 1
         self.replace_field.window.height = 1
         self.indicator_window.height = self.controller.indicator_height()
+
+    def _compute_prompt_visual_height(self) -> int:
+        render_info = self.prompt_field.window.render_info
+        if render_info is not None:
+            width = render_info.window_width
+        else:
+            try:
+                width = self.application.output.get_size().columns - 4  # frame borders + scrollbar
+            except Exception:
+                return self.controller.prompt_height()
+        if width <= 0:
+            return self.controller.prompt_height()
+        lines = self.prompt_field.buffer.document.text.split("\n")
+        total_rows = sum(max(1, (len(line) + width - 1) // width) for line in lines)
+        return max(1, min(10, total_rows))
 
     def _refresh_web_view_height(self) -> None:
         if self.controller.state.web_mode == "idle":
@@ -779,14 +825,14 @@ class AunicTuiApp:
             [
                 VSplit(
                     [
-                        self._control_window(self._model_control_fragments, self._open_model_picker),
-                        self._control_window(self._work_control_fragments, self.controller.toggle_work_mode),
-                        self._control_window(self._mode_control_fragments, self._toggle_mode_background),
+                        self._model_control_window,
+                        self._work_control_window,
+                        self._mode_control_window,
                     ],
                     padding=1,
                 ),
                 Window(),
-                self._control_window(self._send_control_fragments, self._send_background),
+                self._send_control_window,
             ],
             padding=1,
         )
@@ -1133,12 +1179,16 @@ class AunicTuiApp:
         )
 
     def _open_file_menu(self) -> None:
-        self._sync_file_radio()
+        self._rebuild_file_menu()
         self.controller.open_file_menu()
         self.application.layout.focus(self._file_radio)
 
     def _open_model_picker(self) -> None:
         if self.controller.state.web_mode != "idle" or self.controller.state.run_in_progress:
+            return
+        if self.controller.state.active_dialog == "model_picker":
+            self.controller.close_dialog()
+            self.application.layout.focus(self.prompt_field)
             return
         self.controller.open_model_picker()
         self.application.layout.focus(self._model_picker_view.window)
@@ -1342,7 +1392,7 @@ class AunicTuiApp:
         return Window(
             FormattedTextControl(
                 text=text_getter,
-                focusable=True,
+                focusable=False,
                 show_cursor=False,
             ),
             height=1,
@@ -1431,14 +1481,46 @@ class AunicTuiApp:
         return Window(height=0)
 
     def _build_file_menu_dialog(self):
+        entries = self.controller.state.include_entries
+        if entries:
+            include_rows: list = []
+            for i, entry in enumerate(entries):
+                idx = i  # capture for lambda
+                label = _disambiguate_include_label(entry.path, entries)
+                active_marker = "[*]" if entry.active else "[ ]"
+                dim = not entry.active
+
+                def make_toggle(ix):
+                    return lambda: (self.controller.toggle_include_active(ix), self._sync_file_radio(), self._invalidate())
+
+                def make_remove(ix):
+                    return lambda: (self.controller.remove_include(ix), self._rebuild_file_menu(), self._invalidate())
+
+                row = VSplit([
+                    Button(text="X", handler=make_remove(idx), width=3),
+                    Button(text=active_marker, handler=make_toggle(idx), width=5),
+                    Label(text=(" " if dim else "") + label),
+                ])
+                include_rows.append(row)
+            include_section = HSplit([
+                Label(text="\nIncludes:"),
+                *include_rows,
+            ])
+            body = HSplit([self._file_radio, include_section], padding=1)
+        else:
+            body = Box(self._file_radio, padding=1)
         return Dialog(
             title="Open File",
-            body=Box(self._file_radio, padding=1),
+            body=body,
             buttons=[
                 Button(text="Open", handler=lambda: self._background(self.controller.request_file_switch(self._file_radio.current_value))),
                 Button(text="Cancel", handler=self.controller.close_dialog),
             ],
         )
+
+    def _rebuild_file_menu(self) -> None:
+        self._file_menu = self._build_file_menu_dialog()
+        self._sync_file_radio()
 
     def _build_file_switch_dialog(self):
         pending = self.controller.state.pending_switch_path
@@ -1502,10 +1584,9 @@ class AunicTuiApp:
         )
 
     def _sync_file_radio(self) -> None:
-        self._file_radio.values = [
-            (path, path.name)
-            for path in self.controller.state.available_files
-        ]
+        paths = self.controller.state.available_files
+        labels = _disambiguate_path_labels(paths)
+        self._file_radio.values = list(zip(paths, labels))
         self._file_radio.current_value = self.controller.state.active_file
 
 
@@ -1738,6 +1819,64 @@ def _save_tui_file_state(file_path: Path, state: dict) -> None:
             del file_state[old_key]
     data["file_state"] = file_state
     _write_tui_prefs(data)
+
+
+def _serialize_include_entries(entries: list[IncludeEntry]) -> list[dict]:
+    return [
+        {"path": e.path, "is_dir": e.is_dir, "recursive": e.recursive, "active": e.active}
+        for e in entries
+    ]
+
+
+def _deserialize_include_entries(raw: list) -> list[IncludeEntry]:
+    result = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        path = item.get("path")
+        if not isinstance(path, str):
+            continue
+        result.append(IncludeEntry(
+            path=path,
+            is_dir=bool(item.get("is_dir", False)),
+            recursive=bool(item.get("recursive", False)),
+            active=bool(item.get("active", True)),
+        ))
+    return result
+
+
+def _disambiguate_path_labels(paths: tuple[Path, ...]) -> list[str]:
+    """Return display labels for a list of paths, using minimal path depth to disambiguate."""
+    names = [p.name for p in paths]
+    labels = list(names)
+    # Find pairs that share a name and progressively add parent components
+    depth = 1
+    while True:
+        seen: dict[str, list[int]] = {}
+        for i, name in enumerate(labels):
+            seen.setdefault(name, []).append(i)
+        conflicts = [indices for indices in seen.values() if len(indices) > 1]
+        if not conflicts:
+            break
+        depth += 1
+        for indices in conflicts:
+            for i in indices:
+                parts = paths[i].parts
+                label_parts = parts[max(0, len(parts) - depth):]
+                labels[i] = "/".join(label_parts)
+        if depth > 20:
+            break
+    return labels
+
+
+def _disambiguate_include_label(path: str, entries: list[IncludeEntry]) -> str:
+    """Return a display label for one include entry, disambiguating if another shares the same name."""
+    names = [Path(e.path).name for e in entries]
+    my_name = Path(path).name
+    if names.count(my_name) <= 1:
+        return my_name
+    # Same name found elsewhere — show path as-is
+    return path
 
 
 async def run_tui(

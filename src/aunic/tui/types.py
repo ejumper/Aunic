@@ -49,6 +49,14 @@ class TranscriptViewState:
 
 
 @dataclass
+class IncludeEntry:
+    path: str        # as typed by the user (relative or absolute)
+    is_dir: bool     # True → directory include
+    recursive: bool  # True → recursive glob (only when is_dir=True)
+    active: bool = True
+
+
+@dataclass
 class FindUiState:
     active: bool = False
     replace_mode: bool = False
@@ -91,6 +99,7 @@ class TuiState:
     active_file_missing_on_disk: bool = False
     create_parents_on_first_save: bool = False
     find_ui: FindUiState = field(default_factory=FindUiState)
+    include_entries: list[IncludeEntry] = field(default_factory=list)
 
     @property
     def included_files(self) -> tuple[Path, ...]:

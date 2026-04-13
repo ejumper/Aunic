@@ -12,6 +12,7 @@ from aunic.domain import TranscriptRow
 from aunic.loop.types import LoopMetrics, LoopRunResult
 from aunic.modes.types import ChatModeMetrics, ChatModeRunResult, NoteModePromptResult, NoteModeRunResult
 from aunic.progress import ProgressEvent
+from aunic.rag.types import RagFetchResult, RagFetchSection, RagSearchResult
 from aunic.research.types import (
     FetchPacket,
     FetchedChunk,
@@ -23,6 +24,7 @@ from aunic.research.types import (
 from aunic.tools.runtime import PermissionRequest
 from aunic.tui.controller import TuiController
 from aunic.tui.folding import heading_anchor_ids_for_title
+from aunic.tui.web_search_view import WebSearchView
 from aunic.transcript.parser import parse_transcript_rows, split_note_and_transcript
 from aunic.tools.runtime import join_note_and_transcript
 
@@ -832,30 +834,6 @@ def test_controller_builds_openai_profile_model_options_from_proto_settings(tmp_
     assert [option.profile_id for option in openai_options] == ["llama_addie", "openrouter_nemo"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["note", "chat"])
-@pytest.mark.parametrize("command", ["/prompt-from-note", "/plan outline the work"])
-async def test_controller_rejects_removed_slash_commands(
-    tmp_path: Path,
-    mode: str,
-    command: str,
-) -> None:
-    note = tmp_path / "slash-command.md"
-    note.write_text("Prompt target\n", encoding="utf-8")
-    note_runner = _FakeNoteRunner(note)
-    controller = TuiController(active_file=note, note_runner=note_runner, chat_runner=_FakeChatRunner())
-    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
-    await controller.initialize()
-    controller.state.mode = mode  # type: ignore[assignment]
-
-    controller._prompt_buffer.text = command
-    await controller.send_prompt()
-
-    assert controller.state.indicator_kind == "error"
-    assert "not available in the terminal UI yet" in controller.state.indicator_message
-    assert controller._run_task is None
-    assert note_runner.requests == []
 
 
 @pytest.mark.asyncio
@@ -1228,6 +1206,162 @@ async def test_controller_web_search_persists_synthetic_transcript_rows(tmp_path
     assert "# Search Results" not in note.read_text(encoding="utf-8")
     assert controller.state.web_mode == "results"
     assert len(controller._web_results) == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_rag_command_uses_registered_runtime_regex(tmp_path: Path) -> None:
+    note = tmp_path / "rag-search.md"
+    note.write_text("# Body\n\nhello\n", encoding="utf-8")
+    settings_dir = tmp_path / ".aunic"
+    settings_dir.mkdir()
+    (settings_dir / "proto-settings.json").write_text(
+        '{"rag":{"server":"http://127.0.0.1:5173","scopes":[{"name":"rag","description":"All"}]}}',
+        encoding="utf-8",
+    )
+
+    class _FakeRagClient:
+        def __init__(self) -> None:
+            self.searches: list[tuple[str, str | None, int]] = []
+
+        async def search(self, query: str, *, scope: str | None = None, limit: int = 10):
+            self.searches.append((query, scope, limit))
+            return (
+                RagSearchResult(
+                    result_id="docs:chunk:c1",
+                    doc_id="docs:d1",
+                    chunk_id="c1",
+                    corpus="docs",
+                    title="Spanning Tree Protocol",
+                    source="docs",
+                    snippet="STP prevents switching loops.",
+                    score=0.9,
+                ),
+            )
+
+    note_runner = _FakeNoteRunner(note)
+    controller = TuiController(
+        active_file=note,
+        note_runner=note_runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    fake_client = _FakeRagClient()
+    controller._ensure_rag_client = lambda: fake_client  # type: ignore[method-assign]
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "@rag spanning tree protocol"
+    await controller.send_prompt()
+    await controller._run_task
+
+    assert fake_client.searches == [("spanning tree protocol", "rag", 10)]
+    assert note_runner.requests == []
+    assert controller.state.web_mode == "results"
+    assert controller._web_results[0].title == "Spanning Tree Protocol"
+
+
+@pytest.mark.asyncio
+async def test_controller_rag_fetch_uses_document_chunks_and_focuses_match(tmp_path: Path) -> None:
+    note = tmp_path / "rag-fetch.md"
+    note.write_text("# Body\n\nhello\n", encoding="utf-8")
+    settings_dir = tmp_path / ".aunic"
+    settings_dir.mkdir()
+    (settings_dir / "proto-settings.json").write_text(
+        '{"rag":{"server":"http://127.0.0.1:5173","scopes":[{"name":"rag","description":"All"}]}}',
+        encoding="utf-8",
+    )
+
+    class _FakeRagClient:
+        def __init__(self) -> None:
+            self.fetches: list[tuple[str, int, str, int]] = []
+
+        async def search(self, query: str, *, scope: str | None = None, limit: int = 10):
+            return (
+                RagSearchResult(
+                    result_id="docs:chunk:c2",
+                    doc_id="docs:d1",
+                    chunk_id="c2",
+                    corpus="docs",
+                    title="Spanning Tree Protocol",
+                    source="docs",
+                    snippet="STP prevents switching loops.",
+                    score=0.9,
+                ),
+            )
+
+        async def fetch(
+            self,
+            result_id: str,
+            neighbors: int = 1,
+            *,
+            mode: str = "neighbors",
+            max_chunks: int = 20,
+        ):
+            self.fetches.append((result_id, neighbors, mode, max_chunks))
+            return RagFetchResult(
+                result_id=result_id,
+                doc_id="docs:d1",
+                chunk_id="c2",
+                corpus="docs",
+                title="Spanning Tree Protocol",
+                source="docs",
+                url=None,
+                sections=(
+                    RagFetchSection(
+                        heading="Bridge basics",
+                        heading_path=("Bridge basics",),
+                        text="Bridge basics.",
+                        chunk_id="c1",
+                        chunk_order=0,
+                    ),
+                    RagFetchSection(
+                        heading="STP operation",
+                        heading_path=("STP operation",),
+                        text="The matching spanning tree chunk.",
+                        chunk_id="c2",
+                        chunk_order=1,
+                        is_match=True,
+                    ),
+                    RagFetchSection(
+                        heading="Timers",
+                        heading_path=("Timers",),
+                        text="Timer details.",
+                        chunk_id="c3",
+                        chunk_order=2,
+                    ),
+                ),
+                full_text="Bridge basics.\n\n---\n\nThe matching spanning tree chunk.\n\n---\n\nTimer details.",
+                selected_chunk_id="c2",
+                selected_chunk_order=1,
+                total_chunks=30,
+                truncated=True,
+            )
+
+    controller = TuiController(
+        active_file=note,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    fake_client = _FakeRagClient()
+    controller._ensure_rag_client = lambda: fake_client  # type: ignore[method-assign]
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    controller._prompt_buffer.text = "@rag spanning tree protocol"
+    await controller.send_prompt()
+    await controller._run_task
+    controller.web_space_pressed()
+    controller._handle_web_send()
+    await controller._run_task
+
+    assert fake_client.fetches == [("docs:chunk:c2", 1, "document_chunks", 20)]
+    assert controller.state.web_mode == "chunks"
+    assert controller._web_chunk_cursor == 1
+    assert controller._web_packets[0].chunks[1].is_match is True
+    assert controller._web_packets[0].chunks[1].score == 1.0
+    fragments = WebSearchView(controller, width=lambda: 80)._render_chunks()
+    assert any("web.chunk.match" in fragment[0] for fragment in fragments)
 
 
 @pytest.mark.asyncio

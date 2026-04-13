@@ -15,12 +15,18 @@ def flatten_tool_result_for_provider(row: TranscriptRow) -> str:
         return _flatten_search_results(row.content)
     if row.tool_name == "web_fetch" and isinstance(row.content, dict):
         return _flatten_fetch_summary(row.content)
+    if row.tool_name == "rag_search" and isinstance(row.content, list):
+        return _flatten_rag_search_results(row.content)
+    if row.tool_name == "rag_fetch" and isinstance(row.content, dict):
+        return _flatten_rag_fetch_result(row.content)
     if row.tool_name == "read" and isinstance(row.content, dict):
         return _flatten_read_result(row.content)
     if row.tool_name in {"edit", "write", "note_edit", "note_write"} and isinstance(row.content, dict):
         return _flatten_edit_like_result(row.content)
     if row.tool_name == "bash" and isinstance(row.content, dict):
         return _flatten_bash_result(row.content)
+    if row.tool_name and row.tool_name.startswith("mcp__") and isinstance(row.content, dict):
+        return _flatten_mcp_result(row.content)
     return json.dumps(row.content, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -105,3 +111,60 @@ def _flatten_bash_result(result: dict[str, object]) -> str:
     if stderr.strip():
         lines.append(stderr.rstrip())
     return "\n".join(lines)
+
+
+def _flatten_rag_search_results(results: list[object]) -> str:
+    lines: list[str] = []
+    for item in results:
+        if not isinstance(item, dict):
+            lines.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+            continue
+        title = str(item.get("title", "")).strip() or "(untitled)"
+        source = str(item.get("source", "")).strip()
+        result_id = str(item.get("result_id", "")).strip()
+        doc_id = str(item.get("doc_id", "")).strip()
+        snippet = str(item.get("snippet", "")).strip()
+        identifier = result_id or doc_id
+        ref = f"[{source}] {identifier}" if source else identifier
+        line = f"{title} | {ref}"
+        if snippet:
+            line += f" | {snippet}"
+        lines.append(line)
+    return "\n".join(lines) if lines else "(no RAG results)"
+
+
+def _flatten_rag_fetch_result(result: dict[str, object]) -> str:
+    full_text = str(result.get("full_text", "")).strip()
+    if full_text:
+        lines = []
+        title = str(result.get("title", "")).strip()
+        if title:
+            lines.append(f"# {title}")
+        lines.append(full_text)
+        return "\n\n".join(lines)
+    title = str(result.get("title", "")).strip()
+    result_id = str(result.get("result_id", "")).strip()
+    doc_id = str(result.get("doc_id", "")).strip()
+    source = str(result.get("source", "")).strip()
+    lines: list[str] = []
+    if title:
+        lines.append(f"Title: {title}")
+    if result_id:
+        lines.append(f"result_id: {result_id}")
+    if doc_id:
+        lines.append(f"doc_id: {doc_id}")
+    if source:
+        lines.append(f"Source: {source}")
+    if lines:
+        return "\n".join(lines)
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _flatten_mcp_result(result: dict[str, object]) -> str:
+    content = result.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    structured = result.get("structured_content")
+    if structured is not None:
+        return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"))

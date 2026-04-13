@@ -540,124 +540,103 @@ def _split_prose_text_with_limits(
     return chunks
 
 
+_BLANK_LINE_PATTERN = r"\n\s*\n+"
+_LIST_PREFIX_PATTERN_LAST = r"(?m)^(?:\s*(?:\d+\.\s+|-\s+|\*\s+|[^:\n]{1,80}:\s+))"
+_LIST_PREFIX_PATTERN_FIRST = r"(?m)^(?:\s*(?:\d+\.\s+|\d+\)\s+|-\s+|\*\s+|[^:\n]{1,80}:\s+))"
+_SENTENCE_PATTERN = r"[.!?][\"')\]]?\s+(?=[A-Z])"
+
+
 def _find_progressive_boundary(text: str, *, target_chars: int) -> int:
-    boundary = _first_blank_line_boundary_after_target(text, target_chars)
+    boundary = _find_regex_boundary(text, _BLANK_LINE_PATTERN, direction="first_after", min_pos=target_chars)
     if boundary:
         return boundary
-    boundary = _first_indent_change_boundary_after_target(text, target_chars)
+    boundary = _find_indent_boundary(text, direction="first_after", min_pos=target_chars)
     if boundary:
         return boundary
-    boundary = _first_list_prefix_boundary_after_target(text, target_chars)
+    boundary = _find_regex_boundary(text, _LIST_PREFIX_PATTERN_FIRST, direction="first_after", min_pos=target_chars, use_start=True)
     if boundary:
         return boundary
-    boundary = _first_sentence_boundary_after_target(text, target_chars)
+    boundary = _find_regex_boundary(text, _SENTENCE_PATTERN, direction="first_after", min_pos=target_chars)
     if boundary:
         return boundary
-    boundary = _first_whitespace_boundary_after_target(text, target_chars)
+    boundary = _find_whitespace_boundary(text, direction="first_after", min_pos=target_chars)
     if boundary:
         return boundary
     return len(text)
 
 
 def _find_boundary(text: str) -> int:
-    boundary = _last_blank_line_boundary(text)
+    boundary = _find_regex_boundary(text, _BLANK_LINE_PATTERN, direction="last")
     if boundary:
         return boundary
-    boundary = _last_indent_change_boundary(text)
+    boundary = _find_indent_boundary(text, direction="last")
     if boundary:
         return boundary
-    boundary = _last_list_prefix_boundary(text)
+    boundary = _find_regex_boundary(text, _LIST_PREFIX_PATTERN_LAST, direction="last", use_start=True)
     if boundary:
         return boundary
-    boundary = _last_sentence_boundary(text)
+    boundary = _find_regex_boundary(text, _SENTENCE_PATTERN, direction="last")
     if boundary:
         return boundary
-    return _last_whitespace_boundary(text)
+    return _find_whitespace_boundary(text, direction="last")
 
 
-def _last_blank_line_boundary(text: str) -> int:
-    matches = list(re.finditer(r"\n\s*\n+", text))
-    return matches[-1].end() if matches else 0
+def _find_regex_boundary(
+    text: str,
+    pattern: str,
+    *,
+    direction: str,
+    min_pos: int = 0,
+    use_start: bool = False,
+) -> int:
+    """Return a regex-matched boundary position.
+
+    direction="last": position of the last match (skips position-0 starts when use_start=True).
+    direction="first_after": position of the first match at or after min_pos.
+    """
+    pos_fn = lambda m: m.start() if use_start else m.end()
+    if direction == "last":
+        result = 0
+        for m in re.finditer(pattern, text):
+            p = pos_fn(m)
+            if p > 0:
+                result = p
+        return result
+    # first_after
+    for m in re.finditer(pattern, text):
+        p = pos_fn(m)
+        if p >= min_pos:
+            return p
+    return 0
 
 
-def _last_indent_change_boundary(text: str) -> int:
+def _find_indent_boundary(text: str, *, direction: str, min_pos: int = 0) -> int:
+    """Return an indentation-change boundary position."""
     boundary = 0
     previous_indent: int | None = None
     offset = 0
     for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        if stripped:
+        if line.strip():
             indent = len(line) - len(line.lstrip(" \t"))
             if previous_indent is not None and indent != previous_indent:
-                boundary = offset
+                if direction == "last":
+                    boundary = offset
+                elif offset >= min_pos:
+                    return offset
             previous_indent = indent
         offset += len(line)
     return boundary
 
 
-def _last_list_prefix_boundary(text: str) -> int:
-    matches = list(
-        re.finditer(
-            r"(?m)^(?:\s*(?:\d+\.\s+|-\s+|\*\s+|[^:\n]{1,80}:\s+))",
-            text,
-        )
-    )
-    candidates = [match.start() for match in matches if match.start() > 0]
-    return candidates[-1] if candidates else 0
-
-
-def _last_sentence_boundary(text: str) -> int:
-    matches = list(re.finditer(r"[.!?][\"')\]]?\s+(?=[A-Z])", text))
-    return matches[-1].end() if matches else 0
-
-
-def _last_whitespace_boundary(text: str) -> int:
-    for index in range(len(text) - 1, -1, -1):
-        if text[index].isspace():
-            return index + 1
-    return len(text)
-
-
-def _first_blank_line_boundary_after_target(text: str, target_chars: int) -> int:
-    for match in re.finditer(r"\n\s*\n+", text):
-        if match.end() >= target_chars:
-            return match.end()
-    return 0
-
-
-def _first_indent_change_boundary_after_target(text: str, target_chars: int) -> int:
-    previous_indent: int | None = None
-    offset = 0
-    for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        if stripped:
-            indent = len(line) - len(line.lstrip(" \t"))
-            if previous_indent is not None and indent != previous_indent and offset >= target_chars:
-                return offset
-            previous_indent = indent
-        offset += len(line)
-    return 0
-
-
-def _first_list_prefix_boundary_after_target(text: str, target_chars: int) -> int:
-    for match in re.finditer(
-        r"(?m)^(?:\s*(?:\d+\.\s+|\d+\)\s+|-\s+|\*\s+|[^:\n]{1,80}:\s+))",
-        text,
-    ):
-        if match.start() >= target_chars:
-            return match.start()
-    return 0
-
-
-def _first_sentence_boundary_after_target(text: str, target_chars: int) -> int:
-    for match in re.finditer(r"[.!?][\"')\]]?\s+(?=[A-Z])", text):
-        if match.end() >= target_chars:
-            return match.end()
-    return 0
-
-
-def _first_whitespace_boundary_after_target(text: str, target_chars: int) -> int:
-    for index in range(target_chars, len(text)):
+def _find_whitespace_boundary(text: str, *, direction: str, min_pos: int = 0) -> int:
+    """Return a whitespace boundary position."""
+    if direction == "last":
+        for index in range(len(text) - 1, -1, -1):
+            if text[index].isspace():
+                return index + 1
+        return len(text)
+    # first_after
+    for index in range(min_pos, len(text)):
         if text[index].isspace():
             return index + 1
     return 0

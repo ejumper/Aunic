@@ -6,14 +6,19 @@ from pathlib import Path
 from typing import Any
 
 from aunic.config import SETTINGS, ClaudeSettings
-from aunic.domain import HealthCheck, Message, ProviderRequest, ProviderResponse, Usage
+from aunic.domain import HealthCheck, ProviderRequest, ProviderResponse, Usage
 from aunic.errors import ClaudeSDKError
 from aunic.providers.base import LLMProvider
 from aunic.providers.claude_client import ClaudeSession, ClaudeTurnResult
 from aunic.providers.sdk_tools import ToolBridgeConfig
+from aunic.providers.shared import (
+    build_tool_bridge_config,
+    build_turn_input_text,
+    coerce_int,
+    normalize_reasoning_effort,
+)
 from aunic.transcript.compaction import prepare_transcript_for_model
 from aunic.transcript.translation import (
-    compose_final_user_message,
     group_assistant_rows,
     translate_for_anthropic,
 )
@@ -83,10 +88,10 @@ class ClaudeProvider(LLMProvider):
         cwd = Path(request.metadata.get("cwd", os.getcwd())).expanduser().resolve()
         run_session_id = request.metadata.get("run_session_id")
         model = request.model or self._settings.default_model
-        reasoning_effort = normalize_claude_reasoning_effort(
-            model, request.reasoning_effort
+        reasoning_effort = normalize_reasoning_effort(
+            request.reasoning_effort, model=model, cap_xhigh_for_haiku=True
         )
-        bridge_config = _build_tool_bridge_config(request)
+        bridge_config = build_tool_bridge_config(request)
         system_prompt = _build_system_prompt(request.system_prompt)
         session_id = str(run_session_id or "default")
 
@@ -101,7 +106,7 @@ class ClaudeProvider(LLMProvider):
             )
             if transport.history_seeded or request.transcript_messages is None:
                 result = await transport.session.query(
-                    prompt_text=_build_turn_input_text(request),
+                    prompt_text=build_turn_input_text(request),
                     session_id=session_id,
                 )
             else:
@@ -128,7 +133,7 @@ class ClaudeProvider(LLMProvider):
                     history_seeded = True
                 else:
                     result = await session.query(
-                        prompt_text=_build_turn_input_text(request),
+                        prompt_text=build_turn_input_text(request),
                         session_id=session_id,
                     )
                     history_seeded = False
@@ -241,41 +246,6 @@ def build_claude_seed_messages(
     return seeded
 
 
-def _build_tool_bridge_config(request: ProviderRequest) -> ToolBridgeConfig | None:
-    if not request.tools:
-        return None
-    active_file = request.metadata.get("active_file")
-    mode = request.metadata.get("mode")
-    work_mode = request.metadata.get("work_mode")
-    if not isinstance(active_file, str) or not active_file.strip():
-        return None
-    if mode not in {"note", "chat"}:
-        return None
-    if work_mode not in {"off", "read", "work"}:
-        return None
-    return ToolBridgeConfig(
-        active_file=Path(active_file),
-        mode=mode,
-        work_mode=work_mode,
-        metadata=dict(request.metadata),
-    )
-
-
-def _build_turn_input_text(request: ProviderRequest) -> str:
-    if request.transcript_messages is not None:
-        return compose_final_user_message(request.note_snapshot or "", request.user_prompt or "")
-    return render_messages_for_sdk(request.messages)
-
-
-def render_messages_for_sdk(messages: list[Message]) -> str:
-    rendered: list[str] = []
-    for message in messages:
-        name_suffix = f" ({message.name})" if message.name else ""
-        rendered.append(f"[{message.role.upper()}{name_suffix}]")
-        rendered.append(message.content)
-    return "\n\n".join(rendered)
-
-
 def _build_system_prompt(system_prompt: str | None) -> str:
     parts = [CLAUDE_BASE_INSTRUCTIONS, CLAUDE_DEVELOPER_INSTRUCTIONS]
     if system_prompt:
@@ -315,25 +285,8 @@ def _usage_from_sdk(usage: dict[str, Any] | None) -> Usage | None:
     if not isinstance(usage, dict):
         return None
     return Usage(
-        total_tokens=_coerce_int(usage.get("total_tokens")),
-        input_tokens=_coerce_int(usage.get("input_tokens")),
-        cached_input_tokens=_coerce_int(usage.get("cache_creation_input_tokens")),
-        output_tokens=_coerce_int(usage.get("output_tokens")),
+        total_tokens=coerce_int(usage.get("total_tokens")),
+        input_tokens=coerce_int(usage.get("input_tokens")),
+        cached_input_tokens=coerce_int(usage.get("cache_creation_input_tokens")),
+        output_tokens=coerce_int(usage.get("output_tokens")),
     )
-
-
-def _coerce_int(value: Any) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def normalize_claude_reasoning_effort(
-    model: str,
-    reasoning_effort: str | None,
-) -> str:
-    if not reasoning_effort:
-        return "medium"
-    if "haiku" in model.lower() and reasoning_effort == "xhigh":
-        return "high"
-    if reasoning_effort == "minimal":
-        return "low"
-    return reasoning_effort

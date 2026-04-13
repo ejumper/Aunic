@@ -37,6 +37,25 @@ def test_get_tool_policy_override_reads_project_proto_settings(tmp_path: Path) -
     assert get_tool_policy_override(tmp_path, "grep") is None
 
 
+def test_get_tool_policy_override_supports_mcp_server_prefix(tmp_path: Path) -> None:
+    settings_dir = tmp_path / ".aunic"
+    settings_dir.mkdir()
+    (settings_dir / "proto-settings.json").write_text(
+        (
+            "{\n"
+            '  "tool_policy_overrides": {\n'
+            '    "mcp__github": "deny",\n'
+            '    "mcp__github__search": "allow"\n'
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    assert get_tool_policy_override(tmp_path, "mcp__github__search") == "allow"
+    assert get_tool_policy_override(tmp_path, "mcp__github__create_issue") == "deny"
+
+
 def test_proto_settings_resolve_from_nearest_ancestor(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     nested = repo_root / "notes" / "deep"

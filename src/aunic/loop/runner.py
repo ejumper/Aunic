@@ -6,8 +6,14 @@ from typing import Any
 from aunic.config import LoopSettings, SETTINGS
 from aunic.context.file_manager import FileManager
 from aunic.context.types import FileSnapshot, PromptRun
-from aunic.domain import ProviderGeneratedRow, ProviderRequest, ProviderResponse, TranscriptRow, UsageLogEntry
+from aunic.domain import ProviderRequest, ProviderResponse, TranscriptRow, UsageLogEntry
 from aunic.errors import ProviderError, StructuredOutputError
+from aunic.loop.dispatch import (
+    GeneratedRowsResult,
+    next_run_log_row_number,
+    process_generated_rows,
+    tool_result_message,
+)
 from aunic.loop.types import (
     LoopEvent,
     LoopMetrics,
@@ -15,16 +21,16 @@ from aunic.loop.types import (
     LoopRunResult,
     ToolFailure,
 )
+from aunic.mcp.tools import build_mcp_tool_registry, merge_tool_registries
 from aunic.progress import ProgressEvent, emit_progress, progress_from_loop_event
 from aunic.research import FetchService, ResearchState, SearchService
 from aunic.tools import (
     RunToolContext,
     ToolDefinition,
-    ToolExecutionResult,
     ToolSessionState,
     build_note_tool_registry,
 )
-from aunic.tools.runtime import failure_from_payload
+from aunic.tools.memory_manifest import build_memory_manifest
 from aunic.usage import build_usage_log, format_usage_brief
 
 NOTE_LOOP_SYSTEM_PROMPT = "\n".join(
@@ -61,7 +67,12 @@ class ToolLoop:
 
     async def run(self, request: LoopRunRequest) -> LoopRunResult:
         active_prompt_run = request.prompt_run
-        registry = request.tool_registry or build_note_tool_registry(work_mode=request.work_mode)
+        _project_root = request.active_file.parent if request.active_file else None
+        base_registry = request.tool_registry or build_note_tool_registry(
+            work_mode=request.work_mode, project_root=_project_root
+        )
+        registry = base_registry
+        mcp_registry = None
         runtime = await RunToolContext.create(
             file_manager=self._file_manager,
             context_result=request.context_result,
@@ -84,10 +95,28 @@ class ToolLoop:
         events: list[LoopEvent] = []
         tool_failures: list[ToolFailure] = []
 
+        if request.tool_registry is None:
+            mcp_registry = await build_mcp_tool_registry(runtime.cwd)
+            registry = merge_tool_registries(base_registry, mcp_registry.tools)
+            for error in mcp_registry.errors:
+                await emit_progress(
+                    request.progress_sink,
+                    ProgressEvent(
+                        kind="error",
+                        message=error.message,
+                        path=runtime.active_file,
+                        details={
+                            "source": "mcp",
+                            "server_name": error.server_name,
+                            "path": str(error.path) if error.path else None,
+                        },
+                    ),
+                )
+
         def append_run_log_message(role: str, content: str) -> None:
             run_log.append(
                 TranscriptRow(
-                    row_number=_next_run_log_row_number(run_log),
+                    row_number=next_run_log_row_number(run_log),
                     role=role,  # type: ignore[arg-type]
                     type="message",
                     content=content,
@@ -117,7 +146,6 @@ class ToolLoop:
 
         total_valid_turns = 0
         current_loop_turns = 0
-        current_turn_cap = active_prompt_run.per_prompt_budget
         malformed_repair_count = 0
         protected_rejection_count = 0
         conflict_rejection_count = 0
@@ -142,7 +170,7 @@ class ToolLoop:
                 current_user_prompt_text,
             )
         else:
-            user_msg_row_number = _next_run_log_row_number(run_log)
+            user_msg_row_number = next_run_log_row_number(run_log)
         run_log.append(
             TranscriptRow(
                 row_number=user_msg_row_number,
@@ -153,11 +181,6 @@ class ToolLoop:
         )
 
         while True:
-            if current_loop_turns >= current_turn_cap:
-                stop_reason = "turn_cap_reached"
-                await append_loop_event(LoopEvent(kind="stop", message="Turn cap reached."))
-                break
-
             tool_map = {definition.spec.name: definition for definition in registry}
             provider_request = ProviderRequest(
                 messages=[],
@@ -236,19 +259,19 @@ class ToolLoop:
             )
             await append_loop_event(_provider_response_event(response, stage="tool_loop"))
 
-            (
-                generated_valid_turns,
-                generated_edit_count,
-                generated_note_tool_success,
-                generated_tool_failures,
-            ) = await _append_provider_generated_rows(
+            generated_result = await process_generated_rows(
                 generated_rows=response.generated_rows,
                 run_log=run_log,
-                runtime=runtime,
-                persist_message_rows=request.persist_message_rows,
+                write_row=runtime.write_transcript_row,
                 tool_map=tool_map,
-                append_loop_event=append_loop_event,
+                on_tool_event=append_loop_event,
+                write_message_rows=request.persist_message_rows,
+                track_edits=True,
             )
+            generated_valid_turns = generated_result.valid_turns
+            generated_edit_count = generated_result.successful_edit_count
+            generated_note_tool_success = generated_result.successful_note_tool
+            generated_tool_failures = generated_result.tool_failures
             tool_failures.extend(generated_tool_failures)
             total_valid_turns += generated_valid_turns
             current_loop_turns += generated_valid_turns
@@ -389,7 +412,7 @@ class ToolLoop:
                     tool_call.arguments,
                 )
             else:
-                row_number = _next_run_log_row_number(run_log)
+                row_number = next_run_log_row_number(run_log)
             run_log.append(
                 TranscriptRow(
                     row_number=row_number,
@@ -436,7 +459,7 @@ class ToolLoop:
                     transcript_content,
                 )
             else:
-                row_number = _next_run_log_row_number(run_log)
+                row_number = next_run_log_row_number(run_log)
             run_log.append(
                 TranscriptRow(
                     row_number=row_number,
@@ -461,7 +484,7 @@ class ToolLoop:
             await append_loop_event(
                 LoopEvent(
                     kind="tool_result",
-                    message=_tool_result_event_message(tool_call.name, result),
+                    message=tool_result_message(tool_call.name, result.in_memory_content, result.status),
                     details={"tool_name": tool_call.name, "status": result.status},
                 )
             )
@@ -482,8 +505,9 @@ class ToolLoop:
             protected_rejection_count = 0
             if tool_call.name in {"edit", "write", "note_edit", "note_write"} and result.status == "completed":
                 successful_edit_count += 1
-            total_valid_turns += 1
-            current_loop_turns += 1
+            if result.status == "completed":
+                total_valid_turns += 1
+                current_loop_turns += 1
             if tool_call.name in {"note_edit", "note_write"} and result.status == "completed":
                 stop_reason = "finished"
                 await append_loop_event(
@@ -511,10 +535,10 @@ class ToolLoop:
             ),
             conflict_rejection_count=conflict_rejection_count,
             successful_edit_count=successful_edit_count,
-            main_turn_cap=current_turn_cap,
+            main_turn_cap=None,
             stop_reason=stop_reason,
         )
-        return LoopRunResult(
+        result = LoopRunResult(
             stop_reason=stop_reason,
             events=tuple(events),
             metrics=metrics,
@@ -525,6 +549,9 @@ class ToolLoop:
             run_log=tuple(run_log),
             run_log_new_start=run_log_start_index,
         )
+        if mcp_registry is not None:
+            await mcp_registry.aclose()
+        return result
 
 def _build_system_prompt(
     extra_system_prompt: str | None,
@@ -539,6 +566,9 @@ def _build_system_prompt(
         f"Current work mode: {work_mode}.",
         f"Available tools: {tool_names}.",
     ]
+    manifest = build_memory_manifest(registry)
+    if manifest:
+        parts.append(manifest)
     if work_mode != "work":
         parts.append("Do not try to mutate files outside note-content in this work mode.")
     if protected_paths:
@@ -578,10 +608,6 @@ def _prompt_run_with_model_input(
     )
 
 
-def _next_run_log_row_number(run_log: list[TranscriptRow]) -> int:
-    if not run_log:
-        return 1
-    return run_log[-1].row_number + 1
 def _validate_provider_response(
     response: ProviderResponse,
     tool_map: dict[str, ToolDefinition[Any]],
@@ -612,127 +638,6 @@ def _note_mode_redirect_prompt(draft_answer: str, active_file: Path) -> str:
         "Use note_write or note_edit to integrate this content into note-content where it fits.\n\n"
         f"Draft answer:\n{draft_answer}"
     )
-
-
-def _tool_result_event_message(tool_name: str, result: ToolExecutionResult) -> str:
-    content = result.in_memory_content
-    if isinstance(content, dict):
-        if "message" in content:
-            return str(content["message"])
-        if tool_name == "web_search":
-            return f"web_search returned {len(content) if isinstance(content, list) else 'results'}."
-        if tool_name == "web_fetch":
-            return f"web_fetch fetched {content.get('title') or content.get('url') or 'a page'}."
-        if tool_name == "bash":
-            return f"bash finished with status {result.status}."
-        if tool_name == "read":
-            return f"read returned {content.get('type', 'content')}."
-        if tool_name in {"edit", "write", "note_edit", "note_write"}:
-            return f"{tool_name} finished."
-    if isinstance(content, list):
-        return f"{tool_name} returned {len(content)} item(s)."
-    return f"{tool_name} finished."
-
-
-async def _append_provider_generated_rows(
-    *,
-    generated_rows: list[ProviderGeneratedRow],
-    run_log: list[TranscriptRow],
-    runtime: RunToolContext,
-    persist_message_rows: bool,
-    tool_map: dict[str, ToolDefinition[Any]],
-    append_loop_event,
- ) -> tuple[int, int, bool, list[ToolFailure]]:
-    valid_turns = 0
-    successful_edit_count = 0
-    successful_note_tool = False
-    tool_failures: list[ToolFailure] = []
-
-    for generated in generated_rows:
-        row = generated.row
-        transcript_content = (
-            row.content if generated.transcript_content is None else generated.transcript_content
-        )
-        definition = tool_map.get(row.tool_name or "")
-
-        if row.type == "message":
-            if persist_message_rows:
-                row_number = await runtime.write_transcript_row(
-                    row.role,
-                    row.type,
-                    row.tool_name,
-                    row.tool_id,
-                    transcript_content,
-                )
-            else:
-                row_number = _next_run_log_row_number(run_log)
-            run_log.append(
-                TranscriptRow(
-                    row_number=row_number,
-                    role=row.role,
-                    type=row.type,
-                    tool_name=row.tool_name,
-                    tool_id=row.tool_id,
-                    content=row.content,
-                )
-            )
-            continue
-
-        persistent = definition.persistence == "persistent" if definition is not None else True
-        if persistent:
-            row_number = await runtime.write_transcript_row(
-                row.role,
-                row.type,
-                row.tool_name,
-                row.tool_id,
-                transcript_content,
-            )
-        else:
-            row_number = _next_run_log_row_number(run_log)
-
-        run_log.append(
-            TranscriptRow(
-                row_number=row_number,
-                role=row.role,
-                type=row.type,
-                tool_name=row.tool_name,
-                tool_id=row.tool_id,
-                content=row.content,
-            )
-        )
-
-        if row.role != "tool":
-            continue
-
-        valid_turns += 1
-        if row.type == "tool_error" and isinstance(row.content, dict):
-            tool_failures.append(failure_from_payload(row.content, tool_name=row.tool_name))
-        if row.tool_name in {"edit", "write", "note_edit", "note_write"} and row.type == "tool_result":
-            successful_edit_count += 1
-        if row.tool_name in {"note_edit", "note_write"} and row.type == "tool_result":
-            successful_note_tool = True
-
-        await append_loop_event(
-            LoopEvent(
-                kind="tool_result",
-                message=_tool_result_event_message(
-                    row.tool_name or "tool",
-                    ToolExecutionResult(
-                        tool_name=row.tool_name or "tool",
-                        status="completed" if row.type == "tool_result" else "tool_error",
-                        in_memory_content=row.content,
-                        transcript_content=transcript_content,
-                    ),
-                ),
-                details={
-                    "tool_name": row.tool_name,
-                    "status": "completed" if row.type == "tool_result" else "tool_error",
-                    "generated": True,
-                },
-            )
-        )
-
-    return valid_turns, successful_edit_count, successful_note_tool, tool_failures
 
 
 
@@ -796,20 +701,3 @@ def _provider_response_event(
         },
     )
 
-
-async def _observe_provider_response(
-    response: ProviderResponse,
-    *,
-    stage: str,
-    append_loop_event,
-    usage_entries: list[UsageLogEntry],
-    index: int,
-) -> None:
-    usage_entries.append(
-        _usage_entry_from_response(
-            response,
-            index=index,
-            stage=stage,
-        )
-    )
-    await append_loop_event(_provider_response_event(response, stage=stage))

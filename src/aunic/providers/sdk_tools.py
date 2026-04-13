@@ -12,6 +12,7 @@ from mcp.types import CallToolResult, TextContent
 
 from aunic.context.file_manager import FileManager
 from aunic.domain import ProviderGeneratedRow, TranscriptRow, WorkMode
+from aunic.mcp.tools import MCPToolRegistry, build_mcp_tool_registry, merge_tool_registries
 from aunic.research import FetchService, ResearchState, SearchService
 from aunic.tools import (
     RunToolContext,
@@ -68,6 +69,7 @@ class AunicToolBridge:
         self._session_state = ToolSessionState(cwd=self.cwd)
         self._runtime: RunToolContext | None = None
         self._registry: tuple[ToolDefinition[Any], ...] = ()
+        self._mcp_registry: MCPToolRegistry | None = None
         self._recorded_sdk_results: deque[RecordedSDKToolExecution] = deque()
 
     @property
@@ -85,9 +87,11 @@ class AunicToolBridge:
         if self._runtime is not None:
             return
         if self._config.mode == "note":
-            self._registry = build_note_tool_registry(work_mode=self._config.work_mode)
+            base_registry = build_note_tool_registry(work_mode=self._config.work_mode, project_root=self.cwd)
         else:
-            self._registry = build_chat_tool_registry(work_mode=self._config.work_mode)
+            base_registry = build_chat_tool_registry(work_mode=self._config.work_mode, project_root=self.cwd)
+        self._mcp_registry = await build_mcp_tool_registry(self.cwd)
+        self._registry = merge_tool_registries(base_registry, self._mcp_registry.tools)
         self._runtime = await RunToolContext.create(
             file_manager=self._file_manager,
             context_result=None,
@@ -226,6 +230,13 @@ class AunicToolBridge:
         if self._runtime is None:
             raise RuntimeError("AunicToolBridge.start() must be called before tool execution.")
         return self._runtime
+
+    async def aclose(self) -> None:
+        if self._mcp_registry is None:
+            return
+        registry = self._mcp_registry
+        self._mcp_registry = None
+        await registry.aclose()
 
 
 def provider_rows_from_tool_execution(

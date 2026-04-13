@@ -55,6 +55,12 @@ def get_tool_policy_override(project_root: Path, tool_name: str) -> str | None:
     value = overrides.get(tool_name)
     if value in _VALID_POLICIES:
         return value
+    if tool_name.startswith("mcp__"):
+        prefix_parts = tool_name.split("__", 2)
+        if len(prefix_parts) >= 2:
+            server_value = overrides.get("__".join(prefix_parts[:2]))
+            if server_value in _VALID_POLICIES:
+                return server_value
     return None
 
 
@@ -72,6 +78,44 @@ def get_openai_compatible_profiles(project_root: Path) -> tuple[OpenAICompatible
         if profile is not None:
             profiles.append(profile)
     return tuple(profiles)
+
+
+def get_rag_config(project_root: Path) -> "RagConfig | None":
+    """Return RagConfig from the proto-settings.json ``rag`` section, or None."""
+    from aunic.rag.types import RagConfig, RagScope
+    payload = _load_proto_payload(project_root)
+    rag = payload.get("rag")
+    if not isinstance(rag, dict):
+        return None
+    server = rag.get("server", "")
+    if not isinstance(server, str) or not server.strip():
+        return None
+    raw_scopes = rag.get("scopes", [])
+    if not isinstance(raw_scopes, list):
+        raw_scopes = []
+    scopes: list[RagScope] = []
+    for entry in raw_scopes:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name", "")
+        description = entry.get("description", "")
+        if isinstance(name, str) and name.strip():
+            scopes.append(RagScope(name=name.strip(), description=description or ""))
+
+    raw_tui_scopes = rag.get("tui_scopes")
+    tui_scopes: tuple[RagScope, ...] | None = None
+    if isinstance(raw_tui_scopes, list):
+        parsed: list[RagScope] = []
+        for entry in raw_tui_scopes:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name", "")
+            description = entry.get("description", "")
+            if isinstance(name, str) and name.strip():
+                parsed.append(RagScope(name=name.strip(), description=description or ""))
+        tui_scopes = tuple(parsed)
+
+    return RagConfig(server=server.strip(), scopes=tuple(scopes), tui_scopes=tui_scopes)
 
 
 def get_selected_openai_compatible_profile_id(project_root: Path) -> str | None:

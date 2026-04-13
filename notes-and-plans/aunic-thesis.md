@@ -44,4 +44,18 @@ Aunic's main idea is that the chat transcript is inefficient at storing the cont
 - Because the user has full access to the context window, all sorts of cool things can be done to manipulate it using something Aunic calls `edit-commands`
     - you can restrict context, expand it, specify what area is being worked on, etc. (see notes-and-plans/commands/* for more details)
 
+
+## Additional thoughts
+**Aunic emphasizes transparency.**
+- The LLM should not be a magical black box that "does stuff" its a tool for helping users work faster, work smarter and work expertly outside their domains of expertise. The LLM should make computers *more* transparent, not less.
+**Aunic emphasizes working with the model, not the model working for the user.**
+- this means that the user should have access to the same tools the model does
+    - the model has `web_search` and `web_fetch`, the user has `@web`
+    - the model has `rag`, the user has `@rag`, `@docs`
+**The model is a tool that the user controls**
+- this means the user must have tools for manipulating the models behavior
+**Aunic treats LLMs as a tool not a person**
+- much of the infrastructure around LLMs is an attempt to have them feel more "human-like" Aunic rejects this and favors a problem solving approach. 
+    - LLMs have limitations, tools can help work around those limitations.
+
 **This is simply an outline of the "idea" behind Aunic. See the rest of notes-and-plans/* for more details**

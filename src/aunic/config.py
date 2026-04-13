@@ -103,6 +103,15 @@ class LoopSettings:
 
 
 @dataclass(frozen=True)
+class MCPSettings:
+    connect_timeout_seconds: float = 10.0
+    request_timeout_seconds: float = 30.0
+    tool_timeout_seconds: float = 120.0
+    sse_read_timeout_seconds: float = 300.0
+    max_description_chars: int = 2048
+
+
+@dataclass(frozen=True)
 class PermissionSettings:
     external_directory_policy: str = "ask"
     default_read_policy: str = "ask"
@@ -134,6 +143,7 @@ class AppSettings:
     research: ResearchSettings = field(default_factory=ResearchSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     loop: LoopSettings = field(default_factory=LoopSettings)
+    mcp: MCPSettings = field(default_factory=MCPSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     package_name: str = "aunic"
 

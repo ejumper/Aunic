@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -9,15 +9,17 @@ from aunic.context import FileManager
 from aunic.context.markers import analyze_chat_file
 from aunic.context.structure import render_parsed_note_text
 from aunic.context.types import FileSnapshot, ParseWarning
-from aunic.domain import ProviderGeneratedRow, ProviderRequest, ProviderResponse, TranscriptRow, UsageLogEntry
+from aunic.domain import ProviderRequest, ProviderResponse, TranscriptRow, UsageLogEntry
+from aunic.loop.dispatch import next_run_log_row_number, process_generated_rows, tool_result_message
 from aunic.errors import ChatModeError, ProviderError, StructuredOutputError
 from aunic.loop.types import LoopEvent, ToolFailure
+from aunic.mcp.tools import build_mcp_tool_registry, merge_tool_registries
 from aunic.modes.types import ChatModeMetrics, ChatModeRunRequest, ChatModeRunResult
 from aunic.progress import ProgressEvent, emit_progress, progress_from_loop_event
 from aunic.research import FetchService, ResearchState, SearchService, find_invalid_citation_urls
 from aunic.tools import RunToolContext, ToolSessionState, build_chat_tool_registry
+from aunic.tools.memory_manifest import build_memory_manifest
 from aunic.tools.base import ToolExecutionResult
-from aunic.tools.runtime import failure_from_payload
 from aunic.transcript.parser import parse_transcript_rows
 from aunic.transcript.writer import append_transcript_row
 from aunic.usage import build_usage_log, format_usage_brief
@@ -39,6 +41,46 @@ CHAT_MODE_FINAL_RESPONSE_PROMPT = (
     "Reply with the best final markdown answer you can from the information already gathered. "
     "If uncertainty remains, say so plainly."
 )
+
+
+@dataclass
+class _ChatLoopState:
+    """Mutable state accumulated across turns in a chat-mode run."""
+
+    run_log: list[TranscriptRow]
+    events: list[LoopEvent]
+    tool_failures: list[ToolFailure]
+    usage_entries: list[UsageLogEntry]
+    assistant_message_patches: list[dict[str, object]]
+    counted_turns: int = 0
+    malformed_repair_count: int = 0
+    citation_repair_count: int = 0
+    force_final_response: bool = False
+    error_message: str | None = None
+    provider_metadata: dict[str, object] = field(default_factory=dict)
+    provider_response_index: int = 0
+
+    def append_run_log_message(self, role: str, content: str) -> None:
+        self.run_log.append(
+            TranscriptRow(
+                row_number=next_run_log_row_number(self.run_log),
+                role=role,  # type: ignore[arg-type]
+                type="message",
+                content=content,
+            )
+        )
+
+    def append_assistant_message_patch(
+        self,
+        patch: dict[str, object] | None,
+        metadata: dict[str, object],
+    ) -> None:
+        if patch is None:
+            return
+        self.assistant_message_patches.append(dict(patch))
+        limit = metadata.get("reasoning_replay_turns")
+        if isinstance(limit, int) and limit > 0:
+            del self.assistant_message_patches[:-limit]
 
 
 @dataclass(frozen=True)
@@ -75,6 +117,15 @@ class ChatModeRunner:
         run_metadata = dict(request.metadata)
         run_session_id = str(run_metadata.get("run_session_id") or uuid4().hex)
         run_metadata["run_session_id"] = run_session_id
+        mcp_registry = None
+
+        async def _close_mcp_registry_once() -> None:
+            nonlocal mcp_registry
+            if mcp_registry is None:
+                return
+            registry_to_close = mcp_registry
+            mcp_registry = None
+            await registry_to_close.aclose()
 
         try:
             self._active_file = request.active_file
@@ -124,57 +175,50 @@ class ChatModeRunner:
                 permission_handler=request.permission_handler,
                 metadata=dict(run_metadata),
             )
-            tool_registry = build_chat_tool_registry(work_mode=request.work_mode)
-            tool_map = {definition.spec.name: definition for definition in tool_registry}
-            run_log: list[TranscriptRow] = list(context_result.transcript_rows or [])
-            current_user_prompt_text = prompt
-            events: list[LoopEvent] = []
-            tool_failures: list[ToolFailure] = []
-            counted_turns = 0
-            malformed_repair_count = 0
-            citation_repair_count = 0
-            force_final_response = request.total_turn_budget == 0
-            error_message: str | None = None
-            provider_metadata: dict[str, object] = {}
-            assistant_message_patches: list[dict[str, object]] = []
-            usage_entries: list[UsageLogEntry] = []
-            provider_response_index = 0
-
-            if force_final_response:
-                current_user_prompt_text = CHAT_MODE_FINAL_RESPONSE_PROMPT
-
-            def append_run_log_message(role: str, content: str) -> None:
-                run_log.append(
-                    TranscriptRow(
-                        row_number=_next_run_log_row_number(run_log),
-                        role=role,  # type: ignore[arg-type]
-                        type="message",
-                        content=content,
-                    )
+            mcp_registry = await build_mcp_tool_registry(runtime.cwd)
+            for error in mcp_registry.errors:
+                await emit_progress(
+                    request.progress_sink,
+                    ProgressEvent(
+                        kind="error",
+                        message=error.message,
+                        path=request.active_file,
+                        details={
+                            "source": "mcp",
+                            "server_name": error.server_name,
+                            "path": str(error.path) if error.path else None,
+                        },
+                    ),
                 )
+            tool_registry = merge_tool_registries(
+                build_chat_tool_registry(work_mode=request.work_mode, project_root=runtime.cwd),
+                mcp_registry.tools,
+            )
+            tool_map = {definition.spec.name: definition for definition in tool_registry}
 
-            def append_assistant_message_patch(
-                patch: dict[str, object] | None,
-                metadata: dict[str, object],
-            ) -> None:
-                if patch is None:
-                    return
-                assistant_message_patches.append(dict(patch))
-                limit = metadata.get("reasoning_replay_turns")
-                if isinstance(limit, int) and limit > 0:
-                    del assistant_message_patches[:-limit]
+            state = _ChatLoopState(
+                run_log=list(context_result.transcript_rows or []),
+                events=[],
+                tool_failures=[],
+                usage_entries=[],
+                assistant_message_patches=[],
+                force_final_response=request.total_turn_budget == 0,
+            )
+            current_user_prompt_text = (
+                CHAT_MODE_FINAL_RESPONSE_PROMPT if state.force_final_response else prompt
+            )
 
             while True:
-                if force_final_response and counted_turns > request.total_turn_budget:
+                if state.force_final_response and state.counted_turns > request.total_turn_budget:
                     break
 
                 provider_request = ProviderRequest(
                     messages=[],
-                    transcript_messages=list(run_log),
-                    assistant_message_patches=list(assistant_message_patches),
+                    transcript_messages=list(state.run_log),
+                    assistant_message_patches=list(state.assistant_message_patches),
                     note_snapshot=context_result.note_snapshot_text or runtime.note_snapshot_text() or None,
                     user_prompt=current_user_prompt_text or None,
-                    tools=[] if force_final_response else [definition.spec for definition in tool_registry],
+                    tools=[] if state.force_final_response else [definition.spec for definition in tool_registry],
                     system_prompt=_build_chat_system_prompt(
                         work_mode=request.work_mode,
                         registry=tool_registry,
@@ -189,14 +233,14 @@ class ChatModeRunner:
                         "work_mode": request.work_mode,
                     },
                 )
-                events.append(
+                state.events.append(
                     loop_event := LoopEvent(
                         kind="provider_request",
                         message="Sent chat-mode turn to provider.",
                         details={
                             "messages": len(provider_request.messages),
                             "tools": len(provider_request.tools),
-                            "final_response_only": force_final_response,
+                            "final_response_only": state.force_final_response,
                         },
                     )
                 )
@@ -208,9 +252,9 @@ class ChatModeRunner:
                 try:
                     response = await request.provider.generate(provider_request)
                 except StructuredOutputError as exc:
-                    malformed_repair_count += 1
-                    error_message = str(exc)
-                    tool_failures.append(
+                    state.malformed_repair_count += 1
+                    state.error_message = str(exc)
+                    state.tool_failures.append(
                         ToolFailure(
                             category="malformed_turn",
                             reason="structured_output",
@@ -220,50 +264,35 @@ class ChatModeRunner:
                     )
                     current_user_prompt_text = _chat_repair_prompt(
                         str(exc),
-                        final_only=force_final_response,
+                        final_only=state.force_final_response,
                     )
-                    append_run_log_message("user", current_user_prompt_text)
-                    if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                    state.append_run_log_message("user", current_user_prompt_text)
+                    if state.malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                        await _close_mcp_registry_once()
                         return await self._result_with_error(
                             context_result=context_result,
                             request=request,
-                            response_text="",
-                            assistant_response_appended=False,
                             stop_reason="malformed_turn_limit",
-                            events=events,
-                            tool_failures=tool_failures,
+                            state=state,
                             research_state=research_state,
-                            provider_metadata=provider_metadata,
-                            error_message=error_message,
-                            valid_turn_count=counted_turns,
-                            malformed_repair_count=malformed_repair_count,
-                            citation_repair_count=citation_repair_count,
-                            usage_entries=usage_entries,
                         )
                     continue
                 except ProviderError as exc:
+                    state.error_message = str(exc)
+                    await _close_mcp_registry_once()
                     return await self._result_with_error(
                         context_result=context_result,
                         request=request,
-                        response_text="",
-                        assistant_response_appended=False,
                         stop_reason="provider_error",
-                        events=events,
-                        tool_failures=tool_failures,
+                        state=state,
                         research_state=research_state,
-                        provider_metadata=provider_metadata,
-                        error_message=str(exc),
-                        valid_turn_count=counted_turns,
-                        malformed_repair_count=malformed_repair_count,
-                        citation_repair_count=citation_repair_count,
-                        usage_entries=usage_entries,
                     )
 
-                provider_metadata = dict(response.provider_metadata)
-                provider_response_index += 1
-                usage_entries.append(
+                state.provider_metadata = dict(response.provider_metadata)
+                state.provider_response_index += 1
+                state.usage_entries.append(
                     UsageLogEntry(
-                        index=provider_response_index,
+                        index=state.provider_response_index,
                         stage="chat",
                         usage=response.usage,
                         provider=response.provider_metadata.get("provider"),
@@ -272,7 +301,7 @@ class ChatModeRunner:
                         metadata=dict(response.provider_metadata),
                     )
                 )
-                events.append(
+                state.events.append(
                     loop_event := LoopEvent(
                         kind="provider_response",
                         message=f"Chat provider response: {format_usage_brief(response.usage)}.",
@@ -290,28 +319,34 @@ class ChatModeRunner:
                     progress_from_loop_event(loop_event, path=request.active_file),
                 )
 
-                generated_turns, generated_tool_failures = await _append_generated_rows(
+                async def _on_tool_event(event: LoopEvent) -> None:
+                    state.events.append(event)
+                    await emit_progress(
+                        request.progress_sink,
+                        progress_from_loop_event(event, path=request.active_file),
+                    )
+
+                generated_result = await process_generated_rows(
                     generated_rows=response.generated_rows,
-                    run_log=run_log,
-                    write_transcript_row=self._write_transcript_row,
+                    run_log=state.run_log,
+                    write_row=self._write_transcript_row,
                     tool_map=tool_map,
-                    events=events,
-                    progress_sink=request.progress_sink,
-                    active_file=request.active_file,
+                    on_tool_event=_on_tool_event,
+                    write_message_rows=True,
                 )
-                tool_failures.extend(generated_tool_failures)
-                counted_turns += generated_turns
+                state.tool_failures.extend(generated_result.tool_failures)
+                state.counted_turns += generated_result.valid_turns
 
                 if response.tool_calls:
                     malformed_message = _validate_chat_provider_response(
                         response,
                         tool_map=tool_map,
-                        final_only=force_final_response,
+                        final_only=state.force_final_response,
                     )
                     if malformed_message is not None:
-                        malformed_repair_count += 1
-                        error_message = malformed_message
-                        tool_failures.append(
+                        state.malformed_repair_count += 1
+                        state.error_message = malformed_message
+                        state.tool_failures.append(
                             ToolFailure(
                                 category="malformed_turn",
                                 reason="invalid_provider_response",
@@ -319,29 +354,21 @@ class ChatModeRunner:
                                 message=malformed_message,
                             )
                         )
-                        append_run_log_message("assistant", response.text.strip() or "(empty response)")
-                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                        state.append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _chat_repair_prompt(
                             malformed_message,
-                            final_only=force_final_response,
+                            final_only=state.force_final_response,
                         )
-                        append_run_log_message("user", current_user_prompt_text)
-                        if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                        state.append_run_log_message("user", current_user_prompt_text)
+                        if state.malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                            await _close_mcp_registry_once()
                             return await self._result_with_error(
                                 context_result=context_result,
                                 request=request,
-                                response_text="",
-                                assistant_response_appended=False,
                                 stop_reason="malformed_turn_limit",
-                                events=events,
-                                tool_failures=tool_failures,
+                                state=state,
                                 research_state=research_state,
-                                provider_metadata=provider_metadata,
-                                error_message=error_message,
-                                valid_turn_count=counted_turns,
-                                malformed_repair_count=malformed_repair_count,
-                                citation_repair_count=citation_repair_count,
-                                usage_entries=usage_entries,
                             )
                         continue
 
@@ -350,9 +377,9 @@ class ChatModeRunner:
                     try:
                         parsed_args = definition.parse_arguments(tool_call.arguments)
                     except ValueError as exc:
-                        malformed_repair_count += 1
-                        error_message = str(exc)
-                        tool_failures.append(
+                        state.malformed_repair_count += 1
+                        state.error_message = str(exc)
+                        state.tool_failures.append(
                             ToolFailure(
                                 category="malformed_turn",
                                 reason="invalid_arguments",
@@ -360,33 +387,25 @@ class ChatModeRunner:
                                 message=str(exc),
                             )
                         )
-                        append_run_log_message("assistant", response.text.strip() or "(empty response)")
-                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                        state.append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _chat_repair_prompt(
                             str(exc),
-                            final_only=force_final_response,
+                            final_only=state.force_final_response,
                         )
-                        append_run_log_message("user", current_user_prompt_text)
-                        if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                        state.append_run_log_message("user", current_user_prompt_text)
+                        if state.malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                            await _close_mcp_registry_once()
                             return await self._result_with_error(
                                 context_result=context_result,
                                 request=request,
-                                response_text="",
-                                assistant_response_appended=False,
                                 stop_reason="malformed_turn_limit",
-                                events=events,
-                                tool_failures=tool_failures,
+                                state=state,
                                 research_state=research_state,
-                                provider_metadata=provider_metadata,
-                                error_message=error_message,
-                                valid_turn_count=counted_turns,
-                                malformed_repair_count=malformed_repair_count,
-                                citation_repair_count=citation_repair_count,
-                                usage_entries=usage_entries,
                             )
                         continue
 
-                    malformed_repair_count = 0
+                    state.malformed_repair_count = 0
                     result = await definition.execute(runtime, parsed_args)
                     row_number = await self._write_transcript_row(
                         "assistant",
@@ -395,7 +414,7 @@ class ChatModeRunner:
                         tool_call.id,
                         tool_call.arguments,
                     )
-                    run_log.append(
+                    state.run_log.append(
                         TranscriptRow(
                             row_number=row_number,
                             role="assistant",
@@ -405,7 +424,7 @@ class ChatModeRunner:
                             content=tool_call.arguments,
                         )
                     )
-                    append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                    state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                     transcript_content = (
                         result.in_memory_content
                         if result.transcript_content is None
@@ -419,7 +438,7 @@ class ChatModeRunner:
                         tool_call.id,
                         transcript_content,
                     )
-                    run_log.append(
+                    state.run_log.append(
                         TranscriptRow(
                             row_number=row_number,
                             role="tool",
@@ -429,10 +448,10 @@ class ChatModeRunner:
                             content=result.in_memory_content,
                         )
                     )
-                    events.append(
+                    state.events.append(
                         loop_event := LoopEvent(
                             kind="tool_result",
-                            message=_tool_result_message(tool_call.name, result.in_memory_content),
+                            message=tool_result_message(tool_call.name, result.in_memory_content),
                             details={"tool_name": tool_call.name, "status": result.status},
                         )
                     )
@@ -441,48 +460,40 @@ class ChatModeRunner:
                         progress_from_loop_event(loop_event, path=request.active_file),
                     )
                     if result.tool_failure is not None:
-                        tool_failures.append(result.tool_failure)
-                    counted_turns += 1
+                        state.tool_failures.append(result.tool_failure)
+                    state.counted_turns += 1
                     current_user_prompt_text = prompt
-                    if counted_turns >= request.total_turn_budget and not force_final_response:
-                        force_final_response = True
+                    if state.counted_turns >= request.total_turn_budget and not state.force_final_response:
+                        state.force_final_response = True
                         current_user_prompt_text = CHAT_MODE_FINAL_RESPONSE_PROMPT
                     continue
 
                 if not response.text.strip():
-                    malformed_repair_count += 1
-                    error_message = "Chat mode received an empty assistant response."
-                    tool_failures.append(
+                    state.malformed_repair_count += 1
+                    state.error_message = "Chat mode received an empty assistant response."
+                    state.tool_failures.append(
                         ToolFailure(
                             category="malformed_turn",
                             reason="empty_response",
                             tool_name=None,
-                            message=error_message,
+                            message=state.error_message,
                         )
                     )
-                    append_run_log_message("assistant", "(empty response)")
-                    append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                    state.append_run_log_message("assistant", "(empty response)")
+                    state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                     current_user_prompt_text = _chat_repair_prompt(
-                        error_message,
-                        final_only=force_final_response,
+                        state.error_message,
+                        final_only=state.force_final_response,
                     )
-                    append_run_log_message("user", current_user_prompt_text)
-                    if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                    state.append_run_log_message("user", current_user_prompt_text)
+                    if state.malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                        await _close_mcp_registry_once()
                         return await self._result_with_error(
                             context_result=context_result,
                             request=request,
-                            response_text="",
-                            assistant_response_appended=False,
                             stop_reason="malformed_turn_limit",
-                            events=events,
-                            tool_failures=tool_failures,
+                            state=state,
                             research_state=research_state,
-                            provider_metadata=provider_metadata,
-                            error_message=error_message,
-                            valid_turn_count=counted_turns,
-                            malformed_repair_count=malformed_repair_count,
-                            citation_repair_count=citation_repair_count,
-                            usage_entries=usage_entries,
                         )
                     continue
 
@@ -492,46 +503,38 @@ class ChatModeRunner:
                         allowed_canonical_urls=research_state.known_citation_urls(),
                     )
                     if invalid_urls:
-                        malformed_repair_count += 1
-                        citation_repair_count += 1
-                        error_message = (
+                        state.malformed_repair_count += 1
+                        state.citation_repair_count += 1
+                        state.error_message = (
                             "Inline citations must come from the current turn's search or fetch sources. "
                             f"Invalid URLs: {', '.join(invalid_urls)}"
                         )
-                        tool_failures.append(
+                        state.tool_failures.append(
                             ToolFailure(
                                 category="validation_error",
                                 reason="invalid_citation",
                                 tool_name=None,
-                                message=error_message,
+                                message=state.error_message,
                             )
                         )
-                        append_run_log_message("assistant", response.text.strip() or "(empty response)")
-                        append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                        state.append_run_log_message("assistant", response.text.strip() or "(empty response)")
+                        state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                         current_user_prompt_text = _citation_repair_prompt(invalid_urls)
-                        append_run_log_message("user", current_user_prompt_text)
-                        if malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                        state.append_run_log_message("user", current_user_prompt_text)
+                        if state.malformed_repair_count >= SETTINGS.loop.malformed_turn_limit:
+                            await _close_mcp_registry_once()
                             return await self._result_with_error(
                                 context_result=context_result,
                                 request=request,
-                                response_text="",
-                                assistant_response_appended=False,
                                 stop_reason="malformed_turn_limit",
-                                events=events,
-                                tool_failures=tool_failures,
+                                state=state,
                                 research_state=research_state,
-                                provider_metadata=provider_metadata,
-                                error_message=error_message,
-                                valid_turn_count=counted_turns,
-                                malformed_repair_count=malformed_repair_count,
-                                citation_repair_count=citation_repair_count,
-                                usage_entries=usage_entries,
                             )
                         continue
 
                 row_number = await self._write_transcript_row("assistant", "message", None, None, response.text)
                 if row_number is not None:
-                    run_log.append(
+                    state.run_log.append(
                         TranscriptRow(
                             row_number=row_number,
                             role="assistant",
@@ -539,7 +542,7 @@ class ChatModeRunner:
                             content=response.text,
                         )
                     )
-                append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
+                state.append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
                 final_snapshots = await self._refresh_snapshots(context_result.file_snapshots)
                 result = ChatModeRunResult(
                     initial_warnings=context_result.warnings,
@@ -548,20 +551,20 @@ class ChatModeRunner:
                     final_file_snapshots=final_snapshots,
                     stop_reason="finished",
                     metrics=ChatModeMetrics(
-                        valid_turn_count=counted_turns,
-                        malformed_repair_count=malformed_repair_count,
-                        citation_repair_count=citation_repair_count,
+                        valid_turn_count=state.counted_turns,
+                        malformed_repair_count=state.malformed_repair_count,
+                        citation_repair_count=state.citation_repair_count,
                         stop_reason="finished",
                     ),
-                    events=tuple(events),
-                    tool_failures=tuple(tool_failures),
+                    events=tuple(state.events),
+                    tool_failures=tuple(state.tool_failures),
                     research_summary=research_state.summary(),
-                    provider_metadata=provider_metadata,
+                    provider_metadata=state.provider_metadata,
                     error_message=None,
-                    usage_log=build_usage_log(usage_entries),
+                    usage_log=build_usage_log(state.usage_entries),
                     usage_log_path=self._persist_usage_log(
                         request=request,
-                        usage_entries=usage_entries,
+                        usage_entries=state.usage_entries,
                         stop_reason="finished",
                         response_text=response.text,
                         assistant_response_appended=True,
@@ -582,8 +585,10 @@ class ChatModeRunner:
                         },
                     ),
                 )
+                await _close_mcp_registry_once()
                 return result
         finally:
+            await _close_mcp_registry_once()
             close_run = getattr(request.provider, "close_run", None)
             if callable(close_run):
                 await close_run(run_session_id)
@@ -676,44 +681,35 @@ class ChatModeRunner:
         *,
         context_result: _ChatContextResult,
         request: ChatModeRunRequest,
-        response_text: str,
-        assistant_response_appended: bool,
-        stop_reason,
-        events: list[LoopEvent],
-        tool_failures: list[ToolFailure],
+        stop_reason: str,
+        state: _ChatLoopState,
         research_state: ResearchState,
-        provider_metadata: dict[str, object],
-        error_message: str | None,
-        valid_turn_count: int,
-        malformed_repair_count: int,
-        citation_repair_count: int,
-        usage_entries: list[UsageLogEntry],
     ) -> ChatModeRunResult:
         final_snapshots = await self._refresh_snapshots(context_result.file_snapshots)
         result = ChatModeRunResult(
             initial_warnings=context_result.warnings,
-            response_text=response_text,
-            assistant_response_appended=assistant_response_appended,
+            response_text="",
+            assistant_response_appended=False,
             final_file_snapshots=final_snapshots,
             stop_reason=stop_reason,
             metrics=ChatModeMetrics(
-                valid_turn_count=valid_turn_count,
-                malformed_repair_count=malformed_repair_count,
-                citation_repair_count=citation_repair_count,
+                valid_turn_count=state.counted_turns,
+                malformed_repair_count=state.malformed_repair_count,
+                citation_repair_count=state.citation_repair_count,
                 stop_reason=stop_reason,
             ),
-            events=tuple(events),
-            tool_failures=tuple(tool_failures),
+            events=tuple(state.events),
+            tool_failures=tuple(state.tool_failures),
             research_summary=research_state.summary(),
-            provider_metadata=provider_metadata,
-            error_message=error_message,
-            usage_log=build_usage_log(usage_entries),
+            provider_metadata=state.provider_metadata,
+            error_message=state.error_message,
+            usage_log=build_usage_log(state.usage_entries),
             usage_log_path=self._persist_usage_log(
                 request=request,
-                usage_entries=usage_entries,
+                usage_entries=state.usage_entries,
                 stop_reason=stop_reason,
-                response_text=response_text,
-                assistant_response_appended=assistant_response_appended,
+                response_text="",
+                assistant_response_appended=False,
             ),
         )
         await emit_progress(
@@ -724,7 +720,7 @@ class ChatModeRunner:
                 path=request.active_file,
                 details={
                     "stop_reason": stop_reason,
-                    "error_message": error_message,
+                    "error_message": state.error_message,
                     "usage": result.usage_log.total.__dict__ if result.usage_log.total else None,
                 },
             ),
@@ -795,12 +791,6 @@ def _display_path(path: Path, display_root: Path) -> str:
         return str(path)
 
 
-def _next_run_log_row_number(run_log: list[TranscriptRow]) -> int:
-    if not run_log:
-        return 1
-    return run_log[-1].row_number + 1
-
-
 def _validate_chat_provider_response(
     response: ProviderResponse,
     *,
@@ -842,113 +832,6 @@ def _citation_repair_prompt(invalid_urls: tuple[str, ...]) -> str:
     )
 
 
-def _tool_result_message(tool_name: str, content: object) -> str:
-    if isinstance(content, dict):
-        if "message" in content:
-            return str(content["message"])
-        if tool_name == "web_fetch":
-            return f"Fetched {content.get('title') or content.get('url') or 'page'}."
-        if tool_name == "read":
-            return f"Read returned {content.get('type', 'content')}."
-        if tool_name == "bash":
-            return "bash finished."
-        return f"{tool_name} finished."
-    if isinstance(content, list):
-        return f"{tool_name} returned {len(content)} item(s)."
-    if isinstance(content, str):
-        return content
-    return f"{tool_name} finished."
-
-
-async def _append_generated_rows(
-    *,
-    generated_rows: list[ProviderGeneratedRow],
-    run_log: list[TranscriptRow],
-    write_transcript_row,
-    tool_map,
-    events: list[LoopEvent],
-    progress_sink,
-    active_file: Path,
-) -> tuple[int, list[ToolFailure]]:
-    counted_turns = 0
-    tool_failures: list[ToolFailure] = []
-
-    for generated in generated_rows:
-        row = generated.row
-        transcript_content = (
-            row.content if generated.transcript_content is None else generated.transcript_content
-        )
-        definition = tool_map.get(row.tool_name or "")
-
-        if row.type == "message":
-            row_number = await write_transcript_row(
-                row.role,
-                row.type,
-                row.tool_name,
-                row.tool_id,
-                transcript_content,
-            )
-            if row_number is not None:
-                run_log.append(
-                    TranscriptRow(
-                        row_number=row_number,
-                        role=row.role,
-                        type=row.type,
-                        tool_name=row.tool_name,
-                        tool_id=row.tool_id,
-                        content=row.content,
-                    )
-                )
-            continue
-
-        persistent = definition.persistence == "persistent" if definition is not None else True
-        if persistent:
-            row_number = await write_transcript_row(
-                row.role,
-                row.type,
-                row.tool_name,
-                row.tool_id,
-                transcript_content,
-            )
-        else:
-            row_number = _next_run_log_row_number(run_log)
-        run_log.append(
-            TranscriptRow(
-                row_number=row_number or _next_run_log_row_number(run_log),
-                role=row.role,
-                type=row.type,
-                tool_name=row.tool_name,
-                tool_id=row.tool_id,
-                content=row.content,
-            )
-        )
-
-        if row.role != "tool":
-            continue
-
-        counted_turns += 1
-        if row.type == "tool_error" and isinstance(row.content, dict):
-            tool_failures.append(failure_from_payload(row.content, tool_name=row.tool_name))
-
-        events.append(
-            loop_event := LoopEvent(
-                kind="tool_result",
-                message=_tool_result_message(row.tool_name or "tool", row.content),
-                details={
-                    "tool_name": row.tool_name,
-                    "status": "completed" if row.type == "tool_result" else "tool_error",
-                    "generated": True,
-                },
-            )
-        )
-        await emit_progress(
-            progress_sink,
-            progress_from_loop_event(loop_event, path=active_file),
-        )
-
-    return counted_turns, tool_failures
-
-
 def _build_chat_system_prompt(
     *,
     work_mode: str,
@@ -961,6 +844,9 @@ def _build_chat_system_prompt(
         f"Current work mode: {work_mode}.",
         f"Available tools: {tool_names or 'none'}.",
     ]
+    manifest = build_memory_manifest(registry)
+    if manifest:
+        parts.append(manifest)
     if work_mode != "work":
         parts.append("Do not try to mutate files in this work mode.")
     if protected_paths:

@@ -34,16 +34,19 @@ async def _build_server() -> tuple[Server[Any, Any], AunicToolBridge]:
 
 
 async def _main_async() -> None:
-    server, _bridge = await _build_server()
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(
-                notification_options=NotificationOptions(),
-                experimental_capabilities={},
-            ),
-        )
+    server, bridge = await _build_server()
+    try:
+        async with stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                server.create_initialization_options(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            )
+    finally:
+        await bridge.aclose()
 
 
 def main() -> None:

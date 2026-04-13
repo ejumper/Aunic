@@ -13,14 +13,47 @@ from aunic.tui.folding import FOLD_PLACEHOLDER_PREFIX, is_fold_placeholder_line
 
 _THEMATIC_BREAK_RE = re.compile(r"^\s*(?:\*\*\*+|---+)\s*$")
 
-# Slash/prefix commands that are highlighted blue in the prompt editor
-PROMPT_ACTIVE_COMMANDS = frozenset({
+# Slash/prefix commands that are highlighted blue in the prompt editor.
+# Mutable set — extended at runtime by register_rag_scopes().
+_prompt_active_commands: set[str] = {
     "/context", "/note", "/chat", "/work", "/read", "/off", "/model", "/find", "@web",
-})
-_PROMPT_COMMAND_RE = re.compile(
-    r"(@web\b|/context\b|/note\b|/chat\b|/work\b|/read\b|/off\b|/model\b|/find\b|/clear-history\b)"
-)
+    "/include", "/exclude", "/isolate", "/map",
+}
+
+# Read-only view and compiled regex — rebuilt by _rebuild_prompt_regex().
+PROMPT_ACTIVE_COMMANDS: frozenset[str]
+_PROMPT_COMMAND_RE: re.Pattern[str]
 _DESTRUCTIVE_COMMANDS = frozenset({"/clear-history"})
+
+
+def _rebuild_prompt_regex() -> None:
+    global PROMPT_ACTIVE_COMMANDS, _PROMPT_COMMAND_RE
+    PROMPT_ACTIVE_COMMANDS = frozenset(_prompt_active_commands)
+    # Sort by length descending so longer commands take priority over shorter prefixes.
+    escaped = sorted(
+        (re.escape(cmd) + r"\b" for cmd in _prompt_active_commands),
+        key=len,
+        reverse=True,
+    )
+    # /clear-history is in the regex (for red highlighting) but not in PROMPT_ACTIVE_COMMANDS.
+    escaped.append(r"/clear-history\b")
+    _PROMPT_COMMAND_RE = re.compile("(" + "|".join(escaped) + ")")
+
+
+def register_rag_scopes(scope_names: tuple[str, ...]) -> None:
+    """Register @rag and each @<scope> as highlighted prompt commands.
+
+    Called once during TuiController.__init__ after RAG config is loaded.
+    Safe to call multiple times — idempotent.
+    """
+    _prompt_active_commands.add("@rag")
+    for name in scope_names:
+        _prompt_active_commands.add(f"@{name}")
+    _rebuild_prompt_regex()
+
+
+# Initialize module-level globals.
+_rebuild_prompt_regex()
 _LIST_RE = re.compile(r"^(\s*)(?:[-+*]|\d+[.)])\s+")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 
@@ -68,6 +101,7 @@ def build_tui_style() -> Style:
             "marker.protect": "ansimagenta",
             "web.checkbox.checked": "ansigreen",
             "web.checkbox.unchecked": "ansibrightblack",
+            "web.chunk.match": "ansiblue",
             "model.selected": "ansigreen",
             "transcript.border": "ansibrightblack",
             "transcript.assistant": "",
@@ -136,8 +170,8 @@ class PromptLexer(Lexer):
             for m in _PROMPT_COMMAND_RE.finditer(line):
                 start, end = m.span()
                 token = m.group(0)
-                # @web only highlighted when nothing precedes it in the entire prompt
-                if token == "@web" and not (lineno == 0 and not line[:start].strip()):
+                # @-prefixed commands only highlighted when nothing precedes them in the prompt
+                if token.startswith("@") and not (lineno == 0 and not line[:start].strip()):
                     if start > pos:
                         fragments.append(("", line[pos:start]))
                     fragments.append(("", line[start:end]))

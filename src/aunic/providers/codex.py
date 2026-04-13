@@ -9,7 +9,6 @@ from typing import Any
 from aunic.config import SETTINGS, CodexSettings
 from aunic.domain import (
     HealthCheck,
-    Message,
     ProviderGeneratedRow,
     ProviderRequest,
     ProviderResponse,
@@ -30,9 +29,15 @@ from aunic.providers.sdk_tools import (
     deserialize_tool_execution_result,
     provider_rows_from_tool_execution,
 )
+from aunic.providers.shared import (
+    build_tool_bridge_config,
+    build_turn_input_text,
+    coerce_int,
+    normalize_reasoning_effort,
+)
 from aunic.transcript.compaction import prepare_transcript_for_model
 from aunic.transcript.flattening import flatten_tool_result_for_provider
-from aunic.transcript.translation import compose_final_user_message, group_assistant_rows
+from aunic.transcript.translation import group_assistant_rows
 
 
 CODEX_BASE_INSTRUCTIONS = (
@@ -98,8 +103,8 @@ class CodexProvider(LLMProvider):
         requested_reasoning_effort = (
             request.reasoning_effort or self._settings.default_reasoning_effort
         )
-        reasoning_effort = normalize_codex_reasoning_effort(requested_reasoning_effort)
-        bridge_config = _build_tool_bridge_config(request)
+        reasoning_effort = normalize_reasoning_effort(requested_reasoning_effort)
+        bridge_config = build_tool_bridge_config(request)
         if run_session_id:
             transport, session_reused = await self._get_or_create_run_transport(
                 run_session_id=run_session_id,
@@ -111,7 +116,7 @@ class CodexProvider(LLMProvider):
             )
             result = await transport.session.run_turn(
                 thread_id=transport.thread_id,
-                input_text=_build_turn_input_text(request),
+                input_text=build_turn_input_text(request),
                 model=model,
                 reasoning_effort=reasoning_effort,
                 timeout_seconds=self._settings.turn_timeout_seconds,
@@ -135,7 +140,7 @@ class CodexProvider(LLMProvider):
                 )
                 result = await session.run_turn(
                     thread_id=thread_id,
-                    input_text=_build_turn_input_text(request),
+                    input_text=build_turn_input_text(request),
                     model=model,
                     reasoning_effort=reasoning_effort,
                     timeout_seconds=self._settings.turn_timeout_seconds,
@@ -300,26 +305,6 @@ def _extract_thread_id(response: dict[str, Any]) -> str:
     return thread["id"]
 
 
-def _build_tool_bridge_config(request: ProviderRequest) -> ToolBridgeConfig | None:
-    if not request.tools:
-        return None
-    active_file = request.metadata.get("active_file")
-    mode = request.metadata.get("mode")
-    work_mode = request.metadata.get("work_mode")
-    if not isinstance(active_file, str) or not active_file.strip():
-        return None
-    if mode not in {"note", "chat"}:
-        return None
-    if work_mode not in {"off", "read", "work"}:
-        return None
-    return ToolBridgeConfig(
-        active_file=Path(active_file),
-        mode=mode,
-        work_mode=work_mode,
-        metadata=dict(request.metadata),
-    )
-
-
 def _build_mcp_overrides(
     *,
     settings: CodexSettings,
@@ -344,21 +329,6 @@ def _build_mcp_overrides(
         settings.mcp_server_name,
         env=env,
     )
-
-
-def _build_turn_input_text(request: ProviderRequest) -> str:
-    if request.transcript_messages is not None:
-        return compose_final_user_message(request.note_snapshot or "", request.user_prompt or "")
-    return render_messages_for_sdk(request.messages)
-
-
-def render_messages_for_sdk(messages: list[Message]) -> str:
-    rendered: list[str] = []
-    for message in messages:
-        name_suffix = f" ({message.name})" if message.name else ""
-        rendered.append(f"[{message.role.upper()}{name_suffix}]")
-        rendered.append(message.content)
-    return "\n\n".join(rendered)
 
 
 def build_codex_history_items(rows: list[TranscriptRow]) -> list[dict[str, Any]]:
@@ -511,20 +481,12 @@ def usage_from_codex_token_usage(token_usage: dict[str, Any] | None) -> Usage | 
     if not isinstance(payload, dict):
         return None
     return Usage(
-        total_tokens=_coerce_int(payload.get("totalTokens")),
-        input_tokens=_coerce_int(payload.get("inputTokens")),
-        cached_input_tokens=_coerce_int(payload.get("cachedInputTokens")),
-        output_tokens=_coerce_int(payload.get("outputTokens")),
-        reasoning_output_tokens=_coerce_int(payload.get("reasoningOutputTokens")),
-        model_context_window=_coerce_int(token_usage.get("modelContextWindow")),
+        total_tokens=coerce_int(payload.get("totalTokens")),
+        input_tokens=coerce_int(payload.get("inputTokens")),
+        cached_input_tokens=coerce_int(payload.get("cachedInputTokens")),
+        output_tokens=coerce_int(payload.get("outputTokens")),
+        reasoning_output_tokens=coerce_int(payload.get("reasoningOutputTokens")),
+        model_context_window=coerce_int(token_usage.get("modelContextWindow")),
     )
 
 
-def _coerce_int(value: Any) -> int | None:
-    return value if isinstance(value, int) else None
-
-
-def normalize_codex_reasoning_effort(reasoning_effort: str) -> str:
-    if reasoning_effort == "minimal":
-        return "low"
-    return reasoning_effort

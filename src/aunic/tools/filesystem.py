@@ -339,7 +339,7 @@ async def execute_read(runtime: RunToolContext, args: ReadArgs) -> ToolExecution
             failure_payload(
                 category="validation_error",
                 reason="is_directory",
-                message=f"{path} is a directory. Use list or bash instead.",
+                message=f"{path} is a directory. Use list instead." if runtime.work_mode != "work" else f"{path} is a directory. Use list or bash instead.",
                 file_path=str(path),
             ),
         )
