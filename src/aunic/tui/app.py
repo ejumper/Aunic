@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from collections.abc import Callable
@@ -30,7 +31,7 @@ from prompt_toolkit.document import Document
 from aunic.context import FileManager
 from aunic.modes import ChatModeRunner, NoteModeRunner
 from aunic.tui.controller import TuiController
-from aunic.tui.types import IncludeEntry
+from aunic.tui.types import IncludeEntry, SleepStatusState
 from aunic.tui.web_search_view import WebSearchView
 from aunic.tui.transcript_view import TranscriptView
 from aunic.tui.note_tables import NoteTablePreviewBufferControl
@@ -133,10 +134,10 @@ class AunicTuiApp:
             self.controller.state.include_entries = _deserialize_include_entries(raw) if isinstance(raw, list) else []
             self.controller._rebuild_available_files()
 
-        self.controller._on_transcript_open_changed = lambda _open_state: _save_file_ui_state(self.controller.state.active_file)
-        self.controller._on_transcript_maximized_changed = lambda _maximized: _save_file_ui_state(self.controller.state.active_file)
-        self.controller._on_includes_changed = lambda: _save_file_ui_state(self.controller.state.active_file)
-        self.controller._on_mode_changed = lambda: _save_file_ui_state(self.controller.state.active_file)
+        self.controller._on_transcript_open_changed = lambda _open_state: _save_file_ui_state(self.controller.state.context_file or self.controller.state.active_file)
+        self.controller._on_transcript_maximized_changed = lambda _maximized: _save_file_ui_state(self.controller.state.context_file or self.controller.state.active_file)
+        self.controller._on_includes_changed = lambda: _save_file_ui_state(self.controller.state.context_file or self.controller.state.active_file)
+        self.controller._on_mode_changed = lambda: _save_file_ui_state(self.controller.state.context_file or self.controller.state.active_file)
         self.controller._on_file_switched = _on_file_switched
 
         self.editor = TextArea(
@@ -198,7 +199,9 @@ class AunicTuiApp:
                 ),
                 MarkdownLinkProcessor(
                     open_target=_open_url_focused,
-                    active_file=lambda: self.controller.state.active_file,
+                    active_file=lambda: self.controller.state.display_file
+                    or self.controller.state.context_file
+                    or self.controller.state.active_file,
                 ),
             ],
             search_buffer_control=original_editor_control.search_buffer_control,
@@ -216,7 +219,7 @@ class AunicTuiApp:
         self._permission_prompt_view = PermissionPromptView(self.controller)
 
         self._file_radio = RadioList(
-            [(self.controller.state.active_file, self.controller.state.active_file.name)]
+            [(self.controller.state.context_file or self.controller.state.active_file, (self.controller.state.context_file or self.controller.state.active_file).name)]
         )
         self._file_menu = self._build_file_menu_dialog()
 
@@ -333,14 +336,21 @@ class AunicTuiApp:
         self._suspend_undo_coalescing = False
         self._syncing_find = False
         self._syncing_replace = False
+        self._sleep_refresh_task: asyncio.Task[None] | None = None
 
     async def run(self) -> int:
         await self.controller.initialize()
         await self.controller.start_watch_task()
+        self._sleep_refresh_task = asyncio.create_task(self._sleep_refresh_loop())
         self._refresh_dimensions()
         try:
             await self.application.run_async()
         finally:
+            if self._sleep_refresh_task is not None:
+                self._sleep_refresh_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._sleep_refresh_task
+                self._sleep_refresh_task = None
             await self.controller.shutdown()
         return 0
 
@@ -397,6 +407,11 @@ class AunicTuiApp:
             self._transcript_view._cursor_col = "delete"
             self._transcript_view._toolbar_focused = False
             self.application.layout.focus(self._transcript_view.window)
+
+        @bindings.add("escape", eager=True, filter=Condition(self._sleeping))
+        @bindings.add("c-c", eager=True, filter=Condition(self._sleeping))
+        def _wake_sleep(_event) -> None:
+            self.controller.force_stop_run()
 
         @bindings.add("c-f", eager=True, filter=Condition(self._can_toggle_find_ui))
         def _open_find(_event) -> None:
@@ -548,10 +563,12 @@ class AunicTuiApp:
         @bindings.add("up", eager=True, filter=Condition(self._in_web_mode))
         def _web_up(_event) -> None:
             self.controller.web_move_cursor(-1)
+            self._web_view.on_cursor_moved()
 
         @bindings.add("down", eager=True, filter=Condition(self._in_web_mode))
         def _web_down(_event) -> None:
             self.controller.web_move_cursor(1)
+            self._web_view.on_cursor_moved()
 
         @bindings.add("left", eager=True, filter=Condition(self._in_web_results))
         @bindings.add("right", eager=True, filter=Condition(self._in_web_results))
@@ -559,6 +576,7 @@ class AunicTuiApp:
         @bindings.add("right", eager=True, filter=Condition(self._in_web_chunks))
         def _web_toggle_expand(_event) -> None:
             self.controller.web_toggle_expand()
+            self._web_view.on_cursor_moved()
 
         @bindings.add("space", eager=True, filter=Condition(self._in_web_mode))
         def _web_space(_event) -> None:
@@ -654,6 +672,10 @@ class AunicTuiApp:
         @bindings.add("backspace", eager=True, filter=Condition(self._transcript_has_focus))
         def _transcript_delete(_event) -> None:
             self._background(self._transcript_view.delete_selected_row())
+
+        @bindings.add("y", eager=True, filter=Condition(self._transcript_has_focus))
+        def _transcript_copy(_event) -> None:
+            self._transcript_view.copy_selected_row()
 
         return bindings
 
@@ -1088,6 +1110,9 @@ class AunicTuiApp:
     def _in_web_chunks(self) -> bool:
         return self.controller.state.web_mode == "chunks"
 
+    def _sleeping(self) -> bool:
+        return self.controller.state.run_in_progress and self.controller.state.sleep_status is not None
+
     def _find_ui_active(self) -> bool:
         return self.controller.state.find_ui.active
 
@@ -1215,6 +1240,12 @@ class AunicTuiApp:
 
     def _background(self, coroutine) -> None:
         self.application.create_background_task(coroutine)
+
+    async def _sleep_refresh_loop(self) -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            if self.controller.state.sleep_status is not None:
+                self._invalidate()
 
     def _handle_find_buffer_changed(self, _event) -> None:
         if self._syncing_find:
@@ -1420,6 +1451,8 @@ class AunicTuiApp:
         return [("class:transcript.filter", "[ ^ ] Open Transcript", _toggle)]
 
     def _indicator_fragments(self):
+        if self.controller.state.run_in_progress and self.controller.state.sleep_status is not None:
+            return [("class:indicator.status", _sleep_banner(self.controller.state.sleep_status))]
         style = "class:indicator.error" if self.controller.state.indicator_kind == "error" else "class:indicator.status"
         return [(style, self.controller.state.indicator_message)]
 
@@ -1493,6 +1526,7 @@ class AunicTuiApp:
 
     def _build_file_menu_dialog(self):
         entries = self.controller.state.include_entries
+        sections: list = [self._file_radio]
         if entries:
             include_rows: list = []
             for i, entry in enumerate(entries):
@@ -1517,9 +1551,20 @@ class AunicTuiApp:
                 Label(text="\nIncludes:"),
                 *include_rows,
             ])
-            body = HSplit([self._file_radio, include_section], padding=1)
-        else:
-            body = Box(self._file_radio, padding=1)
+            sections.append(include_section)
+        plans = self.controller.plan_menu_entries()
+        if plans:
+            plan_rows: list = []
+            for plan in plans:
+                label = f"[{plan.status}] {plan.title}"
+                plan_rows.append(
+                    Button(
+                        text=label,
+                        handler=lambda plan_id=plan.id: self._background(self.controller.open_plan(plan_id)),
+                    )
+                )
+            sections.append(HSplit([Label(text="\nPlans:"), *plan_rows]))
+        body = Box(HSplit(sections, padding=1), padding=1)
         return Dialog(
             title="Open File",
             body=body,
@@ -1598,7 +1643,7 @@ class AunicTuiApp:
         paths = self.controller.state.available_files
         labels = _disambiguate_path_labels(paths)
         self._file_radio.values = list(zip(paths, labels))
-        self._file_radio.current_value = self.controller.state.active_file
+        self._file_radio.current_value = self.controller.state.context_file or self.controller.state.active_file
 
 
 def _mouse(callback):
@@ -1636,12 +1681,23 @@ class PermissionPromptView:
         if prompt is None:
             return [("", "A tool is requesting permission.\n")]
 
-        fragments.append(("class:control.active", "Tool Permission\n"))
+        is_plan_approval = prompt.details.get("kind") == "plan_approval"
+        fragments.append(("class:control.active", "Plan Approval\n" if is_plan_approval else "Tool Permission\n"))
         fragments.append(("", f"{prompt.message}\n"))
         fragments.append(("class:transcript.tool.name", f"Tool: {prompt.tool_name}\n"))
-        fragments.append(("class:transcript.tool.content", f"Target: {prompt.target}\n\n"))
+        fragments.append(("class:transcript.tool.content", f"Target: {prompt.target}\n"))
+        if is_plan_approval:
+            plan_markdown = str(prompt.details.get("plan_markdown") or "")
+            preview = "\n".join(plan_markdown.splitlines()[:12])
+            if preview:
+                fragments.append(("class:transcript.tool.content", f"\n{preview}\n"))
+                if len(plan_markdown.splitlines()) > 12:
+                    fragments.append(("class:transcript.tool.content", "..."))
+                fragments.append(("", "\n"))
+        fragments.append(("", "\n"))
 
-        for index, (value, label) in enumerate(self._OPTIONS):
+        options = (("once", "Approve & implement"), ("reject", "Keep planning")) if is_plan_approval else self._OPTIONS
+        for index, (value, label) in enumerate(options):
             is_focused = index == cursor
             style = "class:control.active" if is_focused else ""
             indicator = "(*)" if is_focused else "( )"
@@ -2077,6 +2133,20 @@ def _display_to_source_position(control, display_row: int, display_col: int) -> 
         return display_row, display_col
     processed_line = get_processed_line(display_row)
     return display_row, processed_line.display_to_source(display_col)
+
+
+def _sleep_banner(status: SleepStatusState) -> str:
+    remaining_seconds = max(0, int(status.deadline_monotonic - time.monotonic() + 0.999))
+    reason = f" - {status.reason}" if status.reason else ""
+    return f"Sleeping {_format_remaining(remaining_seconds)} remaining{reason}  [Esc to wake]"
+
+
+def _format_remaining(total_seconds: int) -> str:
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def _dimension_value(value, default: int) -> int:

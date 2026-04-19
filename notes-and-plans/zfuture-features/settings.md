@@ -14,3 +14,7 @@ domain blacklist/whitelist
 - configures either a whitelist or blacklist of searchable domains
 note-mode `synthesis-pass`
 - turn the `synthesis-pass` on or off
+transcript placement
+- user can decide whether the transcript appears in the same file or is held in .aunic/ 
+    - nothing changes as far as the model is concerned, the transcript still is sent to the model in the exact same way. This is purely an aesthetic choice to keep the table from taking space in the markdown file
+    - the map feature would need to be updated to recognize "aunic notes" from the transcript present in .aunic/

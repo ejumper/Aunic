@@ -103,6 +103,14 @@ class LoopSettings:
 
 
 @dataclass(frozen=True)
+class SleepSettings:
+    sleep_min_ms: int = 250
+    sleep_max_ms: int = 300_000
+    sleep_default_poll_ms: int = 1_000
+    sleep_require_reason_after_ms: int = 30_000
+
+
+@dataclass(frozen=True)
 class MCPSettings:
     connect_timeout_seconds: float = 10.0
     request_timeout_seconds: float = 30.0
@@ -143,6 +151,7 @@ class AppSettings:
     research: ResearchSettings = field(default_factory=ResearchSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
     loop: LoopSettings = field(default_factory=LoopSettings)
+    sleep: SleepSettings = field(default_factory=SleepSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     package_name: str = "aunic"

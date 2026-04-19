@@ -10,10 +10,11 @@ from prompt_toolkit.layout.containers import Window, ScrollOffsets
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.margins import ScrollbarMargin
-from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
 from aunic.tui.transcript_renderers import (
     TranscriptRenderContext,
+    extract_row_text,
     get_renderer,
     render_filter_toolbar,
 )
@@ -62,6 +63,7 @@ class TranscriptView:
             scroll_offsets=ScrollOffsets(top=0, bottom=0),
             get_vertical_scroll=lambda w: self._scroll_pos,
             content_width_callback=self._on_body_width_changed,
+            right_click_row_callback=self._on_right_click_line,
         )
         self._selected_row_number: int | None = None
         self._cursor_col: str = "delete"   # "delete" or "action"
@@ -440,6 +442,40 @@ class TranscriptView:
         visible_content_lines = max(0, self._last_line_count - self._scroll_pos)
         return mouse_event.position.y >= visible_content_lines
 
+    def copy_selected_row(self) -> None:
+        """Copy the keyboard-selected transcript row's content to the clipboard."""
+        self.ensure_selection()
+        if self._selected_row_number is None:
+            return
+        rows = self._controller.visible_transcript_rows()
+        row = next((r for r in rows if r.row_number == self._selected_row_number), None)
+        if row is None:
+            return
+        text = extract_row_text(row, self._controller.tool_call_index())
+        if text:
+            self._controller.copy_text_to_clipboard(text)
+
+    def _on_right_click_line(self, content_row: int) -> None:
+        """Find the transcript row that owns content_row and copy it to the clipboard."""
+        row_start_lines = self._row_start_lines
+        if not row_start_lines:
+            return
+        best_row_number: int | None = None
+        best_start = -1
+        for row_number, start in row_start_lines.items():
+            if start <= content_row and start > best_start:
+                best_start = start
+                best_row_number = row_number
+        if best_row_number is None:
+            return
+        rows = self._controller.visible_transcript_rows()
+        row = next((r for r in rows if r.row_number == best_row_number), None)
+        if row is None:
+            return
+        text = extract_row_text(row, self._controller.tool_call_index())
+        if text:
+            self._controller.copy_text_to_clipboard(text)
+
 
 class _ScrollableFormattedTextControl(FormattedTextControl):
     def __init__(
@@ -471,10 +507,12 @@ class _TranscriptBodyWindow(Window):
         self,
         *args,
         content_width_callback: Callable[[int], None] | None = None,
+        right_click_row_callback: Callable[[int], None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._content_width_callback = content_width_callback
+        self._right_click_row_callback = right_click_row_callback
 
     def write_to_screen(
         self,
@@ -530,6 +568,8 @@ class _TranscriptBodyWindow(Window):
         visible_line_to_row_col: dict[int, tuple[int, int]],
         write_position,
     ) -> Callable[[MouseEvent], object]:
+        right_click_row_callback = self._right_click_row_callback
+
         def mouse_handler(mouse_event: MouseEvent):
             if self not in get_app().layout.walk_through_modal_area():
                 return NotImplemented
@@ -537,6 +577,22 @@ class _TranscriptBodyWindow(Window):
             yx_to_rowcol = {v: k for k, v in rowcol_to_yx.items()}
             y = mouse_event.position.y
             x = mouse_event.position.x
+
+            # Right-click: copy the transcript row at the clicked position.
+            if (
+                mouse_event.event_type == MouseEventType.MOUSE_UP
+                and mouse_event.button == MouseButton.RIGHT
+                and right_click_row_callback is not None
+            ):
+                x_try = x
+                while x_try >= 0:
+                    try:
+                        content_row, _ = yx_to_rowcol[y, x_try]
+                        right_click_row_callback(content_row)
+                        break
+                    except KeyError:
+                        x_try -= 1
+                return None
 
             if not visible_line_to_row_col:
                 return None

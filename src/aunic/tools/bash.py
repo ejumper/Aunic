@@ -4,14 +4,23 @@ import asyncio
 import os
 import shlex
 import tempfile
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from aunic.config import SETTINGS
 from aunic.domain import ToolSpec
 from aunic.tools.base import ToolDefinition, ToolExecutionResult
-from aunic.tools.runtime import PermissionRequest, RunToolContext, failure_from_payload, failure_payload, stable_signature
+from aunic.tools.runtime import (
+    BackgroundProcessState,
+    PermissionRequest,
+    RunToolContext,
+    failure_from_payload,
+    failure_payload,
+    stable_signature,
+)
 
 try:
     import bashlex  # type: ignore[import-not-found]
@@ -154,24 +163,40 @@ async def execute_bash(runtime: RunToolContext, args: BashArgs) -> ToolExecution
     timeout_ms = args.timeout or SETTINGS.tools.bash_timeout_ms
     timeout_ms = max(1, min(timeout_ms, SETTINGS.tools.bash_timeout_max_ms))
     if args.run_in_background:
+        cwd = runtime.session_state.shell.cwd
         process = await asyncio.create_subprocess_exec(
             _shell_executable(),
             "-lc",
             args.command,
-            cwd=runtime.session_state.shell.cwd,
+            cwd=cwd,
             env=_shell_env(runtime),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
-        task_id = f"bg-{runtime.session_state.shell.next_background_id}"
-        runtime.session_state.shell.next_background_id += 1
-        runtime.session_state.shell.background_tasks[task_id] = process
+        background_id = runtime.session_state.shell.next_bg_id()
+        pgid = process.pid
+        runtime.session_state.shell.register_background_process(
+            BackgroundProcessState(
+                background_id=background_id,
+                process=process,
+                command=args.command,
+                description=args.description,
+                cwd=cwd,
+                pid=process.pid,
+                pgid=pgid,
+                started_at=datetime.now(),
+                started_monotonic=time.monotonic(),
+            )
+        )
         payload = {
             "type": "bash_background",
             "command": args.command,
             "description": args.description,
-            "task_id": task_id,
+            "task_id": background_id,
+            "background_id": background_id,
             "pid": process.pid,
+            "pgid": pgid,
         }
         return ToolExecutionResult("bash", "completed", payload)
 

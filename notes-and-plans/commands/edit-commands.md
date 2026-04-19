@@ -12,7 +12,7 @@ $>> <<$
 - wrap these around text to stop the model from touching them.
 - model has full context of the file, but simply won't alter whats inside these
 ">> <<"
-- `/prompt-from-note` has been removed
+- *note: `/prompt-from-note` has been removed*
 - these are treated as normal note context today
 - does not override any other editor tools
 using multiple edit commands together

@@ -390,6 +390,70 @@ def render_fetch_result(row: TranscriptRow, context: TranscriptRenderContext) ->
     return fragments
 
 
+def extract_row_text(row: TranscriptRow, tool_call_index: dict[str, TranscriptRow]) -> str:
+    """Return plain text suitable for clipboard copy for a transcript row."""
+    if row.type == "message":
+        return _content_as_text(row.content)
+    if row.type in {"tool_result", "tool_error"}:
+        if row.tool_name == "bash":
+            return _extract_bash_text(row, tool_call_index)
+        if row.tool_name == "web_search":
+            return _extract_search_text(row, tool_call_index)
+        if row.tool_name == "web_fetch":
+            return _extract_fetch_text(row)
+        return flatten_tool_result_for_provider(row)
+    return ""
+
+
+def _extract_bash_text(row: TranscriptRow, tool_call_index: dict[str, TranscriptRow]) -> str:
+    parts: list[str] = []
+    command = ""
+    if row.tool_id and row.tool_id in tool_call_index:
+        tc = tool_call_index[row.tool_id]
+        if isinstance(tc.content, dict):
+            command = str(tc.content.get("command", ""))
+    if command:
+        parts.append(f"$ {command}")
+    payload = row.content if isinstance(row.content, dict) else {}
+    stdout = str(payload.get("stdout", "")).rstrip()
+    stderr = str(payload.get("stderr", "")).rstrip()
+    if stdout:
+        parts.append(stdout)
+    if stderr:
+        parts.append(f"[stderr]\n{stderr}")
+    exit_code = payload.get("exit_code")
+    if exit_code is not None:
+        parts.append(f"exit_code={exit_code}")
+    return "\n".join(parts)
+
+
+def _extract_search_text(row: TranscriptRow, tool_call_index: dict[str, TranscriptRow]) -> str:
+    parts: list[str] = []
+    if row.tool_id and row.tool_id in tool_call_index:
+        tc = tool_call_index[row.tool_id]
+        if isinstance(tc.content, dict):
+            queries = tc.content.get("queries")
+            if isinstance(queries, list) and queries and isinstance(queries[0], str):
+                parts.append(f"Search: {queries[0]}")
+            elif isinstance(tc.content.get("query"), str):
+                parts.append(f"Search: {tc.content['query']}")
+    results = row.content if isinstance(row.content, list) else []
+    for i, result in enumerate(results, start=1):
+        if not isinstance(result, dict):
+            continue
+        title = str(result.get("title", "(no title)"))
+        url = str(result.get("url", ""))
+        parts.append(f"{i}. {title}\n   {url}")
+    return "\n".join(parts)
+
+
+def _extract_fetch_text(row: TranscriptRow) -> str:
+    payload = row.content if isinstance(row.content, dict) else {}
+    title = str(payload.get("title", "(no title)"))
+    url = str(payload.get("url", ""))
+    return f"{title}\n{url}" if url else title
+
+
 def get_renderer(row: TranscriptRow) -> Callable[[TranscriptRow, TranscriptRenderContext], StyleAndTextTuples] | None:
     if row.type == "tool_call":
         return None

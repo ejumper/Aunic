@@ -8,6 +8,7 @@ from aunic.domain import ReasoningEffort, WorkMode
 
 TuiMode = Literal["note", "chat"]
 DialogMode = Literal["file_menu", "file_switch_confirm", "reload_confirm", "model_picker", "permission_prompt", "note_conflict"]
+PlanningStatus = Literal["none", "drafting", "awaiting_approval", "approved", "implementing"]
 WebMode = Literal["idle", "results", "chunks"]
 TranscriptFilter = Literal["all", "chat", "tools", "search"]
 TranscriptSortOrder = Literal["descending", "ascending"]
@@ -56,6 +57,21 @@ class IncludeEntry:
     active: bool = True
 
 
+@dataclass(frozen=True)
+class PlanMenuEntry:
+    id: str
+    title: str
+    status: str
+    path: Path
+
+
+@dataclass(frozen=True)
+class SleepStatusState:
+    started_monotonic: float
+    deadline_monotonic: float
+    reason: str | None = None
+
+
 @dataclass
 class FindUiState:
     active: bool = False
@@ -76,6 +92,12 @@ class FindUiState:
 class TuiState:
     active_file: Path
     available_files: tuple[Path, ...]
+    context_file: Path | None = None
+    display_file: Path | None = None
+    active_plan_id: str | None = None
+    active_plan_path: Path | None = None
+    planning_status: PlanningStatus = "none"
+    pre_plan_work_mode: WorkMode | None = None
     mode: TuiMode = "note"
     selected_model_index: int = 0
     model_options: tuple[ModelOption, ...] = ()
@@ -83,6 +105,7 @@ class TuiState:
     editor_dirty: bool = False
     prompt_text: str = ""
     run_in_progress: bool = False
+    sleep_status: SleepStatusState | None = None
     indicator_message: str = ""
     indicator_kind: Literal["status", "error"] = "status"
     fold_state: dict[Path, set[str]] = field(default_factory=dict)
@@ -101,9 +124,15 @@ class TuiState:
     find_ui: FindUiState = field(default_factory=FindUiState)
     include_entries: list[IncludeEntry] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        if self.context_file is None:
+            self.context_file = self.active_file
+        if self.display_file is None:
+            self.display_file = self.context_file
+
     @property
     def included_files(self) -> tuple[Path, ...]:
-        return tuple(path for path in self.available_files if path != self.active_file)
+        return tuple(path for path in self.available_files if path != self.context_file)
 
     @property
     def selected_model(self) -> ModelOption:

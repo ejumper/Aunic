@@ -26,6 +26,7 @@ from aunic.context.types import TextSpan
 from aunic.domain import TranscriptRow
 from aunic.errors import ChatModeError, FileReadError, NoteModeError, OptimisticWriteError
 from aunic.modes import ChatModeRunRequest, ChatModeRunner, NoteModeRunRequest, NoteModeRunner, NoteModeRunResult
+from aunic.plans import PlanService
 from aunic.progress import ProgressEvent
 from aunic.proto_settings import get_openai_compatible_profiles, resolve_openai_compatible_profile
 from aunic.providers import ClaudeProvider, CodexProvider, OpenAICompatibleProvider
@@ -52,7 +53,9 @@ from aunic.tui.types import (
     IncludeEntry,
     ModelOption,
     NoteConflictState,
+    PlanMenuEntry,
     PermissionPromptState,
+    SleepStatusState,
     TranscriptFilter,
     TranscriptViewState,
     TuiMode,
@@ -130,6 +133,8 @@ class TuiController:
         self.state = TuiState(
             active_file=active_file,
             available_files=tuple([active_file, *[path for path in included_files if path != active_file]]),
+            context_file=active_file,
+            display_file=active_file,
             mode="note",
             selected_model_index=0,
             model_options=_build_model_options(self._cwd, initial_provider, initial_model),
@@ -244,7 +249,7 @@ class TuiController:
 
     @property
     def active_file_label(self) -> str:
-        path = self.state.active_file
+        path = self._display_file()
         if self._display_root is None:
             label = path.name
         else:
@@ -252,7 +257,15 @@ class TuiController:
                 label = str(path.relative_to(self._display_root))
             except ValueError:
                 label = str(path)
+        if path != self._context_file():
+            label = f"Plan: {path.stem} (source: {self._context_file().name})"
         return f"{label}{' *' if self.state.editor_dirty else ''}"
+
+    def _context_file(self) -> Path:
+        return self.state.context_file or self.state.active_file
+
+    def _display_file(self) -> Path:
+        return self.state.display_file or self._context_file()
 
     def prompt_height(self) -> int:
         if self._prompt_buffer is None:
@@ -260,6 +273,8 @@ class TuiController:
         return max(1, min(10, self._prompt_buffer.document.line_count))
 
     def indicator_height(self) -> int:
+        if self.state.sleep_status is not None and self.state.run_in_progress:
+            return 1
         line_count = len(self.state.indicator_message.splitlines()) or 1
         return max(1, min(3, line_count))
 
@@ -360,7 +375,7 @@ class TuiController:
 
     def _rebuild_available_files(self) -> None:
         """Resolve include_entries to concrete paths and update available_files."""
-        active = self.state.active_file
+        active = self._context_file()
         base = active.parent
         seen: set[Path] = set()
         resolved: list[Path] = []
@@ -399,7 +414,7 @@ class TuiController:
 
     def open_file_menu(self) -> None:
         self.state.active_dialog = "file_menu"
-        self.state.dialog_selection_index = self.state.available_files.index(self.state.active_file)
+        self.state.dialog_selection_index = self.state.available_files.index(self._context_file())
         self._invalidate()
 
     def open_model_picker(self) -> None:
@@ -429,7 +444,8 @@ class TuiController:
         elif self.state.active_dialog == "model_picker":
             size = len(self.state.model_options)
         elif self.state.active_dialog == "permission_prompt":
-            size = 3
+            prompt = self.state.permission_prompt
+            size = 2 if prompt is not None and prompt.details.get("kind") == "plan_approval" else 3
         else:
             return
         self.state.dialog_selection_index = (self.state.dialog_selection_index + delta) % max(size, 1)
@@ -449,11 +465,16 @@ class TuiController:
             self._invalidate()
             return
         if self.state.active_dialog == "permission_prompt":
-            options = ("once", "always", "reject")
+            prompt = self.state.permission_prompt
+            options = (
+                ("once", "reject")
+                if prompt is not None and prompt.details.get("kind") == "plan_approval"
+                else ("once", "always", "reject")
+            )
             self.resolve_permission_prompt(options[self.state.dialog_selection_index])
 
     async def request_file_switch(self, path: Path) -> None:
-        if path == self.state.active_file:
+        if path == self._context_file():
             self.close_dialog()
             return
         self.state.pending_switch_path = path
@@ -475,6 +496,88 @@ class TuiController:
             if not await self.save_active_file():
                 return
         await self._switch_active_file(target)
+
+    def plan_menu_entries(self) -> tuple[PlanMenuEntry, ...]:
+        service = PlanService(self._context_file())
+        return tuple(
+            PlanMenuEntry(
+                id=entry.id,
+                title=entry.title,
+                status=entry.status,
+                path=entry.file_path(service.plans_dir),
+            )
+            for entry in service.list_plans_for_source_note()
+        )
+
+    async def create_plan(self, title: str) -> None:
+        if self.state.editor_dirty and not await self.save_active_file():
+            return
+        if self.state.pre_plan_work_mode is None:
+            self.state.pre_plan_work_mode = self.state.work_mode
+        document = PlanService(self._context_file()).create_plan(title)
+        self.state.active_plan_id = document.entry.id
+        self.state.active_plan_path = document.path
+        self.state.planning_status = "drafting"
+        self.state.display_file = document.path
+        self.state.active_dialog = None
+        await self._load_active_file(reset_dirty=True)
+        self._set_status(f"Created plan: {document.entry.title}.")
+        self._invalidate()
+
+    async def open_plan(self, plan_id: str) -> None:
+        if self.state.editor_dirty and not await self.save_active_file():
+            return
+        document = PlanService(self._context_file()).get_plan(plan_id)
+        self.state.active_plan_id = document.entry.id
+        self.state.active_plan_path = document.path
+        if document.entry.status in {"draft", "awaiting_approval"}:
+            if self.state.pre_plan_work_mode is None:
+                self.state.pre_plan_work_mode = self.state.work_mode
+            self.state.planning_status = (
+                "awaiting_approval" if document.entry.status == "awaiting_approval" else "drafting"
+            )
+        self.state.display_file = document.path
+        self.state.active_dialog = None
+        await self._load_active_file(reset_dirty=True)
+        self._set_status(f"Opened plan: {document.entry.title}.")
+        self._invalidate()
+
+    async def _handle_plan_command(self, remaining: str) -> None:
+        command = remaining.strip()
+        if command == "list":
+            self.open_file_menu()
+            self._set_status("Plans are listed in the file menu.")
+            return
+        if command == "open":
+            if self.state.active_plan_path is None:
+                self._set_error("No active plan to open.")
+            else:
+                self._set_status(f"Active plan: {self.state.active_plan_path}")
+            return
+        if command:
+            await self.create_plan(command)
+            return
+
+        if self.state.active_plan_id and self.state.active_plan_path:
+            if self._display_file() != self.state.active_plan_path:
+                await self.open_plan(self.state.active_plan_id)
+            else:
+                self._set_status(f"Planning: {self.state.active_plan_path}")
+            return
+
+        drafts = [
+            entry
+            for entry in PlanService(self._context_file()).list_plans_for_source_note()
+            if entry.status in {"draft", "awaiting_approval"}
+        ]
+        if len(drafts) == 1:
+            await self.open_plan(drafts[0].id)
+            return
+        if len(drafts) > 1:
+            self.open_file_menu()
+            self._set_status("Multiple draft plans found. Choose one from the file menu.")
+            return
+        await self.create_plan("Untitled Plan")
 
     async def confirm_external_reload(self, *, reload_file: bool) -> None:
         self.state.active_dialog = None
@@ -805,6 +908,12 @@ class TuiController:
                 self._invalidate()
                 return
 
+            if cmd == "/plan":
+                await self._handle_plan_command(remaining)
+                self._sync_prompt_text("")
+                self._invalidate()
+                return
+
             if cmd == "/model":
                 self._pending_prompt_restore = remaining
                 self._sync_prompt_text("")
@@ -965,13 +1074,13 @@ class TuiController:
             return
         line_number = self._editor_buffer.document.cursor_position_row
         folded = self.state.fold_state.setdefault(
-            self.state.active_file,
+            self._display_file(),
             default_folded_anchor_ids(self._note_content_text),
         )
         updated = toggle_fold_for_line(self._note_content_text, folded, line_number)
         if updated == folded:
             return
-        self.state.fold_state[self.state.active_file] = updated
+        self.state.fold_state[self._display_file()] = updated
         self._sync_editor_from_note_content(preserve_cursor=True)
         self._invalidate()
 
@@ -986,6 +1095,22 @@ class TuiController:
             self._run_start_time = time.monotonic()
             self._run_turn_count = 0
             self._run_error_count = 0
+            self._set_status(event.message)
+        elif event.kind == "sleep_started":
+            self.state.sleep_status = SleepStatusState(
+                started_monotonic=_float_detail(
+                    event.details.get("started_monotonic"),
+                    fallback=time.monotonic(),
+                ),
+                deadline_monotonic=_float_detail(
+                    event.details.get("deadline_monotonic"),
+                    fallback=time.monotonic(),
+                ),
+                reason=_optional_str(event.details.get("reason")),
+            )
+            self._set_status(event.message)
+        elif event.kind == "sleep_ended":
+            self.state.sleep_status = None
             self._set_status(event.message)
         elif event.kind == "loop_event":
             loop_kind = event.details.get("loop_kind")
@@ -1039,7 +1164,7 @@ class TuiController:
             self._set_error(event.message)
         else:
             self._set_status(event.message)
-        if event.kind == "file_written" and event.path == self.state.active_file:
+        if event.kind == "file_written" and event.path == self._display_file():
             if self.state.run_in_progress and self.state.mode == "note":
                 self._invalidate()
                 return
@@ -1086,8 +1211,11 @@ class TuiController:
             if self.state.mode == "note":
                 result = await self._note_runner.run(
                     NoteModeRunRequest(
-                        active_file=self.state.active_file,
+                        active_file=self._context_file(),
                         included_files=run_included,
+                        active_plan_id=self.state.active_plan_id,
+                        active_plan_path=self.state.active_plan_path,
+                        planning_status=self.state.planning_status,
                         provider=provider,
                         user_prompt=prompt_text,
                         model=self.state.selected_model.model,
@@ -1112,12 +1240,16 @@ class TuiController:
                     self._set_error(f"Run stopped: {result.stop_reason}.{suffix}{stats}")
                 else:
                     self._set_status(f"Finished!{suffix}{stats}")
+                self._sync_plan_state_from_note_result(result)
                 await self._reconcile_note_mode_result(result)
             else:
                 result = await self._chat_runner.run(
                     ChatModeRunRequest(
-                        active_file=self.state.active_file,
+                        active_file=self._context_file(),
                         included_files=run_included,
+                        active_plan_id=self.state.active_plan_id,
+                        active_plan_path=self.state.active_plan_path,
+                        planning_status=self.state.planning_status,
                         provider=provider,
                         user_prompt=prompt_text,
                         model=self.state.selected_model.model,
@@ -1156,10 +1288,45 @@ class TuiController:
             if self._pontificating_task is not None:
                 self._pontificating_task.cancel()
                 self._pontificating_task = None
+            self.state.sleep_status = None
             self.state.run_in_progress = False
             self._force_stopped = False
             self._run_note_baseline_content = None
             self._invalidate()
+
+    def _sync_plan_state_from_note_result(self, result: NoteModeRunResult) -> None:
+        rows: list[TranscriptRow] = []
+        for prompt_result in result.prompt_results:
+            loop_result = prompt_result.loop_result
+            rows.extend(loop_result.run_log[loop_result.run_log_new_start :])
+        for row in rows:
+            if row.type not in {"tool_result", "tool_error"}:
+                continue
+            if row.tool_name not in {"plan_create", "enter_plan_mode", "exit_plan"}:
+                continue
+            content = row.content
+            if not isinstance(content, dict):
+                continue
+            if row.tool_name == "enter_plan_mode" and row.type == "tool_result":
+                self.state.planning_status = "drafting"
+                if self.state.pre_plan_work_mode is None:
+                    self.state.pre_plan_work_mode = self.state.work_mode
+                continue
+            path_value = content.get("path") or content.get("active_plan_path") or content.get("target_identifier")
+            if isinstance(content.get("plan_id"), str):
+                self.state.active_plan_id = content["plan_id"]
+            if isinstance(path_value, str) and path_value:
+                self.state.active_plan_path = Path(path_value).expanduser().resolve()
+                self.state.display_file = self.state.active_plan_path
+            if row.tool_name == "plan_create" and row.type == "tool_result":
+                self.state.planning_status = "drafting"
+                if self.state.pre_plan_work_mode is None:
+                    self.state.pre_plan_work_mode = self.state.work_mode
+            elif row.tool_name == "exit_plan" and row.type == "tool_result":
+                self.state.planning_status = "approved"
+                self.state.work_mode = "work"
+            elif row.tool_name == "exit_plan" and row.type == "tool_error":
+                self.state.planning_status = "drafting"
 
     async def _reconcile_note_mode_result(self, result: NoteModeRunResult) -> None:
         baseline_note = self._run_note_baseline_content
@@ -1173,9 +1340,13 @@ class TuiController:
 
         tool_name, payload = note_result
 
-        snapshot = await self._file_manager.read_snapshot(self.state.active_file)
+        snapshot = await self._file_manager.read_snapshot(self._context_file())
         model_note_content, transcript_text = split_note_and_transcript(snapshot.raw_text)
-        current_user_note = self._note_content_text
+        current_user_note = (
+            self._note_content_text
+            if self._display_file() == self._context_file()
+            else model_note_content
+        )
 
         if baseline_note is None or current_user_note == baseline_note or current_user_note == model_note_content:
             await self._load_active_file(reset_dirty=True, highlight_recent=tool_name != "note_edit")
@@ -1216,7 +1387,7 @@ class TuiController:
             backup_dir = resolve_usage_root(self._cwd) / "conflicts"
             backup_dir.mkdir(parents=True, exist_ok=True)
             stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
-            base_name = self.state.active_file.stem or "note"
+            base_name = self._context_file().stem or "note"
             backup_path = backup_dir / f"{base_name}-{stamp}-{discarded_label}.md"
             counter = 1
             while backup_path.exists():
@@ -1228,9 +1399,10 @@ class TuiController:
             return None
 
     async def _load_active_file(self, *, reset_dirty: bool, highlight_recent: bool = False) -> None:
-        snapshot = await self._file_manager.read_snapshot(self.state.active_file)
+        display_file = self._display_file()
+        snapshot = await self._file_manager.read_snapshot(display_file)
         previous_text = self._note_content_text
-        previous_folded = set(self.state.fold_state.get(self.state.active_file, set()))
+        previous_folded = set(self.state.fold_state.get(display_file, set()))
         previous_display_text = self._fold_render.display_text
         self._last_revision_id = snapshot.revision_id
         self._full_text = snapshot.raw_text
@@ -1248,10 +1420,10 @@ class TuiController:
         if reset_dirty:
             self._last_saved_text = snapshot.raw_text
             self.state.editor_dirty = False
-        if self.state.active_file not in self.state.fold_state:
-            self.state.fold_state[self.state.active_file] = default_folded_anchor_ids(self._note_content_text)
+        if display_file not in self.state.fold_state:
+            self.state.fold_state[display_file] = default_folded_anchor_ids(self._note_content_text)
         else:
-            self.state.fold_state[self.state.active_file] = carry_forward_managed_section_folds(
+            self.state.fold_state[display_file] = carry_forward_managed_section_folds(
                 previous_text,
                 self._note_content_text,
                 previous_folded,
@@ -1274,18 +1446,25 @@ class TuiController:
 
         try:
             from aunic.map.builder import refresh_map_entry_if_stale
-            refresh_map_entry_if_stale(self.state.active_file)
+            if display_file == self._context_file():
+                refresh_map_entry_if_stale(self._context_file())
         except Exception as exc:
             logger.warning("map refresh on file open failed: %s", exc)
 
     async def _switch_active_file(self, path: Path) -> None:
         try:
             from aunic.map.builder import refresh_map_entry_if_stale
-            refresh_map_entry_if_stale(self.state.active_file)
+            refresh_map_entry_if_stale(self._context_file())
         except Exception as exc:
             logger.warning("map refresh on file switch-away failed: %s", exc)
 
         self.state.active_file = path
+        self.state.context_file = path
+        self.state.display_file = path
+        self.state.active_plan_id = None
+        self.state.active_plan_path = None
+        self.state.planning_status = "none"
+        self.state.pre_plan_work_mode = None
         self.state.active_dialog = None
         self.state.pending_switch_path = None
         self.state.pending_external_reload = False
@@ -1305,7 +1484,7 @@ class TuiController:
         try:
             async for batch in self._file_manager.watch(self.state.available_files):
                 for change in batch:
-                    if change.path != self.state.active_file:
+                    if change.path != self._display_file():
                         self._set_status(f"{change.path.name} changed on disk.")
                         continue
                     if self.state.run_in_progress:
@@ -1330,7 +1509,7 @@ class TuiController:
         cursor_row = self._editor_buffer.document.cursor_position_row
         cursor_col = self._editor_buffer.document.cursor_position_col
         folded_ids = self.state.fold_state.setdefault(
-            self.state.active_file,
+            self._display_file(),
             default_folded_anchor_ids(self._note_content_text),
         )
         self._fold_render = apply_folds(self._note_content_text, folded_ids)
@@ -1447,7 +1626,7 @@ class TuiController:
         end_row, _ = document.translate_index_to_position(max(start, end - 1))
         folded_ids = set(
             self.state.fold_state.setdefault(
-                self.state.active_file,
+                self._display_file(),
                 default_folded_anchor_ids(self._note_content_text),
             )
         )
@@ -1463,8 +1642,8 @@ class TuiController:
                 ):
                     folded_ids.remove(region.anchor_id)
                     changed = True
-        if folded_ids != set(self.state.fold_state.get(self.state.active_file, set())):
-            self.state.fold_state[self.state.active_file] = folded_ids
+        if folded_ids != set(self.state.fold_state.get(self._display_file(), set())):
+            self.state.fold_state[self._display_file()] = folded_ids
             self._sync_editor_from_note_content(preserve_cursor=False)
 
     def _select_raw_note_span(self, start: int, end: int) -> None:
@@ -1473,7 +1652,7 @@ class TuiController:
         document = Document(text=self._note_content_text)
         start_row, start_col = document.translate_index_to_position(start)
         end_row, end_col = document.translate_index_to_position(end)
-        folded_ids = set(self.state.fold_state.get(self.state.active_file, set()))
+        folded_ids = set(self.state.fold_state.get(self._display_file(), set()))
         start_display_row = _display_row_for_raw_row(self._note_content_text, folded_ids, start_row)
         end_display_row = _display_row_for_raw_row(self._note_content_text, folded_ids, end_row)
         start_position = _cursor_position_for_row_col(self._fold_render.display_text, start_display_row, start_col)
@@ -1548,7 +1727,7 @@ class TuiController:
             self._set_error("Usage: /include [-r] <path>")
             return
         raw_path = arg
-        base = self.state.active_file.parent
+        base = self._context_file().parent
         target = (base / raw_path).resolve() if not Path(raw_path).is_absolute() else Path(raw_path).resolve()
         is_dir = raw_path.endswith("/") or target.is_dir()
         # Normalize stored path (keep as typed)
@@ -1584,7 +1763,7 @@ class TuiController:
                 path_tokens.append(tok)
             else:
                 text_tokens.append(tok)
-        base = self.state.active_file.parent
+        base = self._context_file().parent
         if path_tokens:
             paths = []
             for pt in path_tokens:
@@ -1617,8 +1796,8 @@ class TuiController:
                 return
             try:
                 from aunic.map.builder import set_summary
-                set_summary(self.state.active_file, text)
-                self._set_status(f"Summary locked for {self.state.active_file.name}.")
+                set_summary(self._context_file(), text)
+                self._set_status(f"Summary locked for {self._context_file().name}.")
             except Exception as exc:
                 self._set_error(f"/map --set-summary failed: {exc}")
             return
@@ -1626,8 +1805,8 @@ class TuiController:
         if first == "--clear-summary":
             try:
                 from aunic.map.builder import clear_summary
-                clear_summary(self.state.active_file)
-                self._set_status(f"Summary cleared for {self.state.active_file.name}.")
+                clear_summary(self._context_file())
+                self._set_status(f"Summary cleared for {self._context_file().name}.")
             except Exception as exc:
                 self._set_error(f"/map --clear-summary failed: {exc}")
             return
@@ -1637,7 +1816,7 @@ class TuiController:
         if first:
             raw = Path(first).expanduser()
             if not raw.is_absolute():
-                raw = self.state.active_file.parent / raw
+                raw = self._context_file().parent / raw
             scope = raw.resolve()
             if not scope.exists() or not scope.is_dir():
                 self._set_error(f"/map: path not found or not a directory: {scope}")
@@ -1722,7 +1901,7 @@ class TuiController:
             return
         line_number = self._editor_buffer.document.cursor_position_row
         folded_ids = self.state.fold_state.setdefault(
-            self.state.active_file,
+            self._display_file(),
             default_folded_anchor_ids(self._note_content_text),
         )
         render = apply_folds(self._note_content_text, folded_ids)
@@ -1740,7 +1919,7 @@ class TuiController:
                 return
             updated.remove(anchor_id)
 
-        self.state.fold_state[self.state.active_file] = updated
+        self.state.fold_state[self._display_file()] = updated
         self._sync_editor_from_note_content(preserve_cursor=True)
         self._invalidate()
 
@@ -1751,7 +1930,7 @@ class TuiController:
             self._invalidate()
             return
         snapshot = await self._file_manager.write_text(
-            self.state.active_file,
+            self._display_file(),
             updated,
             expected_revision=self._last_revision_id,
         )
@@ -1769,7 +1948,7 @@ class TuiController:
             self._invalidate()
             return
         snapshot = await self._file_manager.write_text(
-            self.state.active_file,
+            self._display_file(),
             updated,
             expected_revision=self._last_revision_id,
         )
@@ -1926,7 +2105,7 @@ class TuiController:
                 query=self._web_query,
                 url=result.url,
                 state=research_state,
-                active_file=self.state.active_file,
+                active_file=self._context_file(),
             )
             summary = research_state.summary().fetched_pages[-1]
             if not await self._append_user_tool_transcript_pair(
@@ -2316,7 +2495,7 @@ class TuiController:
         from os import environ
         xdg = Path(environ["XDG_CACHE_HOME"]).expanduser() if environ.get("XDG_CACHE_HOME") else Path.home() / ".cache"
         note_hash = hashlib.sha256(
-            str(self.state.active_file.expanduser().resolve()).encode("utf-8")
+            str(self._context_file().expanduser().resolve()).encode("utf-8")
         ).hexdigest()
         return xdg / "aunic" / "context" / f"{note_hash}.json"
 
@@ -2359,7 +2538,7 @@ class TuiController:
         if environ.get("XDG_CACHE_HOME"):
             xdg = Path(environ["XDG_CACHE_HOME"]).expanduser()
         note_hash = hashlib.sha256(
-            str(self.state.active_file.expanduser().resolve()).encode("utf-8")
+            str(self._context_file().expanduser().resolve()).encode("utf-8")
         ).hexdigest()
         return xdg / "aunic" / "fetch" / note_hash
 
@@ -2417,7 +2596,7 @@ class TuiController:
         self.state.note_conflict = None
         self.state.pending_external_reload = False
         self.state.ignored_external_revision = None
-        self.state.fold_state[self.state.active_file] = default_folded_anchor_ids(self._note_content_text)
+        self.state.fold_state[self._display_file()] = default_folded_anchor_ids(self._note_content_text)
         self._sync_editor_from_note_content(preserve_cursor=False)
         self._set_status("New file: will be created on first save.")
 
@@ -2427,27 +2606,28 @@ class TuiController:
         *,
         expected_revision: str | None = None,
     ):
-        if self.state.active_file_missing_on_disk and not self.state.active_file.parent.exists():
+        display_file = self._display_file()
+        if self.state.active_file_missing_on_disk and not display_file.parent.exists():
             if not self.state.create_parents_on_first_save:
                 raise FileReadError(
                     "Parent directory does not exist. Reopen with -p/--parents to create it on first save."
                 )
             try:
-                self.state.active_file.parent.mkdir(parents=True, exist_ok=True)
+                display_file.parent.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                raise FileReadError(f"Could not create parent directories for: {self.state.active_file}") from exc
+                raise FileReadError(f"Could not create parent directories for: {display_file}") from exc
 
         if expected_revision is None and not self.state.active_file_missing_on_disk and not self.state.ignored_external_revision:
             expected_revision = self._last_revision_id
 
         try:
             snapshot = await self._file_manager.write_text(
-                self.state.active_file,
+                display_file,
                 updated_text,
                 expected_revision=expected_revision,
             )
         except OSError as exc:
-            raise FileReadError(f"Could not write file: {self.state.active_file}") from exc
+            raise FileReadError(f"Could not write file: {display_file}") from exc
         self._last_revision_id = snapshot.revision_id
         self._last_saved_text = snapshot.raw_text
         self._full_text = snapshot.raw_text
@@ -2460,7 +2640,8 @@ class TuiController:
 
         try:
             from aunic.map.builder import mark_map_entry_stale
-            mark_map_entry_stale(self.state.active_file)
+            if display_file == self._context_file():
+                mark_map_entry_stale(self._context_file())
         except Exception as exc:
             logger.warning("map stale-mark on save failed: %s", exc)
 
@@ -2680,6 +2861,7 @@ _TOOL_VERBS: dict[str, str] = {
     "web_fetch": "Fetching",
     "note_edit": "Editing",
     "note_write": "Writing",
+    "sleep": "Sleeping",
 }
 
 
@@ -2741,3 +2923,18 @@ def _should_highlight_recent_change(event: ProgressEvent) -> bool:
     if reason in {"chat_response_append", "search_history_append"}:
         return True
     return "tool_name" in event.details
+
+
+def _float_detail(value: object, *, fallback: float) -> float:
+    if isinstance(value, bool):
+        return fallback
+    if isinstance(value, (int, float)):
+        return float(value)
+    return fallback
+
+
+def _optional_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None

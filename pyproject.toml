@@ -18,8 +18,11 @@ dependencies = [
   "Pillow>=11.0,<12",
   "pypdf>=5.0,<6",
   "prompt_toolkit>=3.0.48,<4",
+  "starlette>=0.37,<1",
   "trafilatura>=2.0,<3",
+  "uvicorn>=0.30,<1",
   "watchfiles>=1.1,<2",
+  "websockets>=12,<16",
 ]
 
 [project.optional-dependencies]

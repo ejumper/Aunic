@@ -30,6 +30,8 @@ CHAT_MODE_SYSTEM_PROMPT = "\n".join(
         "You are operating inside Aunic chat mode.",
         "Use at most one tool call per turn.",
         "Prefer dedicated tools over bash whenever a dedicated tool can do the job.",
+        "Prefer the sleep tool over bash sleep when the next useful action is simply waiting; do not sleep instead of answering when you already have enough information.",
+        "Use stop_process to stop Aunic-owned background commands by background_id; it cannot stop arbitrary system processes.",
         "If you already have enough information, reply with normal markdown and no tool call.",
         "If web-backed information informed the answer, use inline markdown links for citations.",
         "Do not emit note-editing tools, freeform JSON envelopes, or extra workflow assumptions.",
@@ -174,6 +176,9 @@ class ChatModeRunner:
                 work_mode=request.work_mode,
                 permission_handler=request.permission_handler,
                 metadata=dict(run_metadata),
+                active_plan_id=request.active_plan_id,
+                active_plan_path=request.active_plan_path,
+                planning_status=request.planning_status,
             )
             mcp_registry = await build_mcp_tool_registry(runtime.cwd)
             for error in mcp_registry.errors:
@@ -407,13 +412,16 @@ class ChatModeRunner:
 
                     state.malformed_repair_count = 0
                     result = await definition.execute(runtime, parsed_args)
-                    row_number = await self._write_transcript_row(
-                        "assistant",
-                        "tool_call",
-                        tool_call.name,
-                        tool_call.id,
-                        tool_call.arguments,
-                    )
+                    if definition.persistence == "persistent":
+                        row_number = await self._write_transcript_row(
+                            "assistant",
+                            "tool_call",
+                            tool_call.name,
+                            tool_call.id,
+                            tool_call.arguments,
+                        )
+                    else:
+                        row_number = next_run_log_row_number(state.run_log)
                     state.run_log.append(
                         TranscriptRow(
                             row_number=row_number,
@@ -431,13 +439,16 @@ class ChatModeRunner:
                         else result.transcript_content
                     )
                     row_type = "tool_error" if result.status != "completed" else "tool_result"
-                    row_number = await self._write_transcript_row(
-                        "tool",
-                        row_type,
-                        tool_call.name,
-                        tool_call.id,
-                        transcript_content,
-                    )
+                    if definition.persistence == "persistent":
+                        row_number = await self._write_transcript_row(
+                            "tool",
+                            row_type,
+                            tool_call.name,
+                            tool_call.id,
+                            transcript_content,
+                        )
+                    else:
+                        row_number = next_run_log_row_number(state.run_log)
                     state.run_log.append(
                         TranscriptRow(
                             row_number=row_number,

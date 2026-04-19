@@ -96,6 +96,7 @@ def analyze_note_file(snapshot, display_path: str) -> MarkerAnalysis:
         labels.append(label)
 
     parsed_text, source_map = _build_parsed_text(note_text, visible_chars, wrapper_chars)
+    hinted_parsed_text = _inject_hidden_hints(parsed_text, source_map, note_text, marker_spans)
     parsed_file = ParsedNoteFile(
         snapshot=snapshot,
         display_path=display_path,
@@ -107,6 +108,7 @@ def analyze_note_file(snapshot, display_path: str) -> MarkerAnalysis:
         note_text=note_text,
         transcript_text=transcript_text,
         transcript_start_offset=transcript_section[0] if transcript_section else None,
+        hinted_parsed_text=hinted_parsed_text,
     )
     return MarkerAnalysis(
         parsed_file=parsed_file,
@@ -408,3 +410,82 @@ def _span_has_visible_content(
         if visible_by_char[index] and not wrapper_by_char[index]:
             return True
     return False
+
+
+_HIDDEN_HINT = "<!-- [hidden content] -->"
+
+# Matches all marker open/close tokens so they can be removed when checking
+# whether a raw gap contains real hidden content beyond mere syntax.
+import re as _re
+_MARKER_TOKEN_RE = _re.compile(r'[%!$@]>>|<<[%!$@]')
+
+
+def _gap_has_hidden_content(raw_start: int, raw_end: int, note_text: str) -> bool:
+    """Return True when the raw gap contains non-whitespace content beyond marker tokens."""
+    if raw_start >= raw_end:
+        return False
+    gap_text = note_text[raw_start:raw_end]
+    stripped = _MARKER_TOKEN_RE.sub("", gap_text)
+    return bool(stripped.strip())
+
+
+def _inject_hidden_hints(
+    parsed_text: str,
+    source_map: tuple[SourceMapSegment, ...],
+    note_text: str,
+    marker_spans: tuple[MarkerSpan, ...],
+) -> str:
+    """Return parsed_text with HTML hint comments inserted where hidden content
+    was stripped out.  A hint is emitted for each gap in the source_map whose
+    raw slice contains non-whitespace content beyond bare marker tokens."""
+    if not marker_spans:
+        return parsed_text
+
+    result: list[str] = []
+    prev_raw_end = 0
+    prev_parsed_end = 0
+
+    for seg in source_map:
+        raw_gap_end = seg.raw_span.start
+
+        # Emit any parsed text up to this segment's start.
+        result.append(parsed_text[prev_parsed_end : seg.parsed_span.start])
+
+        # Inject a hint if the raw gap before this segment has hidden content.
+        if _gap_has_hidden_content(prev_raw_end, raw_gap_end, note_text):
+            result.append(_HIDDEN_HINT)
+
+        # Emit this segment's parsed text.
+        result.append(parsed_text[seg.parsed_span.start : seg.parsed_span.end])
+
+        prev_raw_end = seg.raw_span.end
+        prev_parsed_end = seg.parsed_span.end
+
+    # Any trailing parsed text after the last segment.
+    result.append(parsed_text[prev_parsed_end:])
+
+    # Check for a trailing raw gap (hidden content after the last visible segment).
+    if _gap_has_hidden_content(prev_raw_end, len(note_text), note_text):
+        result.append(_HIDDEN_HINT)
+
+    return "".join(result)
+
+
+def reparse_hinted_text(note_text: str, path: Path) -> str:
+    """Re-run marker analysis on raw note_text and return hinted_parsed_text.
+    Used to refresh the model's view after a note write."""
+    from aunic.context.types import FileSnapshot
+    from datetime import UTC, datetime
+    import hashlib
+
+    snapshot = FileSnapshot(
+        path=path,
+        raw_text=note_text,
+        revision_id="reparse",
+        content_hash=hashlib.md5(note_text.encode()).hexdigest(),
+        mtime_ns=0,
+        size_bytes=len(note_text.encode()),
+        captured_at=datetime.now(UTC),
+    )
+    analysis = analyze_note_file(snapshot, str(path))
+    return analysis.parsed_file.hinted_parsed_text

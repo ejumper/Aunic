@@ -17,6 +17,8 @@ ProgressKind = Literal[
     "error",
     "file_written",
     "loop_event",
+    "sleep_started",
+    "sleep_ended",
 ]
 
 

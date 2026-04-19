@@ -6,3 +6,9 @@ __pycache__/
 .claude/
 notes-and-plans/ztesting/
 notes-and-plans/zfuture-features/scratchpad.md
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo
+web/vite.config.d.ts
+web/vite.config.js

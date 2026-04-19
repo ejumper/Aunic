@@ -31,6 +31,7 @@ class ToolFailure:
         "conflict",
         "provider_error",
         "permission_denied",
+        "user_cancel",
         "execution_error",
         "timeout",
     ]
@@ -72,6 +73,9 @@ class LoopRunRequest:
     context_result: ContextBuildResult
     active_file: Path | None = None
     included_files: tuple[Path, ...] = ()
+    active_plan_id: str | None = None
+    active_plan_path: Path | None = None
+    planning_status: str = "none"
     tool_registry: tuple["ToolDefinition[Any]", ...] | None = None
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None

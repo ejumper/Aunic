@@ -36,6 +36,10 @@ def tool_result_message(tool_name: str, content: object, status: str = "complete
             return f"web_fetch fetched {content.get('title') or content.get('url') or 'a page'}."
         if tool_name == "bash":
             return f"bash finished with status {status}."
+        if tool_name == "stop_process":
+            process_status = content.get("status") or status
+            background_id = content.get("background_id") or "background process"
+            return f"stop_process {process_status}: {background_id}."
         if tool_name == "read":
             return f"read returned {content.get('type', 'content')}."
         if tool_name in {"edit", "write", "note_edit", "note_write"}:

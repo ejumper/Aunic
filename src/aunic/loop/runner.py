@@ -30,6 +30,7 @@ from aunic.tools import (
     ToolSessionState,
     build_note_tool_registry,
 )
+from aunic.tools.note_edit import _classify_exclude_span
 from aunic.tools.memory_manifest import build_memory_manifest
 from aunic.usage import build_usage_log, format_usage_brief
 
@@ -43,10 +44,40 @@ NOTE_LOOP_SYSTEM_PROMPT = "\n".join(
         "Only note-content is writable in note mode. Transcript rows, search results, fetch results, read output, and tool outputs are reference material only.",
         "For note_edit, old_string must come from the current active note-content, not from transcript rows, fetched content, read output, or drafted response text.",
         "Use the web_search and web_fetch tools as many times as needed to gather any information you need. Error on the side of using these.",
+        "Prefer the sleep tool over bash sleep when the next useful action is simply waiting; do not sleep instead of answering when you already have enough information.",
+        "Use stop_process to stop Aunic-owned background commands returned by bash with run_in_background=true; it cannot stop arbitrary system processes.",
         "For note_edit and note_write, default to markdown formatting, but if any content already exists, follow the current formatting and writing style as closely as practical.",
         "Do not create new chat-style turns, fake user prompts, transcript separators, or assistant replies.",
         "Treat the '# Transcript' sections as source material, not as the place to continue writing.",
+        "The note snapshot may contain HTML comments like <!-- [hidden content] --> marking positions where content exists in the file but is not shown to you. Do not remove or duplicate these comments; the system manages them automatically.",
     ]
+)
+
+PLAN_MODE_SYSTEM_PROMPT = "\n".join(
+    [
+        "You are planning inside Aunic.",
+        "The source markdown note remains the context source, but the only mutable document is the active plan file.",
+        "Use read-only tools to inspect the project and use plan_edit or plan_write to keep the plan file current.",
+        "Use sleep only for intentional pacing, such as waiting for a process or cooldown; do not use it as a substitute for deciding or answering.",
+        "Use stop_process only to stop Aunic-owned background commands by background_id.",
+        "Do not mutate the source note or project files while planning. Mutating tools are intentionally unavailable.",
+        "Prefer a concrete, implementation-ready plan: goals, files/modules likely affected, risks, verification, and open questions.",
+        "Ask the user only for decisions that cannot be answered by inspecting the codebase or current note context.",
+        "When the plan is ready, call exit_plan. exit_plan reads the plan from disk and asks the user for approval.",
+    ]
+)
+
+PLAN_APPROVED_SYSTEM_PROMPT = "\n".join(
+    [
+        "PLAN APPROVED.",
+        "Implement the approved plan now. The exit_plan tool result contains the plan markdown read from disk at approval time.",
+        "Use normal note-mode and work-mode tools according to the available registry.",
+    ]
+)
+
+PLANNING_ACTIVE_STATUSES: frozenset[str] = frozenset({"drafting", "awaiting_approval"})
+PLAN_MODE_MUTATING_TOOL_NAMES: frozenset[str] = frozenset(
+    {"note_edit", "note_write", "edit", "write", "bash"}
 )
 
 
@@ -68,10 +99,6 @@ class ToolLoop:
     async def run(self, request: LoopRunRequest) -> LoopRunResult:
         active_prompt_run = request.prompt_run
         _project_root = request.active_file.parent if request.active_file else None
-        base_registry = request.tool_registry or build_note_tool_registry(
-            work_mode=request.work_mode, project_root=_project_root
-        )
-        registry = base_registry
         mcp_registry = None
         runtime = await RunToolContext.create(
             file_manager=self._file_manager,
@@ -86,6 +113,9 @@ class ToolLoop:
             work_mode=request.work_mode,
             permission_handler=request.permission_handler,
             metadata=dict(request.metadata),
+            active_plan_id=request.active_plan_id,
+            active_plan_path=request.active_plan_path,
+            planning_status=request.planning_status,
         )
 
         run_log: list[TranscriptRow] = list(request.context_result.transcript_rows or [])
@@ -97,7 +127,6 @@ class ToolLoop:
 
         if request.tool_registry is None:
             mcp_registry = await build_mcp_tool_registry(runtime.cwd)
-            registry = merge_tool_registries(base_registry, mcp_registry.tools)
             for error in mcp_registry.errors:
                 await emit_progress(
                     request.progress_sink,
@@ -112,6 +141,23 @@ class ToolLoop:
                         },
                     ),
                 )
+
+        def current_registry() -> tuple[ToolDefinition[Any], ...]:
+            if request.tool_registry is not None:
+                registry = request.tool_registry
+            else:
+                registry_work_mode = (
+                    "work"
+                    if runtime.planning_status in PLANNING_ACTIVE_STATUSES | {"approved"}
+                    else request.work_mode
+                )
+                registry = build_note_tool_registry(
+                    work_mode=registry_work_mode, project_root=_project_root
+                )
+                if mcp_registry is not None:
+                    registry = merge_tool_registries(registry, mcp_registry.tools)
+            registry = _apply_marker_tool_filter(registry, request.context_result)
+            return _apply_plan_mode_tool_filter(registry, runtime.planning_status)
 
         def append_run_log_message(role: str, content: str) -> None:
             run_log.append(
@@ -181,6 +227,7 @@ class ToolLoop:
         )
 
         while True:
+            registry = current_registry()
             tool_map = {definition.spec.name: definition for definition in registry}
             provider_request = ProviderRequest(
                 messages=[],
@@ -191,9 +238,11 @@ class ToolLoop:
                 tools=[definition.spec for definition in registry],
                 system_prompt=_build_system_prompt(
                     request.system_prompt,
-                    work_mode=request.work_mode,
+                    work_mode=runtime.work_mode,
                     registry=registry,
                     protected_paths=runtime.note_scope_paths(),
+                    note_write_removed=not any(t.spec.name == "note_write" for t in registry),
+                    planning_status=runtime.planning_status,
                 ),
                 model=request.model,
                 reasoning_effort=request.reasoning_effort,
@@ -201,7 +250,9 @@ class ToolLoop:
                     **dict(request.metadata),
                     "active_file": str(runtime.active_file),
                     "mode": "note",
-                    "work_mode": request.work_mode,
+                    "work_mode": runtime.work_mode,
+                    "planning_status": runtime.planning_status,
+                    "active_plan_path": str(runtime.active_plan_path) if runtime.active_plan_path else None,
                 },
             )
             await append_loop_event(
@@ -350,24 +401,33 @@ class ToolLoop:
                     continue
 
                 malformed_repair_count += 1
+                if runtime.planning_status in PLANNING_ACTIVE_STATUSES:
+                    failure_message = (
+                        "Plain assistant text in planning mode must be written into the "
+                        "active plan with plan_edit/plan_write or submitted with exit_plan."
+                    )
+                    redirect_prompt = _plan_mode_redirect_prompt(assistant_text, runtime)
+                else:
+                    failure_message = (
+                        "Plain assistant text in note mode must be rewritten through "
+                        "note_edit or note_write."
+                    )
+                    redirect_prompt = _note_mode_redirect_prompt(
+                        assistant_text,
+                        runtime.active_file,
+                    )
                 tool_failures.append(
                     ToolFailure(
                         category="malformed_turn",
                         reason="note_mode_plain_text_requires_note_tool",
                         tool_name=None,
-                        message=(
-                            "Plain assistant text in note mode must be rewritten through "
-                            "note_edit or note_write."
-                        ),
+                        message=failure_message,
                         details={"assistant_text": assistant_text},
                     )
                 )
                 append_run_log_message("assistant", assistant_text)
                 append_assistant_message_patch(response.assistant_message_patch, response.provider_metadata)
-                current_user_prompt_text = _note_mode_redirect_prompt(
-                    assistant_text,
-                    runtime.active_file,
-                )
+                current_user_prompt_text = redirect_prompt
                 append_run_log_message("user", current_user_prompt_text)
                 await append_loop_event(
                     LoopEvent(
@@ -470,7 +530,7 @@ class ToolLoop:
                     content=result.in_memory_content,
                 )
             )
-            if tool_call.name in {"note_edit", "note_write"} and result.status == "completed":
+            if tool_call.name in {"note_edit", "note_write", "plan_write", "plan_edit", "plan_create"} and result.status == "completed":
                 active_prompt_run = _prompt_run_with_model_input(
                     active_prompt_run,
                     active_prompt_run.model_input_text,
@@ -553,25 +613,80 @@ class ToolLoop:
             await mcp_registry.aclose()
         return result
 
+def _apply_marker_tool_filter(
+    registry: tuple[ToolDefinition[Any], ...],
+    context_result: Any,
+) -> tuple[ToolDefinition[Any], ...]:
+    """Remove note_write from the registry when markers make full-doc replacement unsafe."""
+    if context_result is None or not context_result.parsed_files:
+        return registry
+    pf = context_result.parsed_files[0]
+    include_spans = [s for s in pf.marker_spans if s.marker_type == "include_only"]
+    exclude_spans = [s for s in pf.marker_spans if s.marker_type == "exclude"]
+
+    remove_note_write = False
+    if len(include_spans) > 1:
+        remove_note_write = True
+    if not remove_note_write and exclude_spans:
+        classifications = [_classify_exclude_span(s, pf.source_map) for s in exclude_spans]
+        if "middle" in classifications:
+            remove_note_write = True
+
+    if remove_note_write:
+        return tuple(t for t in registry if t.spec.name != "note_write")
+    return registry
+
+
+def _apply_plan_mode_tool_filter(
+    registry: tuple[ToolDefinition[Any], ...],
+    planning_status: str,
+) -> tuple[ToolDefinition[Any], ...]:
+    if planning_status not in PLANNING_ACTIVE_STATUSES:
+        return registry
+    return tuple(
+        definition
+        for definition in registry
+        if definition.spec.name not in PLAN_MODE_MUTATING_TOOL_NAMES
+    )
+
+
 def _build_system_prompt(
     extra_system_prompt: str | None,
     *,
     work_mode: str,
     registry: tuple[ToolDefinition[Any], ...],
     protected_paths: tuple[Path, ...],
+    note_write_removed: bool = False,
+    planning_status: str = "none",
 ) -> str:
     tool_names = ", ".join(definition.spec.name for definition in registry)
-    parts = [
-        NOTE_LOOP_SYSTEM_PROMPT,
-        f"Current work mode: {work_mode}.",
-        f"Available tools: {tool_names}.",
-    ]
+    if planning_status in PLANNING_ACTIVE_STATUSES:
+        parts = [
+            PLAN_MODE_SYSTEM_PROMPT,
+            f"Current planning status: {planning_status}.",
+            f"Current work mode after approval will be: work.",
+            f"Available tools: {tool_names}.",
+        ]
+    else:
+        parts = [
+            NOTE_LOOP_SYSTEM_PROMPT,
+            f"Current work mode: {work_mode}.",
+            f"Available tools: {tool_names}.",
+        ]
+        if planning_status == "approved":
+            parts.insert(0, PLAN_APPROVED_SYSTEM_PROMPT)
     manifest = build_memory_manifest(registry)
     if manifest:
         parts.append(manifest)
-    if work_mode != "work":
+    if note_write_removed and planning_status not in PLANNING_ACTIVE_STATUSES:
+        parts.append(
+            "note_write is unavailable for this note because hidden-content markers "
+            "(%>> <<%  or multiple !>> <<!) prevent safe full-document replacement. "
+            "Use note_edit with exact old_string/new_string pairs instead."
+        )
+    if work_mode != "work" and planning_status not in PLANNING_ACTIVE_STATUSES:
         parts.append("Do not try to mutate files outside note-content in this work mode.")
-    if protected_paths:
+    if protected_paths and planning_status not in PLANNING_ACTIVE_STATUSES:
         joined = "\n".join(f"- {path}" for path in protected_paths)
         parts.append(
             "Protected note-content path(s). Do not use work-mode edit/write/bash to mutate them.\n"
@@ -640,6 +755,17 @@ def _note_mode_redirect_prompt(draft_answer: str, active_file: Path) -> str:
     )
 
 
+def _plan_mode_redirect_prompt(draft_answer: str, runtime: RunToolContext) -> str:
+    plan_target = runtime.active_plan_path or "(no active plan yet; call plan_create first)"
+    return (
+        "Your response must be captured in the active plan while planning.\n"
+        f"Source note: {runtime.active_file}\n"
+        f"Plan file: {plan_target}\n"
+        "Use plan_write or plan_edit to update the plan, or call exit_plan if the plan is ready for user approval.\n\n"
+        f"Draft answer:\n{draft_answer}"
+    )
+
+
 
 
 
@@ -700,4 +826,3 @@ def _provider_response_event(
             },
         },
     )
-

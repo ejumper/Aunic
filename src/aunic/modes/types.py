@@ -20,6 +20,9 @@ class NoteModeRunRequest:
     active_file: Path
     provider: "LLMProvider"
     included_files: tuple[Path, ...] = ()
+    active_plan_id: str | None = None
+    active_plan_path: Path | None = None
+    planning_status: str = "none"
     user_prompt: str = ""
     prompt_mode: PromptMode = "direct"
     total_turn_budget: int = 100_000
@@ -59,6 +62,9 @@ class ChatModeRunRequest:
     provider: "LLMProvider"
     user_prompt: str
     included_files: tuple[Path, ...] = ()
+    active_plan_id: str | None = None
+    active_plan_path: Path | None = None
+    planning_status: str = "none"
     total_turn_budget: int = 100_000
     model: str | None = None
     reasoning_effort: ReasoningEffort | None = None

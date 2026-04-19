@@ -1,0 +1,17 @@
+{
+  "name": "Aunic",
+  "short_name": "Aunic",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101312",
+  "theme_color": "#101312",
+  "description": "Aunic browser workspace",
+  "icons": [
+    {
+      "src": "/icons/aunic-pwa.webp",
+      "sizes": "512x512",
+      "type": "image/webp",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -49,6 +49,8 @@ async def _dispatch(args: argparse.Namespace) -> int:
         return await _run_chat(args)
     if args.command == "tui":
         return await _run_tui(args)
+    if args.command == "serve":
+        return await _run_serve(args)
     raise SystemExit(f"Unsupported command: {args.command}")
 
 
@@ -306,6 +308,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Working directory metadata forwarded to providers.",
     )
 
+    serve_parser = subparsers.add_parser("serve", help="Run the browser WebSocket server.")
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host address to bind.")
+    serve_parser.add_argument("--port", type=int, default=8765, help="Port to bind.")
+    serve_parser.add_argument(
+        "--workspace-root",
+        default="/home/ejumps",
+        help="Workspace root exposed through the browser server.",
+    )
+
     return parser
 
 
@@ -495,6 +506,16 @@ async def _run_tui(args: argparse.Namespace) -> int:
     )
 
 
+async def _run_serve(args: argparse.Namespace) -> int:
+    from aunic.browser import run_browser_server
+
+    return await run_browser_server(
+        host=args.host,
+        port=args.port,
+        workspace_root=Path(args.workspace_root).expanduser().resolve(),
+    )
+
+
 async def _run_context_inspect(args: argparse.Namespace) -> int:
     engine = ContextEngine()
     request = ContextBuildRequest(
@@ -592,7 +613,7 @@ def _build_llm_provider(name: str, *, cwd: str | os.PathLike[str] | None = None)
 def _coerce_default_tui_argv(argv: Sequence[str]) -> tuple[list[str], bool]:
     if not argv:
         return [], False
-    commands = {"prompt", "doctor", "context", "note", "chat", "tui"}
+    commands = {"prompt", "doctor", "context", "note", "chat", "tui", "serve"}
     first_non_option = next((token for token in argv if not token.startswith("-")), None)
     if first_non_option is None or first_non_option in commands:
         return list(argv), False

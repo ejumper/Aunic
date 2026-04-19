@@ -25,6 +25,8 @@ def flatten_tool_result_for_provider(row: TranscriptRow) -> str:
         return _flatten_edit_like_result(row.content)
     if row.tool_name == "bash" and isinstance(row.content, dict):
         return _flatten_bash_result(row.content)
+    if row.tool_name == "stop_process" and isinstance(row.content, dict):
+        return _flatten_process_stop_result(row.content)
     if row.tool_name and row.tool_name.startswith("mcp__") and isinstance(row.content, dict):
         return _flatten_mcp_result(row.content)
     return json.dumps(row.content, ensure_ascii=False, separators=(",", ":"))
@@ -113,6 +115,36 @@ def _flatten_bash_result(result: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _flatten_process_stop_result(result: dict[str, object]) -> str:
+    background_id = str(result.get("background_id", "")).strip() or "(unknown)"
+    command = _short_command(str(result.get("command", "")).strip())
+    command_suffix = f" ({command})" if command else ""
+    exit_code = result.get("exit_code")
+    reason = str(result.get("reason", "")).strip()
+    reason_suffix = f"; reason: {reason}" if reason else ""
+    status = str(result.get("status", "")).strip()
+    if status == "already_exited":
+        return (
+            f"Background command {background_id}{command_suffix} had already exited "
+            f"(exit {exit_code}){reason_suffix}"
+        )
+
+    signals_value = result.get("signals_sent")
+    signals = [str(item) for item in signals_value] if isinstance(signals_value, list) else []
+    signal_text = " then ".join(signals) if signals else "no signal sent"
+    elapsed_ms = result.get("elapsed_ms")
+    elapsed_text = _format_duration_ms(elapsed_ms)
+    if bool(result.get("forced")):
+        return (
+            f"Force-stopped background command {background_id}{command_suffix} - "
+            f"{signal_text} after {elapsed_text}{reason_suffix}"
+        )
+    return (
+        f"Stopped background command {background_id}{command_suffix} - "
+        f"{signal_text}, exit {exit_code} in {elapsed_text}{reason_suffix}"
+    )
+
+
 def _flatten_rag_search_results(results: list[object]) -> str:
     lines: list[str] = []
     for item in results:
@@ -168,3 +200,15 @@ def _flatten_mcp_result(result: dict[str, object]) -> str:
     if structured is not None:
         return json.dumps(structured, ensure_ascii=False, separators=(",", ":"))
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+
+
+def _short_command(command: str, *, limit: int = 80) -> str:
+    if len(command) <= limit:
+        return command
+    return f"{command[: limit - 3].rstrip()}..."
+
+
+def _format_duration_ms(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?s"
+    return f"{max(0, value) / 1000.0:.1f}s"

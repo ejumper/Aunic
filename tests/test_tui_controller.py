@@ -11,6 +11,7 @@ from aunic.context.types import FileChange, FileSnapshot, PromptRun, TextSpan
 from aunic.domain import TranscriptRow
 from aunic.loop.types import LoopMetrics, LoopRunResult
 from aunic.modes.types import ChatModeMetrics, ChatModeRunResult, NoteModePromptResult, NoteModeRunResult
+from aunic.plans import PlanService
 from aunic.progress import ProgressEvent
 from aunic.rag.types import RagFetchResult, RagFetchSection, RagSearchResult
 from aunic.research.types import (
@@ -172,6 +173,33 @@ class _FakeChatRunner:
             stop_reason="finished",
             metrics=ChatModeMetrics(stop_reason="finished"),
         )
+
+
+@pytest.mark.asyncio
+async def test_open_plan_keeps_source_note_as_model_context(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("# Source\n\nUse this context.\n", encoding="utf-8")
+    plan = PlanService(note).create_plan("Draft Work")
+    runner = _FakeNoteRunner(note)
+    controller = TuiController(
+        active_file=note,
+        note_runner=runner,
+        chat_runner=_FakeChatRunner(),
+        cwd=tmp_path,
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    await controller.initialize()
+
+    await controller.open_plan(plan.entry.id)
+    controller._prompt_buffer.text = "Run with the source note as context."
+    await controller.send_prompt()
+    await controller._run_task
+
+    request, note_text_seen = runner.requests[-1]
+    assert controller.state.context_file == note
+    assert controller.state.display_file == plan.path
+    assert request.active_file == note
+    assert note_text_seen.startswith("# Source")
 
 
 class _FakeSearchService:
@@ -724,6 +752,43 @@ async def test_controller_skips_watch_until_new_file_is_saved(tmp_path: Path) ->
     assert file_manager.watch_started == 1
 
     await controller.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_controller_tracks_sleep_progress_events(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("Original\n", encoding="utf-8")
+    controller = TuiController(active_file=note, note_runner=_FakeNoteRunner(note), chat_runner=_FakeChatRunner())
+    controller.state.run_in_progress = True
+
+    await controller.handle_progress_event(
+        ProgressEvent(
+            kind="sleep_started",
+            message="Waiting for server",
+            path=note,
+            details={
+                "started_monotonic": 10.0,
+                "deadline_monotonic": 15.0,
+                "reason": "Waiting for server",
+            },
+        )
+    )
+
+    assert controller.state.sleep_status is not None
+    assert controller.state.sleep_status.started_monotonic == 10.0
+    assert controller.state.sleep_status.deadline_monotonic == 15.0
+    assert controller.state.sleep_status.reason == "Waiting for server"
+    assert controller.indicator_height() == 1
+
+    await controller.handle_progress_event(
+        ProgressEvent(
+            kind="sleep_ended",
+            message="Sleep ended.",
+            path=note,
+        )
+    )
+
+    assert controller.state.sleep_status is None
 
 
 @pytest.mark.asyncio

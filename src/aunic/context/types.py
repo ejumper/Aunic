@@ -83,6 +83,7 @@ class ParsedNoteFile:
     note_text: str = ""
     transcript_text: str | None = None
     transcript_start_offset: int | None = None
+    hinted_parsed_text: str = ""
 
 
 @dataclass(frozen=True)

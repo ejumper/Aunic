@@ -106,6 +106,7 @@ class FileManager:
             *normalized_paths,
             debounce=self._settings.watch_debounce_ms,
             step=self._settings.watch_step_ms,
+            ignore_permission_denied=True,
         ):
             batch: list[FileChange] = []
             for change, raw_path in sorted(changes, key=lambda item: str(item[1])):
