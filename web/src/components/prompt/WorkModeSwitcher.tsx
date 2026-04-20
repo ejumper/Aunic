@@ -23,7 +23,13 @@ export function WorkModeSwitcher({
       disabled={disabled}
       onClick={() => onChange(nextMode)}
     >
-      Agent: {labelForWorkMode(workMode)}
+      <span className="prompt-control-label">Agent: {labelForWorkMode(workMode)}</span>
+      <img
+        className="prompt-control-icon"
+        src={iconForWorkMode(workMode)}
+        alt=""
+        aria-hidden="true"
+      />
     </button>
   );
 }
@@ -47,6 +53,16 @@ function nextWorkMode(mode: WorkMode): WorkMode {
     return WORK_MODES[0];
   }
   return WORK_MODES[(currentIndex + 1) % WORK_MODES.length];
+}
+
+function iconForWorkMode(mode: WorkMode): string {
+  if (mode === "read") {
+    return "/icons/read.svg";
+  }
+  if (mode === "work") {
+    return "/icons/work.svg";
+  }
+  return "/icons/off.svg";
 }
 
 function titleCase(value: string): string {

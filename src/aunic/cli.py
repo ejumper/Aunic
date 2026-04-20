@@ -309,12 +309,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     serve_parser = subparsers.add_parser("serve", help="Run the browser WebSocket server.")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="Host address to bind.")
-    serve_parser.add_argument("--port", type=int, default=8765, help="Port to bind.")
+    serve_parser.add_argument("--host", default="0.0.0.0", help="Host address to bind.")
+    serve_parser.add_argument("--port", type=int, default=8767, help="Port to bind.")
     serve_parser.add_argument(
         "--workspace-root",
         default="/home/ejumps",
         help="Workspace root exposed through the browser server.",
+    )
+    serve_parser.add_argument(
+        "--ssl-certfile",
+        default=None,
+        help="TLS certificate file for HTTPS/WSS browser serving.",
+    )
+    serve_parser.add_argument(
+        "--ssl-keyfile",
+        default=None,
+        help="TLS private key file for HTTPS/WSS browser serving.",
     )
 
     return parser
@@ -513,6 +523,8 @@ async def _run_serve(args: argparse.Namespace) -> int:
         host=args.host,
         port=args.port,
         workspace_root=Path(args.workspace_root).expanduser().resolve(),
+        ssl_certfile=Path(args.ssl_certfile).expanduser().resolve() if args.ssl_certfile else None,
+        ssl_keyfile=Path(args.ssl_keyfile).expanduser().resolve() if args.ssl_keyfile else None,
     )
 
 

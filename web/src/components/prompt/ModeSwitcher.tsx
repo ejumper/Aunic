@@ -17,11 +17,21 @@ export function ModeSwitcher({ mode, disabled, onChange }: ModeSwitcherProps) {
       disabled={disabled}
       onClick={() => onChange(nextMode)}
     >
-      Mode: {labelForMode(mode)}
+      <span className="prompt-control-label">Mode: {labelForMode(mode)}</span>
+      <img
+        className="prompt-control-icon"
+        src={iconForMode(mode)}
+        alt=""
+        aria-hidden="true"
+      />
     </button>
   );
 }
 
 function labelForMode(mode: BrowserMode): string {
   return mode === "note" ? "Note" : "Chat";
+}
+
+function iconForMode(mode: BrowserMode): string {
+  return mode === "note" ? "/icons/note.svg" : "/icons/chat.svg";
 }

@@ -9,6 +9,8 @@ notes-and-plans/zfuture-features/scratchpad.md
 web/node_modules/
 web/dist/
 web/.vite/
+web/.env.local
+web/certs/
 web/*.tsbuildinfo
 web/vite.config.d.ts
 web/vite.config.js

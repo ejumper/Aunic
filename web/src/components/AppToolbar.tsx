@@ -39,14 +39,6 @@ export function AppToolbar({ explorerOpen, onToggleExplorer }: AppToolbarProps) 
         </button>
         <button
           type="button"
-          className="toolbar-icon-button"
-          aria-label="Settings"
-          disabled
-        >
-          ⚙
-        </button>
-        <button
-          type="button"
           className={`toolbar-save-button ${dirty ? "toolbar-save-button--dirty" : ""}`}
           aria-label={saveLabel}
           title={saveLabel}
@@ -63,11 +55,14 @@ export function AppToolbar({ explorerOpen, onToggleExplorer }: AppToolbarProps) 
       </div>
 
       <div className="app-toolbar__group app-toolbar__group--right">
-        <button type="button" className="toolbar-menu-button" disabled>
+        <button type="button" className="toolbar-menu-button toolbar-menu-button--desktop" disabled>
           Included⌄
         </button>
-        <button type="button" className="toolbar-menu-button" disabled>
+        <button type="button" className="toolbar-menu-button toolbar-menu-button--desktop" disabled>
           Plans⌄
+        </button>
+        <button type="button" className="toolbar-menu-button toolbar-menu-button--mobile" disabled>
+          Files⌄
         </button>
       </div>
     </header>

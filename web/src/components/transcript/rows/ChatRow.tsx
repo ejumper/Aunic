@@ -1,4 +1,5 @@
 import type { TranscriptRowPayload } from "../../../ws/types";
+import { MarkdownText } from "../../MarkdownText";
 import { contentToText } from "./rowUtils";
 
 interface ChatRowProps {
@@ -15,7 +16,7 @@ export function ChatRow({ row, onDelete }: ChatRowProps) {
       className={`chat-bubble chat-bubble--${isUser ? "user" : "assistant"}`}
       data-row-number={row.row_number}
     >
-      <pre className="chat-bubble__text">{text}</pre>
+      <MarkdownText className="chat-bubble__text" text={text} />
       <button
         type="button"
         className="chat-bubble__del"

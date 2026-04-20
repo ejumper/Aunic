@@ -18,9 +18,11 @@ import { CodeMirrorHost } from "../editor/CodeMirrorHost";
 import { promptEditorRef } from "../../promptEditorRef";
 import { aunicTheme } from "../editor/extensions/aunicTheme";
 import { editCommandMarkersExt } from "../editor/extensions/editCommandMarkers";
+import { fourSpaceIndent } from "../editor/extensions/fourSpaceIndent";
 import { promptAutocomplete } from "../editor/extensions/promptAutocomplete";
 import { promptKeymap } from "../editor/extensions/promptKeymap";
 import { promptSyntax } from "../editor/extensions/promptSyntax";
+import { selectionSnapshotExt } from "../editor/extensions/selectionSnapshot";
 import { softWrapIndent } from "../editor/extensions/softWrapIndent";
 
 interface PromptEditorProps {
@@ -112,6 +114,8 @@ function buildPromptEditorExtensions(
     bracketMatching(),
     softWrapIndent(),
     editCommandMarkersExt(),
+    fourSpaceIndent(),
+    selectionSnapshotExt(),
     promptSyntax(),
     promptAutocomplete(),
     highlightSelectionMatches(),

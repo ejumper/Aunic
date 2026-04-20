@@ -66,10 +66,19 @@ async def run_browser_server(
     host: str,
     port: int,
     workspace_root: Path,
+    ssl_certfile: Path | None = None,
+    ssl_keyfile: Path | None = None,
 ) -> int:
     session = build_browser_session(workspace_root=workspace_root)
     app = create_browser_app(session)
-    config = uvicorn.Config(app, host=host, port=port, log_level="info")
+    config = uvicorn.Config(
+        app,
+        host=host,
+        port=port,
+        log_level="info",
+        ssl_certfile=str(ssl_certfile) if ssl_certfile else None,
+        ssl_keyfile=str(ssl_keyfile) if ssl_keyfile else None,
+    )
     server = uvicorn.Server(config)
     await server.serve()
     return 0

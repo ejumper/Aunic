@@ -2,10 +2,14 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import { EditorState, type Extension } from "@codemirror/state";
 import {
   codeFolding,
+  foldEffect,
+  foldedRanges,
+  foldable,
   foldGutter,
   foldKeymap,
   indentOnInput,
   bracketMatching,
+  unfoldEffect,
 } from "@codemirror/language";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
@@ -34,7 +38,9 @@ import { activeLineRawMarkdown } from "./extensions/activeLineRawMarkdown";
 import { markdownTablesExt } from "./extensions/markdownTables";
 import { aunicTheme } from "./extensions/aunicTheme";
 import { editCommandMarkersExt } from "./extensions/editCommandMarkers";
+import { fourSpaceIndent } from "./extensions/fourSpaceIndent";
 import { applyManagedSectionAutoFolds } from "./extensions/managedSectionAutoFold";
+import { selectionSnapshotExt } from "./extensions/selectionSnapshot";
 import { selectionTrackerExt } from "./extensions/selectionTracker";
 import { softWrapIndent } from "./extensions/softWrapIndent";
 
@@ -190,7 +196,13 @@ export function NoteEditor() {
 
 function buildNoteEditorExtensions(onSave: () => void): Extension[] {
   return [
-    lineNumbers(),
+    lineNumbers({
+      domEventHandlers: {
+        click(view, line) {
+          return toggleFoldAtLine(view, line.from);
+        },
+      },
+    }),
     highlightActiveLineGutter(),
     history(),
     drawSelection(),
@@ -203,9 +215,18 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
       extensions: GFM,
     }),
     codeFolding(),
-    foldGutter(),
+    foldGutter({
+      markerDOM(open) {
+        const span = document.createElement("span");
+        span.className = open ? "cm-foldGutter-open" : "cm-foldGutter-folded";
+        span.textContent = open ? "⌄" : "›";
+        return span;
+      },
+    }),
     softWrapIndent(),
     editCommandMarkersExt(),
+    fourSpaceIndent(),
+    selectionSnapshotExt(),
     selectionTrackerExt(),
     markdownTablesExt(),
     activeLineRawMarkdown(),
@@ -228,4 +249,22 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
     ]),
     aunicTheme(),
   ];
+}
+
+function toggleFoldAtLine(view: EditorView, pos: number): boolean {
+  const line = view.state.doc.lineAt(pos);
+  const range = foldable(view.state, line.from, line.to);
+  if (range) {
+    view.dispatch({ effects: foldEffect.of(range) });
+    return true;
+  }
+  const iter = foldedRanges(view.state).iter();
+  while (iter.value !== null) {
+    if (iter.from >= line.from && iter.from <= line.to) {
+      view.dispatch({ effects: unfoldEffect.of({ from: iter.from, to: iter.to }) });
+      return true;
+    }
+    iter.next();
+  }
+  return false;
 }

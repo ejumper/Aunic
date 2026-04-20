@@ -39,6 +39,7 @@ export function TranscriptPane() {
   const toggleExpand = useTranscriptStore((store) => store.toggleExpand);
   const setFilter = useTranscriptStore((store) => store.setFilter);
   const toggleSort = useTranscriptStore((store) => store.toggleSort);
+  const setOpen = useTranscriptStore((store) => store.setOpen);
   const toggleOpen = useTranscriptStore((store) => store.toggleOpen);
   const toggleMaximized = useTranscriptStore((store) => store.toggleMaximized);
   const deleteRow = useTranscriptStore((store) => store.deleteRow);
@@ -46,6 +47,8 @@ export function TranscriptPane() {
   const paneRef = useRef<HTMLElement | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
+  const mobileDefaultClosedPathRef = useRef<string | null>(null);
+  const mobileDockMode = useMediaQuery("(max-width: 760px)");
   const [heightPx, setHeightPx] = useState<number | null>(null);
 
   useEffect(() => {
@@ -86,6 +89,29 @@ export function TranscriptPane() {
       node.scrollTop = node.scrollHeight;
     }
   }, [rowEdge, sortOrder]);
+
+  useEffect(() => {
+    if (!path) {
+      mobileDefaultClosedPathRef.current = null;
+      return;
+    }
+    if (!mobileDockMode || mobileDefaultClosedPathRef.current === path) {
+      return;
+    }
+    mobileDefaultClosedPathRef.current = path;
+    setOpen(false);
+  }, [mobileDockMode, path, setOpen]);
+
+  useEffect(() => {
+    if (
+      mobileDockMode &&
+      open &&
+      !maximized &&
+      mobileDefaultClosedPathRef.current !== path
+    ) {
+      toggleMaximized();
+    }
+  }, [maximized, mobileDockMode, open, path, toggleMaximized]);
 
   const resizeTranscript = useCallback((nextHeight: number) => {
     const pane = paneRef.current;
@@ -213,10 +239,11 @@ export function TranscriptPane() {
       <TranscriptToolbar
         open={open}
         maximized={maximized}
+        mobileDockMode={mobileDockMode}
         filterMode={filterMode}
         sortOrder={sortOrder}
         hasRows={rows.length > 0}
-        onToggleOpen={toggleOpen}
+        onToggleOpen={mobileDockMode && !open ? toggleMaximized : toggleOpen}
         onToggleMaximized={toggleMaximized}
         onFilter={setFilter}
         onToggleSort={toggleSort}
@@ -242,6 +269,29 @@ export function TranscriptPane() {
       ) : null}
     </section>
   );
+}
+
+function useMediaQuery(query: string): boolean {
+  const getMatches = useCallback(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return false;
+    }
+    return window.matchMedia(query).matches;
+  }, [query]);
+  const [matches, setMatches] = useState(getMatches);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia(query);
+    const handleChange = () => setMatches(media.matches);
+    handleChange();
+    media.addEventListener("change", handleChange);
+    return () => media.removeEventListener("change", handleChange);
+  }, [query]);
+
+  return matches;
 }
 
 function clampTranscriptHeight(height: number, pane: HTMLElement): number {

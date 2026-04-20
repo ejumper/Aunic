@@ -35,7 +35,19 @@ export function SendCancelControls({
       disabled={submitting || !canSubmit}
       onClick={onSubmit}
     >
-      {submitting ? "Sending..." : "Send"}
+      {submitting ? (
+        "Sending..."
+      ) : (
+        <>
+          <span className="prompt-control-label">Send</span>
+          <img
+            className="prompt-control-icon"
+            src="/icons/send.svg"
+            alt=""
+            aria-hidden="true"
+          />
+        </>
+      )}
     </button>
   );
 }

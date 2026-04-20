@@ -89,7 +89,13 @@ export function CmdsMenu({ disabled }: CmdsMenuProps) {
         aria-haspopup="true"
         onClick={() => setOpen((v) => !v)}
       >
-        Cmds
+        <span className="prompt-control-label">Cmds</span>
+        <img
+          className="prompt-control-icon"
+          src="/icons/cmds.svg"
+          alt=""
+          aria-hidden="true"
+        />
         <span className="picker-caret" aria-hidden="true">{open ? "∧" : "∨"}</span>
       </button>
       {open &&

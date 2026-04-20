@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { EditorState, type Extension, type Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { activeEditorRef } from "../../activeEditorRef";
 
 export interface CodeMirrorHostProps {
   initialDoc: string;
@@ -42,6 +43,11 @@ export function CodeMirrorHost({
             onDocChanged?.(update.state.doc.toString(), transaction);
           }
         }),
+        EditorView.domEventHandlers({
+          focus: (_event, view) => {
+            activeEditorRef.set(view);
+          },
+        }),
       ],
     });
     const view = new EditorView({ state, parent: host });
@@ -53,6 +59,7 @@ export function CodeMirrorHost({
 
     return () => {
       viewRef.current = null;
+      activeEditorRef.clearIf(view);
       view.destroy();
     };
   // initialDoc intentionally omitted — key prop on the parent handles full resets

@@ -16,6 +16,7 @@ export interface WsClientOptions {
   };
   autoHelloOnOpen?: boolean;
   onStateChange?: (state: ConnectionState) => void;
+  onDiagnostics?: (diagnostics: WsDiagnostics) => void;
   onOutgoing?: (env: ClientEnvelope) => void;
   webSocketCtor?: WebSocketConstructor;
 }
@@ -23,6 +24,20 @@ export interface WsClientOptions {
 export interface WsRequestError extends Error {
   reason: string;
   details?: Record<string, unknown>;
+}
+
+export interface WsDiagnostics {
+  url: string;
+  attempts: number;
+  lastAttemptAt: string | null;
+  lastOpenAt: string | null;
+  lastErrorAt: string | null;
+  lastClose: {
+    at: string;
+    code: number;
+    reason: string;
+    wasClean: boolean;
+  } | null;
 }
 
 type WebSocketLike = Pick<WebSocket, "send" | "close" | "readyState"> & {
@@ -61,6 +76,7 @@ export class WsClient {
   private readonly reconnect: ReconnectConfig;
   private readonly autoHelloOnOpen: boolean;
   private readonly onStateChange?: (state: ConnectionState) => void;
+  private readonly onDiagnostics?: (diagnostics: WsDiagnostics) => void;
   private readonly initialOutgoingHandler?: (env: ClientEnvelope) => void;
   private readonly webSocketCtor: WebSocketConstructor;
   private readonly pending = new Map<string, PendingRequest>();
@@ -72,6 +88,7 @@ export class WsClient {
   private reconnectDelayMs: number;
   private manuallyClosed = false;
   private connectionState: ConnectionState = "idle";
+  private diagnostics: WsDiagnostics;
 
   constructor(options: WsClientOptions) {
     this.url = options.url;
@@ -80,11 +97,20 @@ export class WsClient {
     this.reconnectDelayMs = this.reconnect.initialDelayMs;
     this.autoHelloOnOpen = options.autoHelloOnOpen ?? true;
     this.onStateChange = options.onStateChange;
+    this.onDiagnostics = options.onDiagnostics;
     this.initialOutgoingHandler = options.onOutgoing;
     if (options.onOutgoing) {
       this.outgoingHandlers.add(options.onOutgoing);
     }
     this.webSocketCtor = options.webSocketCtor ?? WebSocket;
+    this.diagnostics = {
+      url: this.url,
+      attempts: 0,
+      lastAttemptAt: null,
+      lastOpenAt: null,
+      lastErrorAt: null,
+      lastClose: null,
+    };
   }
 
   get state(): ConnectionState {
@@ -178,16 +204,21 @@ export class WsClient {
 
   private connect(nextState: ConnectionState): void {
     this.setState(nextState);
+    this.updateDiagnostics({
+      attempts: this.diagnostics.attempts + 1,
+      lastAttemptAt: new Date().toISOString(),
+    });
     const socket = new this.webSocketCtor(this.url);
     this.socket = socket;
     socket.onopen = () => this.handleOpen(socket);
     socket.onmessage = (event: MessageEvent) => this.handleMessage(event);
     socket.onerror = () => {
+      this.updateDiagnostics({ lastErrorAt: new Date().toISOString() });
       if (this.connectionState === "connecting") {
         this.setState("reconnecting");
       }
     };
-    socket.onclose = () => this.handleClose(socket);
+    socket.onclose = (event: CloseEvent) => this.handleClose(socket, event);
   }
 
   private handleOpen(socket: WebSocketLike): void {
@@ -195,6 +226,7 @@ export class WsClient {
       return;
     }
     this.reconnectDelayMs = this.reconnect.initialDelayMs;
+    this.updateDiagnostics({ lastOpenAt: new Date().toISOString() });
     this.setState("open");
     if (this.autoHelloOnOpen) {
       void this.request("hello", {}).catch(() => {
@@ -223,10 +255,18 @@ export class WsClient {
     this.dispatchEvent(envelope);
   }
 
-  private handleClose(socket: WebSocketLike): void {
+  private handleClose(socket: WebSocketLike, event: CloseEvent): void {
     if (this.socket !== socket) {
       return;
     }
+    this.updateDiagnostics({
+      lastClose: {
+        at: new Date().toISOString(),
+        code: event.code,
+        reason: event.reason,
+        wasClean: event.wasClean,
+      },
+    });
     this.socket = null;
     if (this.manuallyClosed) {
       this.setState("closed");
@@ -292,6 +332,11 @@ export class WsClient {
     }
     this.connectionState = state;
     this.onStateChange?.(state);
+  }
+
+  private updateDiagnostics(update: Partial<WsDiagnostics>): void {
+    this.diagnostics = { ...this.diagnostics, ...update };
+    this.onDiagnostics?.(this.diagnostics);
   }
 }
 

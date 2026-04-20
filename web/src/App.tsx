@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { AppToolbar } from "./components/AppToolbar";
+import { ConnectionDebug } from "./components/ConnectionDebug";
 import { FileExplorer } from "./components/FileExplorer";
 import { HelloPanel } from "./components/HelloPanel";
 import { RawLog } from "./components/RawLog";
+import { EditorAccessoryToolbar } from "./components/editor/EditorAccessoryToolbar";
 import { NoteEditor } from "./components/editor/NoteEditor";
 import { PromptComposer } from "./components/prompt/PromptComposer";
 import { TranscriptPane } from "./components/transcript/TranscriptPane";
@@ -26,7 +28,18 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
   const openFile = useExplorerStore((store) => store.open);
   const { state: connectionState } = useConnectionState();
   const [explorerOpen, setExplorerOpen] = useState(true);
+  const [editorKeyboardOpen, setEditorKeyboardOpen] = useState(false);
+  const [noteKeyboardOpen, setNoteKeyboardOpen] = useState(false);
   const hasRestoredRef = useRef(false);
+
+  function handleExplorerFileOpen() {
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(max-width: 760px)").matches
+    ) {
+      setExplorerOpen(false);
+    }
+  }
 
   useEffect(() => {
     if (connectionState !== "open" || hasRestoredRef.current) return;
@@ -37,18 +50,87 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
     }
   }, [connectionState, openFile]);
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    let largestViewportHeight = Math.max(viewport?.height ?? 0, window.innerHeight);
+
+    function resetPageScroll() {
+      window.scrollTo(0, 0);
+      document.documentElement.scrollTop = 0;
+      document.body.scrollTop = 0;
+    }
+
+    function updateViewportState() {
+      const visualHeight = viewport?.height ?? window.innerHeight;
+      largestViewportHeight = Math.max(largestViewportHeight, visualHeight, window.innerHeight);
+      const keyboardOpen = largestViewportHeight - visualHeight > 120;
+
+      document.documentElement.style.setProperty(
+        "--aunic-viewport-height",
+        keyboardOpen ? `${visualHeight}px` : "100lvh",
+      );
+      document.documentElement.style.setProperty(
+        "--aunic-viewport-top",
+        `${keyboardOpen ? viewport?.offsetTop ?? 0 : 0}px`,
+      );
+      document.documentElement.style.setProperty(
+        "--aunic-viewport-bottom",
+        keyboardOpen && viewport
+          ? `${Math.max(0, window.innerHeight - viewport.offsetTop - visualHeight)}px`
+          : "0px",
+      );
+
+      const activeElement = document.activeElement;
+      const noteFocused =
+        activeElement instanceof HTMLElement &&
+        Boolean(activeElement.closest(".code-editor-host"));
+      const promptFocused =
+        activeElement instanceof HTMLElement &&
+        Boolean(activeElement.closest(".prompt-editor-host"));
+      const editorFocused = noteFocused || promptFocused;
+      setEditorKeyboardOpen(editorFocused && keyboardOpen);
+      setNoteKeyboardOpen(noteFocused && keyboardOpen);
+
+      if (keyboardOpen || window.scrollY !== 0) {
+        resetPageScroll();
+        requestAnimationFrame(resetPageScroll);
+      }
+    }
+
+    updateViewportState();
+    window.addEventListener("resize", updateViewportState);
+    window.addEventListener("focusin", updateViewportState);
+    window.addEventListener("focusout", updateViewportState);
+    viewport?.addEventListener("resize", updateViewportState);
+    viewport?.addEventListener("scroll", updateViewportState);
+    return () => {
+      window.removeEventListener("resize", updateViewportState);
+      window.removeEventListener("focusin", updateViewportState);
+      window.removeEventListener("focusout", updateViewportState);
+      viewport?.removeEventListener("resize", updateViewportState);
+      viewport?.removeEventListener("scroll", updateViewportState);
+    };
+  }, []);
+
   return (
-    <main className="app-shell">
+    <main
+      className={[
+        "app-shell",
+        noteKeyboardOpen ? "app-shell--note-keyboard-open" : "",
+        editorKeyboardOpen ? "app-shell--editor-accessory-open" : "",
+      ].filter(Boolean).join(" ")}
+    >
       <AppToolbar
         explorerOpen={explorerOpen}
         onToggleExplorer={() => setExplorerOpen((current) => !current)}
       />
+      <ConnectionDebug />
       <div
         className={`workspace-layout ${
           explorerOpen ? "" : "workspace-layout--explorer-closed"
         }`}
       >
-        {explorerOpen ? <FileExplorer /> : null}
+        {explorerOpen ? <FileExplorer onOpenFile={handleExplorerFileOpen} /> : null}
         <div
           className={`workspace-main ${
             transcriptMaximized ? "workspace-main--transcript-maximized" : ""
@@ -69,6 +151,7 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
           ) : null}
         </div>
       </div>
+      {editorKeyboardOpen ? <EditorAccessoryToolbar /> : null}
       {showDebug ? <RawLog /> : null}
     </main>
   );

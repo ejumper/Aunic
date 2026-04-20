@@ -33,6 +33,7 @@ export interface TranscriptSlice {
   toggleExpand: (rowNumber: number) => void;
   setFilter: (mode: TranscriptFilter) => void;
   toggleSort: () => void;
+  setOpen: (open: boolean) => void;
   toggleOpen: () => void;
   toggleMaximized: () => void;
   deleteRow: (client: TranscriptWsClient, rowNumber: number) => Promise<void>;
@@ -144,6 +145,13 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
     }));
   },
 
+  setOpen(open) {
+    set((state) => ({
+      open,
+      maximized: open ? state.maximized : false,
+    }));
+  },
+
   toggleOpen() {
     set((state) => ({
       open: !state.open,
@@ -153,7 +161,7 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
 
   toggleMaximized() {
     set((state) => ({
-      maximized: state.open ? !state.maximized : false,
+      maximized: state.open ? !state.maximized : true,
       open: true,
     }));
   },

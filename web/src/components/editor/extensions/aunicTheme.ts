@@ -42,6 +42,11 @@ export function aunicTheme(): Extension {
           backgroundColor: "var(--editor-gutter)",
           color: "var(--editor-muted)",
         },
+        ".cm-lineNumbers .cm-gutterElement": {
+          display: "flex",
+          alignItems: "flex-end",
+          padding: "0 5px 0.28rem 3px",
+        },
         ".cm-activeLine": {
           backgroundColor: "var(--editor-active-line)",
         },
@@ -157,16 +162,15 @@ export function aunicTheme(): Extension {
         },
         ".cm-foldGutter .cm-gutterElement": {
           display: "flex",
-          alignItems: "center",
+          alignItems: "flex-end",
           justifyContent: "center",
-          padding: "0",
+          padding: "0 0 0.28rem",
         },
         ".cm-foldGutter .cm-gutterElement span": {
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
+          display: "block",
           width: "100%",
-          height: "100%",
+          textAlign: "center",
+          lineHeight: "1",
           cursor: "pointer",
         },
         ".cm-foldPlaceholder": {

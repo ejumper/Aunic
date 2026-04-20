@@ -3,6 +3,7 @@ import type { TranscriptFilter, TranscriptSortOrder } from "../../state/transcri
 interface TranscriptToolbarProps {
   open: boolean;
   maximized: boolean;
+  mobileDockMode?: boolean;
   filterMode: TranscriptFilter;
   sortOrder: TranscriptSortOrder;
   hasRows: boolean;
@@ -21,6 +22,7 @@ const FILTERS: Array<{ mode: Exclude<TranscriptFilter, "all">; label: string }> 
 export function TranscriptToolbar({
   open,
   maximized,
+  mobileDockMode = false,
   filterMode,
   sortOrder,
   hasRows,
@@ -48,9 +50,11 @@ export function TranscriptToolbar({
         <button type="button" className="secondary-button" onClick={onToggleOpen}>
           v
         </button>
-        <button type="button" className="secondary-button" onClick={onToggleMaximized}>
-          {maximized ? "-" : "+"}
-        </button>
+        {!mobileDockMode ? (
+          <button type="button" className="secondary-button" onClick={onToggleMaximized}>
+            {maximized ? "-" : "+"}
+          </button>
+        ) : null}
         {FILTERS.map(({ mode, label }) => {
           const active = filterMode === mode;
           return (

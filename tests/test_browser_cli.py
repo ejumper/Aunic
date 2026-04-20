@@ -24,6 +24,10 @@ def test_serve_cli_dispatches_browser_server(monkeypatch, tmp_path: Path) -> Non
             "9999",
             "--workspace-root",
             str(tmp_path),
+            "--ssl-certfile",
+            str(tmp_path / "cert.pem"),
+            "--ssl-keyfile",
+            str(tmp_path / "key.pem"),
         ]
     )
 
@@ -31,3 +35,5 @@ def test_serve_cli_dispatches_browser_server(monkeypatch, tmp_path: Path) -> Non
     assert captured["host"] == "0.0.0.0"
     assert captured["port"] == 9999
     assert captured["workspace_root"] == tmp_path.resolve()
+    assert captured["ssl_certfile"] == (tmp_path / "cert.pem").resolve()
+    assert captured["ssl_keyfile"] == (tmp_path / "key.pem").resolve()

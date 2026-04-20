@@ -27,6 +27,7 @@ describe("TranscriptPane", () => {
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     request.mockReset();
+    setMobileViewport(false);
     useExplorerStore.getState().reset();
     useNoteEditorStore.getState().reset();
     useTranscriptStore.getState().reset();
@@ -66,6 +67,41 @@ describe("TranscriptPane", () => {
     expect(container.textContent).toContain("$ npm test");
     expect(container.textContent).toContain("1 result · Aunic");
     expect(container.textContent).toContain("Fetched page");
+  });
+
+  it("renders markdown in chat rows", async () => {
+    openSnapshot(
+      fileSnapshot("note.md", "rev-1", [
+        messageRow(
+          1,
+          [
+            "# Heading",
+            "",
+            "A **bold** and *italic* value with `code`.",
+            "",
+            "| Name | Meaning |",
+            "| --- | --- |",
+            "| **STP** | *Loop* prevention |",
+            "",
+            "```",
+            "raw code",
+            "```",
+          ].join("\n"),
+        ),
+      ]),
+    );
+
+    await act(async () => {
+      root.render(<TranscriptPane />);
+      await flushPromises();
+    });
+
+    expect(container.querySelector(".md-render__heading")).not.toBeNull();
+    expect(container.querySelector("strong")?.textContent).toBe("bold");
+    expect(container.querySelector("em")?.textContent).toBe("italic");
+    expect(container.querySelector(".md-render__inline-code")?.textContent).toBe("code");
+    expect(container.querySelector(".md-render__table")).not.toBeNull();
+    expect(container.querySelector(".md-render__code-block")?.textContent).toContain("raw code");
   });
 
   it("filter buttons narrow visible rows", async () => {
@@ -173,6 +209,28 @@ describe("TranscriptPane", () => {
     expect(separator).toBeTruthy();
   });
 
+  it("defaults closed and opens maximized on mobile", async () => {
+    setMobileViewport(true);
+    openSnapshot(fileSnapshot("note.md", "rev-1", [messageRow(1, "mobile row")]));
+
+    await act(async () => {
+      root.render(<TranscriptPane />);
+      await flushPromises();
+    });
+
+    expect(useTranscriptStore.getState()).toMatchObject({ open: false, maximized: false });
+    expect([...container.querySelectorAll("button")].some((item) => item.textContent === "+")).toBe(
+      false,
+    );
+
+    await act(async () => {
+      getButton("^").click();
+      await flushPromises();
+    });
+
+    expect(useTranscriptStore.getState()).toMatchObject({ open: true, maximized: true });
+  });
+
   function getButton(text: string): HTMLButtonElement {
     const button = [...container.querySelectorAll("button")].find(
       (item) => item.textContent === text,
@@ -194,6 +252,23 @@ describe("TranscriptPane", () => {
     return row as Element;
   }
 });
+
+function setMobileViewport(matches: boolean): void {
+  const mediaQueryList = {
+    matches,
+    media: "(max-width: 760px)",
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  };
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: vi.fn().mockReturnValue(mediaQueryList),
+  });
+}
 
 function openSnapshot(snapshot: FileSnapshotPayload): void {
   useExplorerStore.setState({ openFile: snapshot.path });

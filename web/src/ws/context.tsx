@@ -11,7 +11,7 @@ import { ROOT_DIR, useExplorerStore } from "../state/explorer";
 import { useNoteEditorStore } from "../state/noteEditor";
 import { useSessionStore } from "../state/session";
 import { useTranscriptStore } from "../state/transcript";
-import { WsClient, type ConnectionState } from "./client";
+import { WsClient, type ConnectionState, type WsDiagnostics } from "./client";
 import type {
   FileChangedPayload,
   PendingPermissionPayload,
@@ -24,6 +24,7 @@ interface WsContextValue {
   client: WsClient;
   state: ConnectionState;
   lastConnectedAt: Date | null;
+  diagnostics: WsDiagnostics | null;
 }
 
 const WsContext = createContext<WsContextValue | null>(null);
@@ -36,6 +37,7 @@ interface WsProviderProps {
 export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
   const [state, setState] = useState<ConnectionState>("idle");
   const [lastConnectedAt, setLastConnectedAt] = useState<Date | null>(null);
+  const [diagnostics, setDiagnostics] = useState<WsDiagnostics | null>(null);
   const setSession = useSessionStore((store) => store.setSession);
   const applyProgressEvent = useSessionStore((store) => store.applyProgressEvent);
   const setPendingPermission = useSessionStore((store) => store.setPendingPermission);
@@ -51,6 +53,7 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
             setLastConnectedAt(new Date());
           }
         },
+        onDiagnostics: setDiagnostics,
       }),
     [url],
   );
@@ -118,7 +121,7 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
   }, [applyProgressEvent, clearSession, client, setPendingPermission, setSession]);
 
   return (
-    <WsContext.Provider value={{ client, state, lastConnectedAt }}>
+    <WsContext.Provider value={{ client, state, lastConnectedAt, diagnostics }}>
       {children}
     </WsContext.Provider>
   );
@@ -132,7 +135,10 @@ export function useWs(): WsContextValue {
   return context;
 }
 
-export function useConnectionState(): Pick<WsContextValue, "state" | "lastConnectedAt"> {
-  const { state, lastConnectedAt } = useWs();
-  return { state, lastConnectedAt };
+export function useConnectionState(): Pick<
+  WsContextValue,
+  "state" | "lastConnectedAt" | "diagnostics"
+> {
+  const { state, lastConnectedAt, diagnostics } = useWs();
+  return { state, lastConnectedAt, diagnostics };
 }

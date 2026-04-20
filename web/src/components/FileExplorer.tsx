@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ComponentProps, type FormEvent } from "react";
 import {
   Tree,
   TreeItem,
@@ -16,7 +16,13 @@ type CreateIntent = {
   dirPath: string;
 } | null;
 
-export function FileExplorer() {
+type FileExplorerProps = {
+  onOpenFile?: () => void;
+};
+
+type TreeItemPressEvent = Parameters<NonNullable<ComponentProps<typeof TreeItem>["onPress"]>>[0];
+
+export function FileExplorer({ onOpenFile }: FileExplorerProps) {
   const { client } = useWs();
   const { state: connectionState } = useConnectionState();
   const session = useSessionStore((store) => store.session);
@@ -66,7 +72,7 @@ export function FileExplorer() {
     const path = String(selectedKey);
     select(path);
     if (entryMap.get(path)?.kind === "file") {
-      open(path);
+      openFile(path);
     }
   }
 
@@ -82,10 +88,15 @@ export function FileExplorer() {
   async function handleEntryAction(entry: FileEntryPayload) {
     setActionError(null);
     if (entry.kind === "file") {
-      open(entry.path);
+      openFile(entry.path);
       return;
     }
     await toggleExpand(client, entry.path);
+  }
+
+  function openFile(path: string) {
+    open(path);
+    onOpenFile?.();
   }
 
   function startCreate(kind: "file" | "dir") {
@@ -139,6 +150,14 @@ export function FileExplorer() {
     <aside className="explorer-panel" aria-label="File explorer">
       <div className="explorer-header">
         <p className="eyebrow">Workspace: <span>{rootLabel}</span></p>
+        <button
+          type="button"
+          className="settings-button"
+          aria-label="Settings"
+          disabled
+        >
+          ⚙
+        </button>
       </div>
 
       <div className="explorer-scrollable">
@@ -264,6 +283,15 @@ function renderTreeItem(
       onAction={() => {
         void onAction(entry);
       }}
+      {...(!isDir
+        ? {
+            onPress: (event: TreeItemPressEvent) => {
+              if (event.pointerType === "touch") {
+                void onAction(entry);
+              }
+            },
+          }
+        : {})}
     >
       <TreeItemContent>
         {({ isExpanded }) => (
