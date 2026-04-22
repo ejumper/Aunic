@@ -237,9 +237,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   min-width: 6.2rem;
 }
 
-.toolbar-menu-button--mobile {
-  display: none;
-}
+
 
 .toolbar-icon-button:hover,
 .toolbar-save-button:hover,
@@ -305,12 +303,15 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   display: none;
 }
 
-.app-shell--editor-accessory-open {
-  grid-template-rows: auto minmax(0, 1fr) auto;
+.toolbar-editor-icon {
+  display: block;
+  width: 1.1rem;
+  height: 1.1rem;
+  object-fit: contain;
 }
 
-.editor-accessory-toolbar {
-  display: none;
+.toolbar-editor-icon--flipped {
+  transform: scaleX(-1);
 }
 
 .panel {
@@ -1433,12 +1434,9 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   align-items: center;
 }
 
-.transcript-toolbar__controls button {
+.transcript-toolbar button {
   min-height: 1.65rem;
   padding: 0.22rem 0.55rem;
-}
-
-.transcript-toolbar button {
   border-radius: 999px;
   transition:
     background 140ms ease,
@@ -2138,13 +2136,6 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
     padding-bottom: 0;
   }
 
-  .toolbar-menu-button--desktop {
-    display: none;
-  }
-
-  .toolbar-menu-button--mobile {
-    display: inline-flex;
-  }
 
   .workspace-layout {
     position: relative;
@@ -2178,11 +2169,8 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 
   .code-editor-host .cm-editor {
     font-size: 0.88rem;
-  }
-
-  .code-editor-host .cm-line {
-    padding-right: 0.65rem;
-    padding-left: 0.65rem;
+    --aunic-line-padding-left: 0.65rem;
+    --aunic-line-padding-right: 0.65rem;
   }
 
   .code-editor-host .cm-lineNumbers .cm-gutterElement {
@@ -2195,52 +2183,6 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
     width: 0.75rem;
     padding-right: 0;
     padding-left: 0;
-  }
-
-  .editor-accessory-toolbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-around;
-    gap: 0.35rem;
-    min-height: 0;
-    padding: 0.3rem 0.75rem;
-    border-top: 1px solid hsl(210, 11%, 20%);
-    background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl(210, 0%, 10%) 80%, hsl(210, 0%, 17%) 100%);
-    touch-action: manipulation;
-    user-select: none;
-  }
-
-  .editor-accessory-button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 3rem;
-    min-height: 1.65rem;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    padding: 0.4rem;
-    background: transparent;
-    color: hsl(210, 14%, 86%);
-    touch-action: manipulation;
-    -webkit-user-select: none;
-    user-select: none;
-  }
-
-  .editor-accessory-button:active,
-  .editor-accessory-button:focus-visible {
-    border-color: hsl(210, 12%, 26%);
-    background: hsl(210, 10%, 14%);
-  }
-
-  .editor-accessory-icon {
-    display: block;
-    width: 1.15rem;
-    height: 1.15rem;
-    object-fit: contain;
-  }
-
-  .editor-accessory-icon--flipped {
-    transform: scaleX(-1);
   }
 
   .prompt-composer__footer {

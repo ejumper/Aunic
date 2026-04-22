@@ -4,7 +4,6 @@ import { ConnectionDebug } from "./components/ConnectionDebug";
 import { FileExplorer } from "./components/FileExplorer";
 import { HelloPanel } from "./components/HelloPanel";
 import { RawLog } from "./components/RawLog";
-import { EditorAccessoryToolbar } from "./components/editor/EditorAccessoryToolbar";
 import { NoteEditor } from "./components/editor/NoteEditor";
 import { PromptComposer } from "./components/prompt/PromptComposer";
 import { TranscriptPane } from "./components/transcript/TranscriptPane";
@@ -31,7 +30,6 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
   const openFile = useExplorerStore((store) => store.open);
   const { state: connectionState } = useConnectionState();
   const [explorerOpen, setExplorerOpen] = useState(true);
-  const [editorKeyboardOpen, setEditorKeyboardOpen] = useState(false);
   const [noteKeyboardOpen, setNoteKeyboardOpen] = useState(false);
   const hasRestoredRef = useRef(false);
 
@@ -87,11 +85,6 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
       const noteFocused =
         activeElement instanceof HTMLElement &&
         Boolean(activeElement.closest(".code-editor-host"));
-      const promptFocused =
-        activeElement instanceof HTMLElement &&
-        Boolean(activeElement.closest(".prompt-editor-host"));
-      const editorFocused = noteFocused || promptFocused;
-      setEditorKeyboardOpen(editorFocused && keyboardOpen);
       setNoteKeyboardOpen(noteFocused && keyboardOpen);
 
       if (keyboardOpen || window.scrollY !== 0) {
@@ -148,7 +141,6 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
       className={[
         "app-shell",
         noteKeyboardOpen ? "app-shell--note-keyboard-open" : "",
-        editorKeyboardOpen ? "app-shell--editor-accessory-open" : "",
       ].filter(Boolean).join(" ")}
     >
       <AppToolbar
@@ -182,7 +174,6 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
           ) : null}
         </div>
       </div>
-      {editorKeyboardOpen ? <EditorAccessoryToolbar /> : null}
       {showDebug ? <RawLog /> : null}
     </main>
   );

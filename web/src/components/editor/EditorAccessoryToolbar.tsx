@@ -91,7 +91,7 @@ export function EditorAccessoryToolbar() {
   );
 }
 
-function runEditorCommand(command: EditorCommand) {
+export function runEditorCommand(command: EditorCommand) {
   const view = getActiveEditorView();
   if (!view) {
     remoteLog("runEditorCommand: no view", { command });

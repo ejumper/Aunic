@@ -23,6 +23,8 @@ export function aunicTheme(): Extension {
           color: "var(--editor-fg)",
           backgroundColor: "var(--editor-bg)",
           fontSize: "0.95rem",
+          "--aunic-line-padding-left": "1rem",
+          "--aunic-line-padding-right": "1rem",
         },
         ".cm-scroller": {
           fontFamily:
@@ -35,7 +37,7 @@ export function aunicTheme(): Extension {
           caretColor: "var(--editor-caret)",
         },
         ".cm-line": {
-          padding: "0 1rem",
+          paddingRight: "var(--aunic-line-padding-right)",
         },
         ".cm-gutters": {
           borderRight: "1px solid var(--editor-border)",

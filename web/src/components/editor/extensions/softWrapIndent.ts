@@ -8,9 +8,9 @@ export function softWrapIndent() {
     EditorView.lineWrapping,
     EditorView.theme({
       ".cm-line": {
-        paddingLeft: "calc(var(--aunic-wrap-indent, 0) * 1ch + 1rem)",
+        paddingLeft: "calc(var(--aunic-line-padding-left, 1rem) + var(--aunic-wrap-indent, 0) * 1ch)",
         textIndent: "calc(var(--aunic-wrap-indent, 0) * -1ch)",
-        whiteSpace: "break-spaces",
+        whiteSpace: "pre-wrap",
         overflowWrap: "anywhere",
       },
     }),

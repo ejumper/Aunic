@@ -1,24 +1,15 @@
-import { indentUnit } from "@codemirror/language";
 import { Annotation, EditorState, type ChangeSpec, type Extension } from "@codemirror/state";
 
 const sequenceHandled = Annotation.define<boolean>();
-
-const isTouchPrimary =
-  typeof window !== "undefined" &&
-  typeof window.matchMedia === "function" &&
-  window.matchMedia("(pointer: coarse)").matches;
-
-// On mobile, typing >| at the start of a line adds one level of tab indentation.
-// Typing |< removes one level.
 export function mobileIndentTriggers(): Extension {
-  if (!isTouchPrimary) return [];
+  if (!isTouchPrimary()) return [];
 
   return EditorState.transactionFilter.of((tr) => {
     if (!tr.docChanged || tr.annotation(sequenceHandled)) return tr;
 
-    const unit = tr.startState.facet(indentUnit);
     const changes: ChangeSpec[] = [];
     const seen = new Set<number>();
+    const selectionHeads = tr.newSelection.ranges.map((range) => range.head);
 
     tr.changes.iterChangedRanges((_fromA, _toA, fromB, toB) => {
       const fromLine = tr.newDoc.lineAt(fromB);
@@ -27,7 +18,7 @@ export function mobileIndentTriggers(): Extension {
         if (seen.has(ln) || ln > tr.newDoc.lines) continue;
         seen.add(ln);
         const line = tr.newDoc.line(ln);
-        const change = detectTrigger(line.from, line.text, unit);
+        const change = detectTrigger(line.from, line.text, selectionHeads);
         if (change) changes.push(change);
       }
     });
@@ -40,20 +31,40 @@ export function mobileIndentTriggers(): Extension {
 // Kept for backwards-compat with existing imports.
 export { mobileIndentTriggers as fourSpaceIndent };
 
-function detectTrigger(lineFrom: number, text: string, unit: string): ChangeSpec | null {
-  const indent = /^(\s*)>\|$/.exec(text);
-  if (indent) {
-    return { from: lineFrom, to: lineFrom + text.length, insert: indent[1] + unit };
+function isTouchPrimary(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches
+  );
+}
+
+export function detectTrigger(
+  lineFrom: number,
+  text: string,
+  selectionHeads: readonly number[],
+): ChangeSpec | null {
+  const leading = /^([\t ]*)/.exec(text)?.[1] ?? "";
+  if (!leading.includes("    ")) {
+    return null;
   }
 
-  const outdent = /^(\s*)\|<$/.exec(text);
-  if (outdent) {
-    const leading = outdent[1];
-    const trimmed = leading.endsWith(unit)
-      ? leading.slice(0, -unit.length)
-      : leading.slice(0, -1);
-    return { from: lineFrom, to: lineFrom + text.length, insert: trimmed };
+  const leadingEnd = lineFrom + leading.length;
+  const caretInLeadingWhitespace = selectionHeads.some(
+    (head) => head >= lineFrom && head <= leadingEnd,
+  );
+  if (!caretInLeadingWhitespace) {
+    return null;
   }
 
-  return null;
+  const normalized = normalizeLeadingSpacesToTabs(leading);
+  if (normalized === leading) {
+    return null;
+  }
+
+  return { from: lineFrom, to: lineFrom + leading.length, insert: normalized };
+}
+
+export function normalizeLeadingSpacesToTabs(leading: string): string {
+  return leading.replace(/ {4}/g, "\t");
 }

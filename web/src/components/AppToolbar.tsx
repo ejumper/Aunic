@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { runEditorCommand } from "./editor/EditorAccessoryToolbar";
 import { useNoteEditorStore } from "../state/noteEditor";
 import { useWs } from "../ws/context";
 import { ConnectionBadge } from "./ConnectionBadge";
@@ -55,14 +56,21 @@ export function AppToolbar({ explorerOpen, onToggleExplorer }: AppToolbarProps) 
       </div>
 
       <div className="app-toolbar__group app-toolbar__group--right">
-        <button type="button" className="toolbar-menu-button toolbar-menu-button--desktop" disabled>
-          Included⌄
+        <button
+          type="button"
+          className="toolbar-icon-button"
+          aria-label="Undo"
+          onClick={() => runEditorCommand("undo")}
+        >
+          <img className="toolbar-editor-icon" src="/icons/undo.svg" alt="" aria-hidden="true" />
         </button>
-        <button type="button" className="toolbar-menu-button toolbar-menu-button--desktop" disabled>
-          Plans⌄
-        </button>
-        <button type="button" className="toolbar-menu-button toolbar-menu-button--mobile" disabled>
-          Files⌄
+        <button
+          type="button"
+          className="toolbar-icon-button"
+          aria-label="Redo"
+          onClick={() => runEditorCommand("redo")}
+        >
+          <img className="toolbar-editor-icon toolbar-editor-icon--flipped" src="/icons/undo.svg" alt="" aria-hidden="true" />
         </button>
       </div>
     </header>
