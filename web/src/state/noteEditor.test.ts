@@ -4,7 +4,7 @@ import {
   type NoteEditorWsClient,
 } from "./noteEditor";
 import type { ClientRequestType, RequestPayload, RequestResponse } from "../ws/requests";
-import type { FileSnapshotPayload } from "../ws/types";
+import type { FileSnapshotPayload, NoteToolResultEventPayload } from "../ws/types";
 import type { WsRequestError } from "../ws/client";
 
 type RequestRecord = {
@@ -54,6 +54,7 @@ describe("useNoteEditorStore", () => {
       return fileSnapshot("note.md", "changed", "rev-2");
     });
     await useNoteEditorStore.getState().loadForPath(client, "note.md");
+    useNoteEditorStore.getState().markDirty("changed");
 
     await expect(useNoteEditorStore.getState().save(client, "changed")).resolves.toBe(true);
 
@@ -88,8 +89,11 @@ describe("useNoteEditorStore", () => {
     await expect(useNoteEditorStore.getState().save(client, "mine")).resolves.toBe(false);
 
     expect(useNoteEditorStore.getState().conflict).toEqual({
+      reason: "save_conflict",
       remoteRevisionId: "rev-remote",
       remoteDoc: "remote",
+      remoteSnapshot: fileSnapshot("note.md", "remote", "rev-remote"),
+      toolName: null,
     });
   });
 
@@ -173,6 +177,88 @@ describe("useNoteEditorStore", () => {
     );
   });
 
+  it("handleNoteToolResult merges note_edit into dirty browser edits", async () => {
+    const requests: RequestRecord[] = [];
+    const client = mockClient(async (type, payload) => {
+      requests.push({ type, payload });
+      if (type === "write_file") {
+        return fileSnapshot("note.md", "alpha\nBETA\ndelta\n", "rev-merged");
+      }
+      throw new Error(`Unexpected request: ${type}`);
+    });
+    useNoteEditorStore.setState({
+      path: "note.md",
+      revisionId: "rev-1",
+      initialDoc: "alpha\nbeta\ngamma\n",
+      currentDoc: "alpha\nbeta\ndelta\n",
+      dirty: true,
+    });
+
+    await useNoteEditorStore.getState().handleNoteToolResult(client, noteToolResultEvent({
+      tool_name: "note_edit",
+      snapshot: fileSnapshot("note.md", "alpha\nBETA\ngamma\n", "rev-model"),
+      content: {
+        type: "note_content_edit",
+        old_string: "beta",
+        new_string: "BETA",
+        actual_old_string: "beta",
+        replace_all: false,
+        original_content: "alpha\nbeta\ngamma\n",
+      },
+    }));
+
+    expect(requests).toEqual([
+      {
+        type: "write_file",
+        payload: {
+          path: "note.md",
+          text: "alpha\nBETA\ndelta\n",
+          expected_revision: "rev-model",
+        },
+      },
+    ]);
+    expect(useNoteEditorStore.getState()).toMatchObject({
+      revisionId: "rev-merged",
+      initialDoc: "alpha\nBETA\ndelta\n",
+      currentDoc: "alpha\nBETA\ndelta\n",
+      dirty: false,
+      notice: "Merged model edit into browser edits.",
+      conflict: null,
+      externalReloadPending: null,
+    });
+  });
+
+  it("handleNoteToolResult falls back to a model-update conflict when note_write cannot merge", async () => {
+    const request = vi.fn();
+    const client = { request } as unknown as NoteEditorWsClient;
+    useNoteEditorStore.setState({
+      path: "note.md",
+      revisionId: "rev-1",
+      initialDoc: "alpha\nbeta\ngamma\n",
+      currentDoc: "user rewrite\n",
+      dirty: true,
+    });
+
+    await useNoteEditorStore.getState().handleNoteToolResult(client, noteToolResultEvent({
+      tool_name: "note_write",
+      snapshot: fileSnapshot("note.md", "model rewrite\n", "rev-model"),
+      content: {
+        type: "note_content_write",
+        content: "model rewrite\n",
+        original_content: "alpha\nbeta\ngamma\n",
+      },
+    }));
+
+    expect(request).not.toHaveBeenCalled();
+    expect(useNoteEditorStore.getState().conflict).toEqual({
+      reason: "model_update",
+      remoteRevisionId: "rev-model",
+      remoteDoc: "model rewrite\n",
+      remoteSnapshot: fileSnapshot("note.md", "model rewrite\n", "rev-model"),
+      toolName: "note_write",
+    });
+  });
+
   it("resolveExternalReload reloads the remote snapshot", () => {
     useNoteEditorStore.setState({
       externalReloadPending: {
@@ -201,8 +287,11 @@ describe("useNoteEditorStore", () => {
     useNoteEditorStore.setState({
       path: "note.md",
       conflict: {
+        reason: "save_conflict",
         remoteRevisionId: "rev-2",
         remoteDoc: "remote",
+        remoteSnapshot: fileSnapshot("note.md", "remote", "rev-2"),
+        toolName: null,
       },
     });
 
@@ -248,6 +337,16 @@ function fileSnapshot(
     note_content: noteContent,
     transcript_rows: [],
     has_transcript: false,
+  };
+}
+
+function noteToolResultEvent(
+  payload: Partial<NoteToolResultEventPayload> & Pick<NoteToolResultEventPayload, "tool_name" | "snapshot">,
+): NoteToolResultEventPayload {
+  return {
+    path: "note.md",
+    content: {},
+    ...payload,
   };
 }
 

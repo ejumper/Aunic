@@ -13,7 +13,7 @@ import {
   EditorView,
   keymap,
 } from "@codemirror/view";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches } from "@codemirror/search";
 import { CodeMirrorHost } from "../editor/CodeMirrorHost";
 import { promptEditorRef } from "../../promptEditorRef";
 import { aunicTheme } from "../editor/extensions/aunicTheme";
@@ -124,7 +124,6 @@ function buildPromptEditorExtensions(
       indentWithTab,
       ...defaultKeymap,
       ...historyKeymap,
-      ...searchKeymap,
     ]),
     aunicTheme(),
     EditorView.theme({

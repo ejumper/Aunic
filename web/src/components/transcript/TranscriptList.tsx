@@ -64,7 +64,7 @@ export function TranscriptList({
               />
             );
           }
-          if (row.tool_name === "web_search") {
+          if (row.tool_name === "web_search" || row.tool_name === "rag_search") {
             return (
               <SearchRow
                 key={row.row_number}
@@ -108,6 +108,8 @@ function rowMatchesFilter(row: TranscriptRowPayload, filterMode: TranscriptFilte
   }
   return (
     (row.type === "tool_result" || row.type === "tool_error") &&
-    (row.tool_name === "web_search" || row.tool_name === "web_fetch")
+    (row.tool_name === "web_search" ||
+      row.tool_name === "rag_search" ||
+      row.tool_name === "web_fetch")
   );
 }

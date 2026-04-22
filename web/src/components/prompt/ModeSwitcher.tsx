@@ -12,7 +12,8 @@ export function ModeSwitcher({ mode, disabled, onChange }: ModeSwitcherProps) {
   return (
     <button
       type="button"
-      className="mode-pill mode-cycle-button"
+      className="mode-pill mode-cycle-button mode-cycle-button--mode"
+      data-width-template="Mode: Note"
       aria-label={`Mode ${labelForMode(mode)}. Switch to ${labelForMode(nextMode)}.`}
       disabled={disabled}
       onClick={() => onChange(nextMode)}

@@ -66,6 +66,10 @@ export interface PendingPermissionPayload {
   request: PermissionRequestPayload;
 }
 
+export interface EditorSettingsPayload {
+  save_mode: "manual" | "auto";
+}
+
 export interface SessionStatePayload {
   run_active: boolean;
   run_id: string | null;
@@ -79,6 +83,7 @@ export interface SessionStatePayload {
   pending_permission: PendingPermissionPayload | null;
   research_state?: ResearchStatePayload;
   context_usage?: ContextUsagePayload;
+  editor_settings?: EditorSettingsPayload;
   capabilities?: {
     prompt_commands?: boolean;
     research_flow?: boolean;
@@ -150,6 +155,13 @@ export interface FileChangedPayload {
 export interface TranscriptRowEventPayload {
   path: string;
   row: TranscriptRowPayload;
+}
+
+export interface NoteToolResultEventPayload {
+  path: string;
+  tool_name: "note_edit" | "note_write";
+  content: Record<string, unknown>;
+  snapshot: FileSnapshotPayload;
 }
 
 export interface ErrorPayload {

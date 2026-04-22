@@ -18,7 +18,8 @@ export function WorkModeSwitcher({
   return (
     <button
       type="button"
-      className="mode-pill mode-cycle-button"
+      className="mode-pill mode-cycle-button mode-cycle-button--agent"
+      data-width-template="Agent: Work"
       aria-label={`Agent mode ${labelForWorkMode(workMode)}. Switch to ${labelForWorkMode(nextMode)}.`}
       disabled={disabled}
       onClick={() => onChange(nextMode)}

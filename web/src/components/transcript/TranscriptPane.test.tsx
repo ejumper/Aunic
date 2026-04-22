@@ -155,6 +155,27 @@ describe("TranscriptPane", () => {
     expect(container.textContent).toContain("tests passed");
   });
 
+  it("renders rag search results with structured transcript cards", async () => {
+    openSnapshot(ragSearchSnapshot());
+
+    await act(async () => {
+      root.render(<TranscriptPane />);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      const ragRow = container.querySelector("[data-row-number='2']");
+      expect(ragRow).toBeTruthy();
+      ragRow.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+      await flushPromises();
+    });
+
+    expect(container.querySelector(".tr-search-result--rag")).not.toBeNull();
+    expect(container.textContent).toContain("IETF");
+    expect(container.textContent).toContain("# Address Generation");
+    expect(container.textContent).toContain("/docs/ipv6/rfc8200.md");
+  });
+
   it("delete button sends delete_transcript_row", async () => {
     openSnapshot(fileSnapshot("note.md", "rev-1", [messageRow(1, "delete me")]));
     request.mockResolvedValue(fileSnapshot("note.md", "rev-2", []));
@@ -357,6 +378,39 @@ function toolCallRow(
     tool_id: toolId,
     content,
   };
+}
+
+function ragSearchSnapshot(): FileSnapshotPayload {
+  return fileSnapshot("note.md", "rev-rag", [
+    toolCallRow(1, "rag_search", "rag_1", { query: "ipv6 address generation", scope: null }),
+    {
+      row_number: 2,
+      role: "tool",
+      type: "tool_result",
+      tool_name: "rag_search",
+      tool_id: "rag_1",
+      content: [
+        {
+          title: "IPv6 Addressing Architecture",
+          source: "IETF",
+          result_id: "rfc-8200-addressing",
+          snippet: "Address generation combines the prefix with the interface identifier.",
+          heading_path: ["IPv6", "Address Generation"],
+          local_path: "/docs/ipv6/rfc8200.md",
+          url: "https://datatracker.ietf.org/doc/html/rfc8200",
+        },
+        {
+          title: "RFC 8200",
+          source: "IETF",
+          result_id: "rfc-8200",
+          snippet: "Uses modified EUI-64 to derive interface identifiers in some deployments.",
+          heading_path: ["Examples"],
+          local_path: "/docs/ipv6/rfc8200.md",
+          url: "https://datatracker.ietf.org/doc/html/rfc8200#section-2.5",
+        },
+      ],
+    },
+  ]);
 }
 
 async function flushPromises(): Promise<void> {

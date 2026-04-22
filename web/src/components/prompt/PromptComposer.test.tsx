@@ -2,6 +2,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useExplorerStore } from "../../state/explorer";
+import { useFindStore } from "../../state/find";
 import { useNoteEditorStore } from "../../state/noteEditor";
 import { usePromptStore } from "../../state/prompt";
 import { useSessionStore } from "../../state/session";
@@ -30,11 +31,13 @@ describe("PromptComposer", () => {
     request.mockReset();
     request.mockResolvedValue({ run_id: "run-1" });
     useExplorerStore.getState().reset();
+    useFindStore.getState().reset();
     useNoteEditorStore.getState().reset();
     usePromptStore.getState().clear();
     useSessionStore.getState().clearSession();
     Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
     Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
+    Element.prototype.scrollIntoView = vi.fn();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -56,6 +59,21 @@ describe("PromptComposer", () => {
     expect(container.textContent).toBe("");
   });
 
+  it("keeps hook order stable when a file opens after an initial null render", async () => {
+    await act(async () => {
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      openComposer();
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    expect(container.querySelector("[aria-label='Prompt editor']")).not.toBeNull();
+  });
+
   it("disables controls and shows cancel while a run is active", async () => {
     openComposer({ run_active: true, run_id: "run-1" });
 
@@ -67,7 +85,7 @@ describe("PromptComposer", () => {
     expect(button("Cancel")).not.toBeNull();
     expect(button("Mode: Note")?.disabled).toBe(true);
     expect(button("Agent: Off")?.disabled).toBe(true);
-    expect(container.querySelector<HTMLSelectElement>("select")?.disabled).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>(".model-picker-btn")?.disabled).toBe(true);
   });
 
   it("renders the pending permission banner", async () => {
@@ -212,6 +230,20 @@ describe("PromptComposer", () => {
       active_file: "note.md",
       result_index: 0,
     });
+  });
+
+  it("replaces the prompt editor with the find UI when active", async () => {
+    openComposer();
+    useFindStore.getState().open({ findText: "beta", replaceMode: true });
+
+    await act(async () => {
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    expect(container.querySelector("[aria-label='Prompt editor']")).toBeNull();
+    expect(container.textContent).toContain("Replace All");
+    expect(container.querySelectorAll(".prompt-find__input")).toHaveLength(2);
   });
 
   it("navigates and expands research results with arrow keys", async () => {

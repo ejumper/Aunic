@@ -1,12 +1,19 @@
 import { create } from "zustand";
 import type { WsClient, WsRequestError } from "../ws/client";
-import type { FileChangedPayload, FileSnapshotPayload } from "../ws/types";
+import type {
+  FileChangedPayload,
+  FileSnapshotPayload,
+  NoteToolResultEventPayload,
+} from "../ws/types";
 
 export type NoteEditorWsClient = Pick<WsClient, "request">;
 
 export interface NoteEditorConflict {
+  reason: "save_conflict" | "model_update";
   remoteRevisionId: string;
   remoteDoc: string;
+  remoteSnapshot: FileSnapshotPayload | null;
+  toolName: "note_edit" | "note_write" | null;
 }
 
 export interface NoteEditorExternalReload {
@@ -35,6 +42,10 @@ export interface NoteEditorSlice {
     client: NoteEditorWsClient,
     change: FileChangedPayload,
   ) => Promise<void>;
+  handleNoteToolResult: (
+    client: NoteEditorWsClient,
+    event: NoteToolResultEventPayload,
+  ) => Promise<void>;
   applySnapshot: (
     snapshot: FileSnapshotPayload,
     options?: {
@@ -49,7 +60,14 @@ export interface NoteEditorSlice {
     currentDoc: string,
     strategy: "reload" | "overwrite" | "cancel",
   ) => Promise<boolean>;
-  loadConflict: (client: NoteEditorWsClient, path: string) => Promise<void>;
+  loadConflict: (
+    client: NoteEditorWsClient,
+    path: string,
+    options?: {
+      reason?: "save_conflict" | "model_update";
+      toolName?: "note_edit" | "note_write";
+    },
+  ) => Promise<void>;
   selectedText: string;
   setSelectedText: (text: string) => void;
   clearNotice: () => void;
@@ -128,12 +146,10 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         text: currentDoc,
         expected_revision: revisionId,
       });
-      set((state) => ({
-        ...snapshotPatch(snapshot, state.documentVersion),
-        dirty: snapshot.note_content !== currentDoc,
-        currentDoc,
-        notice: "Saved.",
-      }));
+      if (get().path !== path) {
+        return true;
+      }
+      set((state) => applySuccessfulSavePatch(state, snapshot, currentDoc, currentDoc, "Saved."));
       return true;
     } catch (error) {
       if (isWsRequestError(error) && error.reason === "revision_conflict") {
@@ -203,6 +219,85 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
     }
   },
 
+  async handleNoteToolResult(client, event) {
+    const state = get();
+    if (!state.path || event.path !== state.path) {
+      return;
+    }
+    if (!state.dirty && !state.externalReloadPending) {
+      return;
+    }
+
+    const currentDoc = get().currentDoc;
+    const baseDoc = currentDoc;
+    const snapshot = event.snapshot;
+    const remoteDoc = snapshot.note_content;
+    const baselineDoc = typeof event.content.original_content === "string"
+      ? event.content.original_content
+      : null;
+
+    if (currentDoc === remoteDoc || (baselineDoc !== null && currentDoc === baselineDoc)) {
+      set((current) => ({
+        ...snapshotPatch(snapshot, current.documentVersion + 1),
+        notice: "Applied model update.",
+      }));
+      return;
+    }
+
+    if (event.tool_name === "note_edit") {
+      const mergedDoc = reapplyNoteEditPayloadToNoteContent(currentDoc, event.content);
+      if (mergedDoc !== null) {
+        set({ status: "saving", error: null, notice: null });
+        try {
+          const written = await client.request("write_file", {
+            path: event.path,
+            text: mergedDoc,
+            expected_revision: snapshot.revision_id,
+          });
+          if (get().path !== event.path) {
+            return;
+          }
+          set((state) =>
+            applySuccessfulSavePatch(
+              state,
+              written,
+              baseDoc,
+              mergedDoc,
+              "Merged model edit into browser edits.",
+            ));
+          return;
+        } catch (error) {
+          if (isWsRequestError(error) && error.reason === "revision_conflict") {
+            await get().loadConflict(client, event.path, {
+              reason: "model_update",
+              toolName: event.tool_name,
+            });
+            return;
+          }
+          set({
+            status: "error",
+            error: formatNoteEditorError(error),
+          });
+          return;
+        }
+      }
+    }
+
+    set({
+      status: "idle",
+      error: null,
+      notice: null,
+      externalReloadPending: null,
+      conflict: {
+        reason: "model_update",
+        remoteRevisionId: snapshot.revision_id,
+        remoteDoc,
+        remoteSnapshot: snapshot,
+        toolName: event.tool_name,
+      },
+    });
+  },
+
   applySnapshot(snapshot, options = {}) {
     set((state) => {
       const preserveCurrentDoc = Boolean(
@@ -261,6 +356,13 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
     }
 
     if (strategy === "reload") {
+      if (conflict.remoteSnapshot) {
+        set((state) => ({
+          ...snapshotPatch(conflict.remoteSnapshot as FileSnapshotPayload, state.documentVersion + 1),
+          notice: conflict.reason === "model_update" ? "Applied model update." : "Reloaded their version.",
+        }));
+        return true;
+      }
       set((state) => ({
         path,
         revisionId: conflict.remoteRevisionId,
@@ -285,12 +387,10 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         text: currentDoc,
         expected_revision: conflict.remoteRevisionId,
       });
-      set((state) => ({
-        ...snapshotPatch(snapshot, state.documentVersion),
-        currentDoc,
-        dirty: snapshot.note_content !== currentDoc,
-        notice: "Saved.",
-      }));
+      if (get().path !== path) {
+        return true;
+      }
+      set((state) => applySuccessfulSavePatch(state, snapshot, currentDoc, currentDoc, "Saved."));
       return true;
     } catch (error) {
       if (isWsRequestError(error) && error.reason === "revision_conflict") {
@@ -317,15 +417,20 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
     set((state) => ({ ...EMPTY_STATE, documentVersion: state.documentVersion + 1 }));
   },
 
-  async loadConflict(client, path) {
+  async loadConflict(client, path, options = {}) {
     try {
       const remote = await client.request("read_file", { path });
       set({
         status: "idle",
         error: null,
+        notice: null,
+        externalReloadPending: null,
         conflict: {
+          reason: options.reason ?? "save_conflict",
           remoteRevisionId: remote.revision_id,
           remoteDoc: remote.note_content,
+          remoteSnapshot: remote,
+          toolName: options.toolName ?? null,
         },
       });
     } catch (error) {
@@ -354,6 +459,92 @@ function snapshotPatch(
     externalReloadPending: null,
     documentVersion,
   };
+}
+
+function applySuccessfulSavePatch(
+  state: NoteEditorSlice,
+  snapshot: FileSnapshotPayload,
+  baseDoc: string,
+  submittedDoc: string,
+  notice: string,
+): Partial<NoteEditorSlice> {
+  const hasNewerLocalEdits = state.currentDoc !== baseDoc;
+  return {
+    ...snapshotPatch(snapshot, state.documentVersion),
+    currentDoc: hasNewerLocalEdits ? state.currentDoc : submittedDoc,
+    dirty: hasNewerLocalEdits ? state.currentDoc !== snapshot.note_content : false,
+    notice,
+  };
+}
+
+function reapplyNoteEditPayloadToNoteContent(
+  currentNoteContent: string,
+  payload: Record<string, unknown>,
+): string | null {
+  const actualOld = payload.actual_old_string;
+  const oldString = payload.old_string;
+  const newString = payload.new_string;
+  const replaceAll = Boolean(payload.replace_all ?? false);
+  const oldValue = typeof actualOld === "string" && actualOld
+    ? actualOld
+    : typeof oldString === "string" && oldString
+      ? oldString
+      : null;
+  if (oldValue === null || typeof newString !== "string") {
+    return null;
+  }
+
+  const updated = applyExactEdit(currentNoteContent, {
+    oldString: oldValue,
+    newString,
+    replaceAll,
+  });
+  if (updated === null || updated === currentNoteContent) {
+    return null;
+  }
+  return updated;
+}
+
+function applyExactEdit(
+  original: string,
+  {
+    oldString,
+    newString,
+    replaceAll,
+  }: {
+    oldString: string;
+    newString: string;
+    replaceAll: boolean;
+  },
+): string | null {
+  let candidateOld = oldString;
+  let candidateNew = newString;
+  let occurrences = countOccurrences(original, candidateOld);
+  if (occurrences === 0 && oldString.includes("'")) {
+    const smartOld = oldString.replaceAll("'", "’");
+    occurrences = countOccurrences(original, smartOld);
+    if (occurrences > 0) {
+      candidateOld = smartOld;
+      candidateNew = newString.replaceAll("'", "’");
+    }
+  }
+  if (occurrences === 0) {
+    return null;
+  }
+  if (!replaceAll && occurrences !== 1) {
+    return null;
+  }
+  if (replaceAll) {
+    return original.split(candidateOld).join(candidateNew);
+  }
+  return original.replace(candidateOld, candidateNew);
+}
+
+function countOccurrences(text: string, query: string): number {
+  if (!query) {
+    return 0;
+  }
+  return text.split(query).length - 1;
 }
 
 function isWsRequestError(error: unknown): error is WsRequestError {

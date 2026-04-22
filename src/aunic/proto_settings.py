@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 _VALID_POLICIES = {"allow", "ask", "deny"}
+_VALID_EDITOR_SAVE_MODES = {"manual", "auto"}
 _CACHE: dict[Path, tuple[int | None, dict[str, Any]]] = {}
 
 
@@ -124,6 +125,20 @@ def get_selected_openai_compatible_profile_id(project_root: Path) -> str | None:
     if isinstance(selected, str) and selected.strip():
         return selected.strip()
     return None
+
+
+def get_editor_save_mode(project_root: Path) -> str:
+    payload = _load_proto_payload(project_root)
+    editor = payload.get("editor")
+    if not isinstance(editor, dict):
+        return "manual"
+    raw_mode = editor.get("save_mode")
+    if not isinstance(raw_mode, str):
+        return "manual"
+    mode = raw_mode.strip().lower()
+    if mode in _VALID_EDITOR_SAVE_MODES:
+        return mode
+    return "manual"
 
 
 def resolve_openai_compatible_profile(

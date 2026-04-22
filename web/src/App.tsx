@@ -11,6 +11,9 @@ import { TranscriptPane } from "./components/transcript/TranscriptPane";
 import { useExplorerStore } from "./state/explorer";
 import { useTranscriptStore } from "./state/transcript";
 import { useConnectionState, WsProvider } from "./ws/context";
+import { EditorView } from "@codemirror/view";
+import { noteEditorRef } from "./noteEditorRef";
+import { promptEditorRef } from "./promptEditorRef";
 
 export function App() {
   const showDebug =
@@ -110,6 +113,34 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
       viewport?.removeEventListener("resize", updateViewportState);
       viewport?.removeEventListener("scroll", updateViewportState);
     };
+  }, []);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!event.ctrlKey || event.key !== "e") {
+        return;
+      }
+      event.preventDefault();
+      const noteView = noteEditorRef.get();
+      const promptView = promptEditorRef.get();
+      if (!noteView || !promptView) {
+        return;
+      }
+      const noteHasFocus = noteView.hasFocus;
+      if (noteHasFocus) {
+        promptView.focus();
+      } else {
+        noteView.focus();
+        noteView.dispatch({
+          effects: EditorView.scrollIntoView(noteView.state.selection.main.head, {
+            y: "start",
+            yMargin: noteView.defaultLineHeight * 3,
+          }),
+        });
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
   return (

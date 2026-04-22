@@ -2,7 +2,9 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useExplorerStore } from "../../state/explorer";
+import { useFindStore } from "../../state/find";
 import { useNoteEditorStore } from "../../state/noteEditor";
+import { useSessionStore } from "../../state/session";
 import type { FileSnapshotPayload } from "../../ws/types";
 import { NoteEditor } from "./NoteEditor";
 
@@ -31,7 +33,9 @@ describe("NoteEditor", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     request.mockReset();
     useExplorerStore.getState().reset();
+    useFindStore.getState().reset();
     useNoteEditorStore.getState().reset();
+    useSessionStore.getState().clearSession();
     Range.prototype.getClientRects = () => [] as unknown as DOMRectList;
     Range.prototype.getBoundingClientRect = () => new DOMRect(0, 0, 0, 0);
     window.requestAnimationFrame = (callback: FrameRequestCallback) => {
@@ -47,6 +51,7 @@ describe("NoteEditor", () => {
     act(() => {
       root.unmount();
     });
+    vi.useRealTimers();
     container.remove();
   });
 
@@ -189,6 +194,42 @@ describe("NoteEditor", () => {
     });
   });
 
+  it("autosaves dirty notes when editor save mode is auto", async () => {
+    vi.useFakeTimers();
+    request.mockImplementation(async (type: string, payload: { text?: string }) =>
+      type === "read_file"
+        ? fileSnapshot("note.md", "Body", "rev-1")
+        : fileSnapshot("note.md", payload.text ?? "Body", "rev-2"),
+    );
+    useSessionStore.setState({
+      session: sessionState("auto"),
+      runActive: false,
+    });
+    useExplorerStore.setState({ openFile: "note.md" });
+
+    await act(async () => {
+      root.render(<NoteEditor />);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      useNoteEditorStore.getState().markDirty("Changed");
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_250);
+      await flushPromises();
+    });
+
+    expect(request).toHaveBeenCalledWith("write_file", {
+      path: "note.md",
+      text: "Changed",
+      expected_revision: "rev-1",
+    });
+    vi.useRealTimers();
+  });
+
   it("shows reload banners from store state without rendering editor chrome", async () => {
     request.mockResolvedValue(fileSnapshot("note.md", "Body", "rev-1"));
     useExplorerStore.setState({ openFile: "note.md" });
@@ -227,6 +268,30 @@ function fileSnapshot(
     note_content: noteContent,
     transcript_rows: [],
     has_transcript: false,
+  };
+}
+
+function sessionState(saveMode: "manual" | "auto") {
+  return {
+    run_active: false,
+    run_id: null,
+    workspace_root: "/workspace",
+    default_mode: "note" as const,
+    mode: "note" as const,
+    work_mode: "off" as const,
+    models: [],
+    selected_model_index: 0,
+    selected_model: {
+      label: "Fake",
+      provider_name: "codex",
+      model: "fake",
+      profile_id: null,
+      context_window: null,
+    },
+    pending_permission: null,
+    editor_settings: {
+      save_mode: saveMode,
+    },
   };
 }
 

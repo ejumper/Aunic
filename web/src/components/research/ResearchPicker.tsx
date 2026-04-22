@@ -38,6 +38,8 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
   const chunkFocusMax = Math.max(-1, chunks.length - 1);
   const busy = research.busy !== null;
   const sourceLabel = research.source === "rag" ? "RAG" : "Web";
+  const prevExpandedResultsRef = useRef<Set<number>>(new Set());
+  const prevExpandedChunksRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     setFocusedIndex(research.mode === "chunks" ? -1 : 0);
@@ -50,6 +52,32 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
   useEffect(() => {
     pickerRef.current?.focus();
   }, [research.mode, research.query, research.source]);
+
+  useEffect(() => {
+    pickerRef.current
+      ?.querySelector<HTMLElement>(".research-row--focused")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [focusedIndex]);
+
+  useEffect(() => {
+    const prev = prevExpandedResultsRef.current;
+    prevExpandedResultsRef.current = expandedResults;
+    const newIndex = [...expandedResults].find((i) => !prev.has(i));
+    if (newIndex === undefined) return;
+    pickerRef.current
+      ?.querySelector<HTMLElement>(`[data-research-index="${newIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [expandedResults]);
+
+  useEffect(() => {
+    const prev = prevExpandedChunksRef.current;
+    prevExpandedChunksRef.current = expandedChunks;
+    const newIndex = [...expandedChunks].find((i) => !prev.has(i));
+    if (newIndex === undefined) return;
+    pickerRef.current
+      ?.querySelector<HTMLElement>(`[data-research-index="${newIndex}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [expandedChunks]);
 
   const fetchSelected = useCallback(
     async (index: number | null = selectedResult) => {
@@ -331,6 +359,7 @@ function ResultsView({
               }`}
               role="option"
               aria-selected={selected}
+              data-research-index={index}
               onClick={() => onFocus(index)}
             >
               <label className="research-row__check">
@@ -430,6 +459,7 @@ function ChunksView({
               } ${chunk.is_match ? "research-row--match" : ""}`}
               role="option"
               aria-selected={selected}
+              data-research-index={index}
               onClick={() => onFocus(index)}
             >
               <label className="research-row__check">

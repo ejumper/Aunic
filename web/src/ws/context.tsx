@@ -14,6 +14,7 @@ import { useTranscriptStore } from "../state/transcript";
 import { WsClient, type ConnectionState, type WsDiagnostics } from "./client";
 import type {
   FileChangedPayload,
+  NoteToolResultEventPayload,
   PendingPermissionPayload,
   ProgressEventPayload,
   SessionStatePayload,
@@ -93,6 +94,12 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
         useTranscriptStore.getState().applyLiveRow(event);
       },
     );
+    const unsubscribeNoteToolResult = client.on(
+      "note_tool_result",
+      (event: NoteToolResultEventPayload) => {
+        void useNoteEditorStore.getState().handleNoteToolResult(client, event);
+      },
+    );
     const unsubscribeProgressEvent = client.on(
       "progress_event",
       (event: ProgressEventPayload) => {
@@ -110,6 +117,7 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
       unsubscribe();
       unsubscribeFileChanged();
       unsubscribeTranscriptRow();
+      unsubscribeNoteToolResult();
       unsubscribeProgressEvent();
       unsubscribePermissionRequest();
       client.stop();

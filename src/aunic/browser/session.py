@@ -37,9 +37,16 @@ from aunic.domain import ReasoningEffort, WorkMode
 from aunic.errors import ChatModeError, FileReadError, NoteModeError, OptimisticWriteError
 from aunic.loop import ToolLoop
 from aunic.model_options import ModelOption, build_model_options
-from aunic.modes import ChatModeRunRequest, ChatModeRunner, NoteModeRunRequest, NoteModeRunner
+from aunic.modes import (
+    ChatModeRunRequest,
+    ChatModeRunner,
+    NoteModeRunRequest,
+    NoteModeRunResult,
+    NoteModeRunner,
+)
 from aunic.progress import ProgressEvent
 from aunic.providers import ClaudeProvider, CodexProvider, OpenAICompatibleProvider
+from aunic.proto_settings import get_editor_save_mode
 from aunic.research import FetchPacket, FetchService, FetchedChunk, ResearchState, SearchResult, SearchService
 from aunic.tools.runtime import PermissionRequest, PermissionResolution, join_note_and_transcript
 from aunic.transcript.parser import parse_transcript_rows, split_note_and_transcript
@@ -227,6 +234,9 @@ class BrowserSession:
             "pending_permission": self.pending_permission_payload(),
             "research_state": self.research_state_payload(),
             "context_usage": self.context_usage_payload(),
+            "editor_settings": {
+                "save_mode": get_editor_save_mode(self.cwd),
+            },
             "capabilities": {
                 "prompt_commands": True,
                 "research_flow": True,
@@ -1119,7 +1129,7 @@ class BrowserSession:
         try:
             provider = self.provider_factory(self.selected_model, self.cwd)
             if self.mode == "note":
-                await self.note_runner.run(
+                result = await self.note_runner.run(
                     NoteModeRunRequest(
                         active_file=active_file,
                         included_files=included_files,
@@ -1135,6 +1145,7 @@ class BrowserSession:
                         permission_handler=self.request_permission,
                     )
                 )
+                await self._broadcast_note_tool_result(active_file, result)
             else:
                 await self.chat_runner.run(
                     ChatModeRunRequest(
@@ -1258,6 +1269,34 @@ class BrowserSession:
         except Exception:
             logger.exception("Failed to broadcast transcript row")
 
+    async def _broadcast_note_tool_result(
+        self,
+        active_file: Path,
+        result: NoteModeRunResult,
+    ) -> None:
+        latest = _latest_note_tool_result(result)
+        if latest is None:
+            return
+
+        tool_name, content = latest
+        snapshot = next((item for item in result.final_file_snapshots if item.path == active_file), None)
+        if snapshot is None:
+            try:
+                snapshot = await self.file_manager.read_snapshot(active_file)
+            except Exception:
+                logger.exception("Failed to read active file snapshot for note tool result")
+                return
+
+        await self.broadcast(
+            "note_tool_result",
+            {
+                "path": workspace_relative_path(active_file, workspace_root=self.workspace_root),
+                "tool_name": tool_name,
+                "content": content,
+                "snapshot": serialize_file_snapshot(snapshot, workspace_root=self.workspace_root),
+            },
+        )
+
     async def _handle_file_change(self, change: FileChange) -> None:
         try:
             payload = serialize_file_change(change, workspace_root=self.workspace_root)
@@ -1311,6 +1350,20 @@ def _command_response(
         "run_id": run_id,
         "snapshot": snapshot,
     }
+
+
+def _latest_note_tool_result(result: NoteModeRunResult) -> tuple[str, dict[str, Any]] | None:
+    candidate_loop_results = [prompt_result.loop_result for prompt_result in result.prompt_results]
+    if result.synthesis_loop_result is not None:
+        candidate_loop_results.append(result.synthesis_loop_result)
+
+    for loop_result in reversed(candidate_loop_results):
+        for row in reversed(loop_result.run_log):
+            if row.type != "tool_result" or row.tool_name not in {"note_edit", "note_write"}:
+                continue
+            if isinstance(row.content, dict):
+                return row.tool_name, row.content
+    return None
 
 
 def _web_result_to_browser_result(result: SearchResult) -> BrowserResearchResult:

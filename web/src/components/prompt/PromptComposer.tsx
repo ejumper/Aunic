@@ -1,5 +1,13 @@
-import { useCallback, type CSSProperties } from "react";
+import { useCallback, useEffect, type CSSProperties } from "react";
+import {
+  closeBrowserFind,
+  findNextBrowserMatch,
+  findPreviousBrowserMatch,
+  openBrowserFind,
+  setBrowserFindReplaceMode,
+} from "../../browserFind";
 import { useExplorerStore } from "../../state/explorer";
+import { useFindStore } from "../../state/find";
 import { useNoteEditorStore } from "../../state/noteEditor";
 import { usePromptStore } from "../../state/prompt";
 import { useSessionStore } from "../../state/session";
@@ -16,6 +24,7 @@ import { IndicatorLine } from "./IndicatorLine";
 import { ModeSwitcher } from "./ModeSwitcher";
 import { ModelPicker } from "./ModelPicker";
 import { PermissionPrompt } from "./PermissionPrompt";
+import { PromptFind } from "./PromptFind";
 import { PromptEditor } from "./PromptEditor";
 import { SendCancelControls } from "./SendCancelControls";
 import { WorkModeSwitcher } from "./WorkModeSwitcher";
@@ -35,6 +44,7 @@ export function PromptComposer() {
   const draft = usePromptStore((store) => store.draft);
   const documentVersion = usePromptStore((store) => store.documentVersion);
   const submitting = usePromptStore((store) => store.submitting);
+  const findActive = useFindStore((store) => store.active);
   const setDraft = usePromptStore((store) => store.setDraft);
   const submit = usePromptStore((store) => store.submit);
   const cancel = usePromptStore((store) => store.cancel);
@@ -93,10 +103,6 @@ export function PromptComposer() {
     [clearPendingPermission, client, pendingPermission, setIndicatorMessage],
   );
 
-  if (!openFile) {
-    return null;
-  }
-
   const controlsDisabled = runActive || !session;
   const researchState = session?.research_state;
   const researchActive =
@@ -109,6 +115,87 @@ export function PromptComposer() {
     draft.trim().length > 0;
   const contextMeter = contextMeterState(session, currentDoc);
 
+  useEffect(() => {
+    if (!openFile) {
+      return;
+    }
+
+    function focusFindInput() {
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>(".prompt-find__input");
+        input?.focus();
+        input?.select();
+      });
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (pendingPermission || researchActive) {
+        return;
+      }
+      const activeElement = document.activeElement;
+      const eligibleTarget =
+        activeElement === document.body ||
+        (activeElement instanceof HTMLElement &&
+          Boolean(
+            activeElement.closest(".code-editor-host") ||
+              activeElement.closest(".prompt-editor-host") ||
+              activeElement.closest(".prompt-find"),
+          ));
+      if (!eligibleTarget) {
+        return;
+      }
+
+      const modKey = event.ctrlKey || event.metaKey;
+      const lowerKey = event.key.toLowerCase();
+      const inFindUi =
+        activeElement instanceof HTMLElement && Boolean(activeElement.closest(".prompt-find"));
+      const inNoteEditor =
+        activeElement instanceof HTMLElement && Boolean(activeElement.closest(".code-editor-host"));
+
+      if (modKey && lowerKey === "f" && !event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (useFindStore.getState().active && inFindUi) {
+          setBrowserFindReplaceMode(!useFindStore.getState().replaceMode);
+        } else {
+          openBrowserFind();
+        }
+        focusFindInput();
+        return;
+      }
+
+      if (
+        event.key === "F3" ||
+        (modKey && lowerKey === "g" && !event.altKey)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.shiftKey) {
+          findPreviousBrowserMatch();
+        } else {
+          findNextBrowserMatch();
+        }
+        return;
+      }
+
+      if (event.key === "Escape" && useFindStore.getState().active) {
+        if (!inFindUi && !inNoteEditor) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        closeBrowserFind({ restoreFocus: inNoteEditor ? "note" : "prompt" });
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  }, [openFile, pendingPermission, researchActive]);
+
+  if (!openFile) {
+    return null;
+  }
+
   return (
     <section className="prompt-composer" aria-label="Prompt composer">
       {pendingPermission ? (
@@ -120,6 +207,8 @@ export function PromptComposer() {
       <div className="prompt-message-block">
         {researchActive && !pendingPermission && researchState ? (
           <ResearchPicker client={client} activeFile={openFile} research={researchState} />
+        ) : findActive ? (
+          <PromptFind />
         ) : (
           <>
             <PromptEditor

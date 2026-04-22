@@ -28,15 +28,19 @@ import {
   keymap,
   lineNumbers,
 } from "@codemirror/view";
-import { highlightSelectionMatches, searchKeymap } from "@codemirror/search";
+import { highlightSelectionMatches, search } from "@codemirror/search";
+import { useFindStore } from "../../state/find";
+import { syncBrowserFindMeasurements, syncBrowserFindQuery } from "../../browserFind";
 import { useExplorerStore } from "../../state/explorer";
 import { useNoteEditorStore } from "../../state/noteEditor";
+import { useSessionStore } from "../../state/session";
 import { useWs } from "../../ws/context";
 import { noteEditorRef } from "../../noteEditorRef";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { activeLineRawMarkdown } from "./extensions/activeLineRawMarkdown";
 import { markdownTablesExt } from "./extensions/markdownTables";
 import { aunicTheme } from "./extensions/aunicTheme";
+import { browserFindSyncExt } from "./extensions/browserFindSync";
 import { editCommandMarkersExt } from "./extensions/editCommandMarkers";
 import { fourSpaceIndent } from "./extensions/fourSpaceIndent";
 import { applyManagedSectionAutoFolds } from "./extensions/managedSectionAutoFold";
@@ -44,18 +48,27 @@ import { selectionSnapshotExt } from "./extensions/selectionSnapshot";
 import { selectionTrackerExt } from "./extensions/selectionTracker";
 import { softWrapIndent } from "./extensions/softWrapIndent";
 
+const AUTO_SAVE_DELAY_MS = 1200;
+
 export function NoteEditor() {
   const { client } = useWs();
   const openFile = useExplorerStore((store) => store.openFile);
+  const session = useSessionStore((store) => store.session);
+  const runActive = useSessionStore((store) => store.runActive);
   const path = useNoteEditorStore((store) => store.path);
   const initialDoc = useNoteEditorStore((store) => store.initialDoc);
   const currentDoc = useNoteEditorStore((store) => store.currentDoc);
+  const dirty = useNoteEditorStore((store) => store.dirty);
   const status = useNoteEditorStore((store) => store.status);
   const error = useNoteEditorStore((store) => store.error);
   const notice = useNoteEditorStore((store) => store.notice);
   const conflict = useNoteEditorStore((store) => store.conflict);
   const externalReloadPending = useNoteEditorStore((store) => store.externalReloadPending);
   const documentVersion = useNoteEditorStore((store) => store.documentVersion);
+  const findActive = useFindStore((store) => store.active);
+  const findText = useFindStore((store) => store.findText);
+  const replaceText = useFindStore((store) => store.replaceText);
+  const caseSensitive = useFindStore((store) => store.caseSensitive);
   const loadForPath = useNoteEditorStore((store) => store.loadForPath);
   const markDirty = useNoteEditorStore((store) => store.markDirty);
   const save = useNoteEditorStore((store) => store.save);
@@ -65,6 +78,7 @@ export function NoteEditor() {
   const reset = useNoteEditorStore((store) => store.reset);
   const viewRef = useRef<EditorView | null>(null);
   const saveRef = useRef<() => void>(() => {});
+  const autoSaveEnabled = session?.editor_settings?.save_mode === "auto";
 
   useEffect(() => {
     if (!openFile) {
@@ -93,6 +107,36 @@ export function NoteEditor() {
     return () => clearTimeout(timer);
   }, [clearNotice, notice]);
 
+  useEffect(() => {
+    if (
+      !autoSaveEnabled ||
+      !path ||
+      !dirty ||
+      status === "loading" ||
+      status === "saving" ||
+      runActive ||
+      conflict !== null ||
+      externalReloadPending !== null
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      void save(client, currentDoc);
+    }, AUTO_SAVE_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [
+    autoSaveEnabled,
+    client,
+    conflict,
+    currentDoc,
+    dirty,
+    externalReloadPending,
+    path,
+    runActive,
+    save,
+    status,
+  ]);
+
   saveRef.current = () => {
     const doc = viewRef.current?.state.doc.toString() ?? currentDoc;
     void save(client, doc);
@@ -106,12 +150,19 @@ export function NoteEditor() {
     };
   }, []);
 
+  useEffect(() => {
+    syncBrowserFindQuery(viewRef.current);
+    syncBrowserFindMeasurements(viewRef.current);
+  }, [caseSensitive, documentVersion, findActive, findText, replaceText]);
+
   const handleReady = useCallback((view: EditorView) => {
     viewRef.current = view;
     noteEditorRef.set(view);
     requestAnimationFrame(() => {
       if (viewRef.current === view) {
         applyManagedSectionAutoFolds(view);
+        syncBrowserFindQuery(view);
+        syncBrowserFindMeasurements(view);
       }
     });
   }, []);
@@ -160,22 +211,38 @@ export function NoteEditor() {
 
       {conflict ? (
         <div className="editor-banner editor-banner-conflict" role="alert">
-          <p>The file changed before this save completed.</p>
-          <div>
-            <button type="button" onClick={() => resolveConflictWithCurrentDoc("reload")}>
-              Reload Their Version
-            </button>
-            <button type="button" onClick={() => resolveConflictWithCurrentDoc("overwrite")}>
-              Overwrite
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => resolveConflictWithCurrentDoc("cancel")}
-            >
-              Cancel
-            </button>
-          </div>
+          {conflict.reason === "model_update" ? (
+            <>
+              <p>Your note changed during the run. Choose whether the model update or your edits should win.</p>
+              <div>
+                <button type="button" onClick={() => resolveConflictWithCurrentDoc("reload")}>
+                  Use Model Version
+                </button>
+                <button type="button" onClick={() => resolveConflictWithCurrentDoc("overwrite")}>
+                  Keep Mine
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <p>The file changed before this save completed.</p>
+              <div>
+                <button type="button" onClick={() => resolveConflictWithCurrentDoc("reload")}>
+                  Reload Their Version
+                </button>
+                <button type="button" onClick={() => resolveConflictWithCurrentDoc("overwrite")}>
+                  Overwrite
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => resolveConflictWithCurrentDoc("cancel")}
+                >
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
         </div>
       ) : null}
 
@@ -232,6 +299,8 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
     activeLineRawMarkdown(),
     highlightActiveLine(),
     highlightSelectionMatches(),
+    search(),
+    browserFindSyncExt(),
     keymap.of([
       {
         key: "Mod-s",
@@ -245,7 +314,6 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
       ...defaultKeymap,
       ...historyKeymap,
       ...foldKeymap,
-      ...searchKeymap,
     ]),
     aunicTheme(),
   ];

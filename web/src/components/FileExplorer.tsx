@@ -7,6 +7,7 @@ import {
   type Selection,
 } from "react-aria-components";
 import { useExplorerStore, parentDir, ROOT_DIR } from "../state/explorer";
+import { useNoteEditorStore } from "../state/noteEditor";
 import { useSessionStore } from "../state/session";
 import { useConnectionState, useWs } from "../ws/context";
 import type { FileEntryPayload } from "../ws/types";
@@ -70,10 +71,11 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
     }
 
     const path = String(selectedKey);
-    select(path);
     if (entryMap.get(path)?.kind === "file") {
-      openFile(path);
+      void openFile(path);
+      return;
     }
+    select(path);
   }
 
   function handleExpandedChange(keys: Set<Key>) {
@@ -88,13 +90,38 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
   async function handleEntryAction(entry: FileEntryPayload) {
     setActionError(null);
     if (entry.kind === "file") {
-      openFile(entry.path);
+      await openFile(entry.path);
       return;
     }
     await toggleExpand(client, entry.path);
   }
 
-  function openFile(path: string) {
+  async function flushAutosaveBeforeNavigation(message: string): Promise<boolean> {
+    const noteState = useNoteEditorStore.getState();
+    const currentSession = useSessionStore.getState();
+    if (
+      currentSession.session?.editor_settings?.save_mode !== "auto" ||
+      !noteState.path ||
+      !noteState.dirty
+    ) {
+      return true;
+    }
+    if (currentSession.runActive) {
+      setActionError("Wait for the current run to finish before switching files. Autosave is paused during runs.");
+      return false;
+    }
+    const saved = await noteState.save(client, noteState.currentDoc);
+    if (!saved) {
+      setActionError(message);
+      return false;
+    }
+    return true;
+  }
+
+  async function openFile(path: string) {
+    if (!(await flushAutosaveBeforeNavigation("Autosave failed before switching files."))) {
+      return;
+    }
     open(path);
     onOpenFile?.();
   }
@@ -114,6 +141,9 @@ export function FileExplorer({ onOpenFile }: FileExplorerProps) {
     setActionError(null);
     try {
       if (createIntent.kind === "file") {
+        if (!(await flushAutosaveBeforeNavigation("Autosave failed before creating the new file."))) {
+          return;
+        }
         await createFile(client, createIntent.dirPath, newName);
       } else {
         await createDirectory(client, createIntent.dirPath, newName);

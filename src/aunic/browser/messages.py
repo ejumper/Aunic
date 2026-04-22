@@ -45,6 +45,7 @@ SERVER_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "session_state",
         "progress_event",
+        "note_tool_result",
         "transcript_row",
         "file_changed",
         "permission_request",

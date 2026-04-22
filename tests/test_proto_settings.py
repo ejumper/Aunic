@@ -6,6 +6,7 @@ import pytest
 
 from aunic.context.file_manager import FileManager
 from aunic.proto_settings import (
+    get_editor_save_mode,
     get_openai_compatible_profiles,
     get_selected_openai_compatible_profile_id,
     get_tool_policy_override,
@@ -54,6 +55,27 @@ def test_get_tool_policy_override_supports_mcp_server_prefix(tmp_path: Path) -> 
 
     assert get_tool_policy_override(tmp_path, "mcp__github__search") == "allow"
     assert get_tool_policy_override(tmp_path, "mcp__github__create_issue") == "deny"
+
+
+def test_get_editor_save_mode_defaults_to_manual(tmp_path: Path) -> None:
+    assert get_editor_save_mode(tmp_path) == "manual"
+
+
+def test_get_editor_save_mode_reads_auto_value(tmp_path: Path) -> None:
+    settings_dir = tmp_path / ".aunic"
+    settings_dir.mkdir()
+    (settings_dir / "proto-settings.json").write_text(
+        (
+            "{\n"
+            '  "editor": {\n'
+            '    "save_mode": "auto"\n'
+            "  }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    assert get_editor_save_mode(tmp_path) == "auto"
 
 
 def test_proto_settings_resolve_from_nearest_ancestor(tmp_path: Path) -> None:

@@ -126,6 +126,14 @@ export function aunicTheme(): Extension {
           borderBottomLeftRadius: "6px",
           borderBottomRightRadius: "6px",
         },
+        ".cm-searchMatch": {
+          backgroundColor: "hsla(49, 95%, 64%, 0.2)",
+          outline: "1px solid hsla(49, 95%, 64%, 0.32)",
+        },
+        ".cm-searchMatch.cm-searchMatch-selected": {
+          backgroundColor: "hsla(142, 68%, 46%, 0.26)",
+          outline: "1px solid hsla(142, 68%, 58%, 0.48)",
+        },
         ".cm-aunic-table-wrap": {
           padding: "0.2rem 1rem",
           cursor: "text",

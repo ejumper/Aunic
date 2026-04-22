@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,7 @@ import pytest
 from aunic.browser.errors import BrowserError, RevisionConflict
 from aunic.browser.session import BrowserSession
 from aunic.context import FileManager
+from aunic.domain import TranscriptRow
 from aunic.model_options import ModelOption
 from aunic.progress import ProgressEvent
 from aunic.research.types import (
@@ -83,6 +85,36 @@ class PermissionNoteRunner:
             )
         )
         return object()
+
+
+class NoteToolResultRunner:
+    async def run(self, request: Any) -> object:
+        request.active_file.write_text("alpha\nBETA\ngamma\n", encoding="utf-8")
+        snapshot = await FileManager().read_snapshot(request.active_file)
+        row = TranscriptRow(
+            row_number=1,
+            role="tool",
+            type="tool_result",
+            tool_name="note_edit",
+            tool_id="note_1",
+            content={
+                "type": "note_content_edit",
+                "old_string": "beta",
+                "new_string": "BETA",
+                "actual_old_string": "beta",
+                "replace_all": False,
+                "original_content": "alpha\nbeta\ngamma\n",
+            },
+        )
+        return SimpleNamespace(
+            prompt_results=(
+                SimpleNamespace(
+                    loop_result=SimpleNamespace(run_log=(row,)),
+                ),
+            ),
+            synthesis_loop_result=None,
+            final_file_snapshots=(snapshot,),
+        )
 
 
 class FakeSearchService:
@@ -755,6 +787,25 @@ async def test_submit_prompt_broadcasts_run_state_and_progress(tmp_path: Path) -
     assert any(event["type"] == "progress_event" for event in conn.events)
     assert conn.events[-1]["type"] == "session_state"
     assert conn.events[-1]["payload"]["run_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_submit_prompt_broadcasts_note_tool_result_for_note_mode_runs(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
+    session = _session(tmp_path, note_runner=NoteToolResultRunner())
+    conn = FakeConnection()
+    await session.attach(conn)  # type: ignore[arg-type]
+
+    await session.submit_prompt(active_file="note.md", included_files=[], text="Do it")
+    await _wait_for(lambda: not session.run_active)
+    await session.shutdown()
+
+    event = next(item for item in conn.events if item["type"] == "note_tool_result")
+    assert event["payload"]["path"] == "note.md"
+    assert event["payload"]["tool_name"] == "note_edit"
+    assert event["payload"]["content"]["new_string"] == "BETA"
+    assert event["payload"]["snapshot"]["note_content"] == "alpha\nBETA\ngamma\n"
 
 
 @pytest.mark.asyncio
