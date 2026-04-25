@@ -3,6 +3,7 @@ import {
   useNoteEditorStore,
   type NoteEditorWsClient,
 } from "./noteEditor";
+import { useSessionStore } from "./session";
 import type { ClientRequestType, RequestPayload, RequestResponse } from "../ws/requests";
 import type { FileSnapshotPayload, NoteToolResultEventPayload } from "../ws/types";
 import type { WsRequestError } from "../ws/client";
@@ -15,6 +16,7 @@ type RequestRecord = {
 describe("useNoteEditorStore", () => {
   beforeEach(() => {
     useNoteEditorStore.getState().reset();
+    useSessionStore.getState().clearSession();
   });
 
   it("loadForPath populates initial document and revision", async () => {

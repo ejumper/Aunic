@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from aunic.context.types import ContextBuildResult, PromptRun
-from aunic.domain import ReasoningEffort, TranscriptRow, UsageLog
+from aunic.domain import ProviderImageInput, ReasoningEffort, TranscriptRow, UsageLog
 from aunic.loop import LoopEvent, LoopRunRequest, LoopRunResult, ToolLoop
 from aunic.providers.base import LLMProvider
 from aunic.tools import OUTSIDE_NOTE_TOOL_NAMES, build_note_only_registry
@@ -78,6 +78,7 @@ async def run_synthesis_pass(
     prompt_run: PromptRun,
     active_file,
     included_files,
+    persistent_images: tuple[ProviderImageInput, ...],
     model: str | None,
     reasoning_effort: ReasoningEffort | None,
     progress_sink: Any,
@@ -113,6 +114,7 @@ async def run_synthesis_pass(
             context_result=synthesis_context_result,
             active_file=active_file,
             included_files=included_files,
+            persistent_images=persistent_images,
             tool_registry=build_note_only_registry(),
             model=model,
             reasoning_effort=reasoning_effort,

@@ -80,6 +80,85 @@ describe("useExplorerStore", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it("openProjectFile keeps the source anchor while changing the displayed file", () => {
+    useExplorerStore.setState({
+      openFile: "notes/source.md",
+      sourceFile: "notes/source.md",
+      selected: "notes/source.md",
+    });
+
+    useExplorerStore.getState().openProjectFile("notes/child.md", "child-node");
+
+    expect(useExplorerStore.getState().sourceFile).toBe("notes/source.md");
+    expect(useExplorerStore.getState().openFile).toBe("notes/child.md");
+    expect(useExplorerStore.getState().projectSelected).toBe("child-node");
+  });
+
+  it("createProjectFile creates relative to the source file and keeps the source anchor", async () => {
+    const requests: RequestRecord[] = [];
+    useExplorerStore.setState({
+      openFile: "notes/source.md",
+      sourceFile: "notes/source.md",
+      entriesByDir: {
+        notes: [{ name: "source.md", kind: "file", path: "notes/source.md" }],
+      },
+    });
+    const client = mockClient(async (type, payload) => {
+      requests.push({ type, payload });
+      if (type === "create_file") {
+        return fileSnapshot("notes/new.md");
+      }
+      if (type === "add_include") {
+        return {
+          source_file: "notes/source.md",
+          entries: [
+            {
+              id: "entry:notes/new.md",
+              path: "notes/new.md",
+              name: "new.md",
+              kind: "file",
+              scope: "entry",
+              active: true,
+              effective_active: true,
+              checkable: true,
+              removable: true,
+              exists: true,
+              openable: true,
+              recursive: false,
+              children: [],
+            },
+          ],
+          plans: [],
+          active_plan_id: null,
+        };
+      }
+      return {
+        path: "notes",
+        entries: [
+          { name: "source.md", kind: "file", path: "notes/source.md" },
+          { name: "new.md", kind: "file", path: "notes/new.md" },
+        ],
+      };
+    });
+
+    await useExplorerStore.getState().createProjectFile(client, "new.md");
+
+    expect(requests).toEqual([
+      { type: "create_file", payload: { path: "notes/new.md" } },
+      {
+        type: "add_include",
+        payload: {
+          source_file: "notes/source.md",
+          target_path: "notes/new.md",
+          recursive: false,
+        },
+      },
+      { type: "list_files", payload: { subpath: "notes" } },
+    ]);
+    expect(useExplorerStore.getState().sourceFile).toBe("notes/source.md");
+    expect(useExplorerStore.getState().openFile).toBe("notes/new.md");
+  });
+
   it("deleteEntry removes cached descendants after backend ack", async () => {
     useExplorerStore.setState({
       entriesByDir: {
@@ -103,6 +182,60 @@ describe("useExplorerStore", () => {
     expect(useExplorerStore.getState().expanded.size).toBe(0);
     expect(useExplorerStore.getState().selected).toBeNull();
     expect(useExplorerStore.getState().openFile).toBeNull();
+  });
+
+  it("deletePlan returns to the source file when deleting the open plan", async () => {
+    const requests: RequestRecord[] = [];
+    useExplorerStore.setState({
+      sourceFile: "notes/source.md",
+      openFile: ".aunic/plans/browser-plan.md",
+      selected: ".aunic/plans/browser-plan.md",
+      projectSelected: "plan:2026-04-23-browser-plan",
+      projectState: {
+        source_file: "notes/source.md",
+        entries: [],
+        plans: [
+          {
+            id: "plan:2026-04-23-browser-plan",
+            plan_id: "2026-04-23-browser-plan",
+            path: ".aunic/plans/browser-plan.md",
+            name: "browser-plan.md",
+            title: "Browser Plan",
+            status: "draft",
+            active: true,
+            exists: true,
+            openable: true,
+          },
+        ],
+        active_plan_id: "2026-04-23-browser-plan",
+      },
+    });
+    const client = mockClient(async (type, payload) => {
+      requests.push({ type, payload });
+      return {
+        source_file: "notes/source.md",
+        entries: [],
+        plans: [],
+        active_plan_id: null,
+      };
+    });
+
+    await useExplorerStore.getState().deletePlan(client, "2026-04-23-browser-plan");
+
+    expect(requests).toEqual([
+      {
+        type: "delete_plan",
+        payload: {
+          source_file: "notes/source.md",
+          plan_id: "2026-04-23-browser-plan",
+        },
+      },
+    ]);
+    expect(useExplorerStore.getState().sourceFile).toBe("notes/source.md");
+    expect(useExplorerStore.getState().openFile).toBe("notes/source.md");
+    expect(useExplorerStore.getState().selected).toBe("notes/source.md");
+    expect(useExplorerStore.getState().projectSelected).toBeNull();
+    expect(useExplorerStore.getState().projectState?.plans).toEqual([]);
   });
 
   it("handleFileChanged refreshes cached parent directories", async () => {

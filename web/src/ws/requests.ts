@@ -4,13 +4,18 @@ import type {
   PermissionResolution,
   BrowserMode,
   ModelOptionPayload,
+  PromptImageAttachmentPayload,
   WorkMode,
   SessionStatePayload,
+  ProjectStatePayload,
 } from "./types";
 
 export interface ClientRequestMap {
   hello: {
-    payload: Record<string, never>;
+    payload: {
+      instance_id: string;
+      page_id: string;
+    };
     response: SessionStatePayload;
   };
   list_files: {
@@ -29,9 +34,69 @@ export interface ClientRequestMap {
     payload: { path: string };
     response: { path: string; kind: "dir" };
   };
+  rename_entry: {
+    payload: { path: string; new_name: string };
+    response: { path: string; old_path: string; kind: "file" | "dir" };
+  };
   delete_entry: {
     payload: { path: string };
     response: { path: string; kind: "file" | "dir" };
+  };
+  get_project_state: {
+    payload: { source_file: string };
+    response: ProjectStatePayload;
+  };
+  add_include: {
+    payload: {
+      source_file: string;
+      target_path: string;
+      recursive?: boolean;
+    };
+    response: ProjectStatePayload;
+  };
+  create_plan: {
+    payload: {
+      source_file: string;
+      title: string;
+    };
+    response: ProjectStatePayload;
+  };
+  delete_plan: {
+    payload: {
+      source_file: string;
+      plan_id: string;
+    };
+    response: ProjectStatePayload;
+  };
+  remove_include_entry: {
+    payload: {
+      source_file: string;
+      include_path: string;
+    };
+    response: ProjectStatePayload;
+  };
+  set_active_plan: {
+    payload: {
+      source_file: string;
+      plan_id: string | null;
+    };
+    response: ProjectStatePayload;
+  };
+  set_include_entry_active: {
+    payload: {
+      source_file: string;
+      include_path: string;
+      active: boolean;
+    };
+    response: ProjectStatePayload;
+  };
+  set_project_child_active: {
+    payload: {
+      source_file: string;
+      child_path: string;
+      active: boolean;
+    };
+    response: ProjectStatePayload;
   };
   delete_transcript_row: {
     payload: {
@@ -78,6 +143,7 @@ export interface ClientRequestMap {
       active_file: string;
       included_files: string[];
       text: string;
+      image_attachments: PromptImageAttachmentPayload[];
     };
     response: { run_id: string };
   };

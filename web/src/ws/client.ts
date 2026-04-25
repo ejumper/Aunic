@@ -18,6 +18,7 @@ export interface WsClientOptions {
   onStateChange?: (state: ConnectionState) => void;
   onDiagnostics?: (diagnostics: WsDiagnostics) => void;
   onOutgoing?: (env: ClientEnvelope) => void;
+  helloPayload?: RequestPayload<"hello"> | (() => RequestPayload<"hello">);
   webSocketCtor?: WebSocketConstructor;
 }
 
@@ -78,6 +79,7 @@ export class WsClient {
   private readonly onStateChange?: (state: ConnectionState) => void;
   private readonly onDiagnostics?: (diagnostics: WsDiagnostics) => void;
   private readonly initialOutgoingHandler?: (env: ClientEnvelope) => void;
+  private readonly helloPayload?: RequestPayload<"hello"> | (() => RequestPayload<"hello">);
   private readonly webSocketCtor: WebSocketConstructor;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly eventHandlers = new Map<ServerEventType, Set<(payload: unknown) => void>>();
@@ -99,6 +101,7 @@ export class WsClient {
     this.onStateChange = options.onStateChange;
     this.onDiagnostics = options.onDiagnostics;
     this.initialOutgoingHandler = options.onOutgoing;
+    this.helloPayload = options.helloPayload;
     if (options.onOutgoing) {
       this.outgoingHandlers.add(options.onOutgoing);
     }
@@ -229,10 +232,17 @@ export class WsClient {
     this.updateDiagnostics({ lastOpenAt: new Date().toISOString() });
     this.setState("open");
     if (this.autoHelloOnOpen) {
-      void this.request("hello", {}).catch(() => {
+      void this.request("hello", this.resolveHelloPayload()).catch(() => {
         // The connection state already reflects transport health; the UI can send hello manually.
       });
     }
+  }
+
+  private resolveHelloPayload(): RequestPayload<"hello"> {
+    if (typeof this.helloPayload === "function") {
+      return this.helloPayload();
+    }
+    return this.helloPayload ?? { instance_id: "", page_id: "" };
   }
 
   private handleMessage(event: MessageEvent): void {

@@ -139,7 +139,7 @@ describe("NoteEditor", () => {
       "show ipv6 route",
     );
     expect(container.querySelectorAll(".cm-aunic-code-block-line").length).toBe(3);
-    expect(container.querySelectorAll(".cm-aunic-hidden-markup").length).toBeGreaterThanOrEqual(4);
+    expect(container.querySelectorAll(".cm-aunic-hidden-markup").length).toBe(0);
   });
 
   it("keeps active markdown headings sized while showing the raw marker", async () => {
@@ -273,6 +273,7 @@ function fileSnapshot(
 
 function sessionState(saveMode: "manual" | "auto") {
   return {
+    instance_id: "instance-1",
     run_active: false,
     run_id: null,
     workspace_root: "/workspace",

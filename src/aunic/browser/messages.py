@@ -32,7 +32,16 @@ CLIENT_MESSAGE_TYPES: frozenset[str] = frozenset(
         "resolve_permission",
         "create_file",
         "create_directory",
+        "rename_entry",
         "delete_entry",
+        "get_project_state",
+        "add_include",
+        "create_plan",
+        "delete_plan",
+        "remove_include_entry",
+        "set_active_plan",
+        "set_include_entry_active",
+        "set_project_child_active",
         "delete_transcript_row",
         "delete_search_result",
         "set_mode",
@@ -190,6 +199,8 @@ def serialize_model_option(option: ModelOption) -> dict[str, Any]:
         "model": option.model,
         "profile_id": option.profile_id,
         "context_window": option.context_window,
+        "supports_images": option.supports_images,
+        "image_transport": option.image_transport,
     }
 
 

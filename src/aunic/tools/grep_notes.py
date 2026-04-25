@@ -69,7 +69,7 @@ def build_grep_notes_tool_registry() -> tuple[ToolDefinition[Any], ...]:
                             "type": "string",
                             "description": (
                                 "Absolute path (or ~-prefixed, or relative to cwd) restricting "
-                                "the walk to a subtree. Defaults to the user home directory."
+                                "the walk to a subtree. Defaults to the current workspace/context."
                             ),
                         },
                         "case_sensitive": {
@@ -228,7 +228,7 @@ async def execute_grep_notes(
         )
 
     # Walk notes
-    notes = resolve_note_set(scope_path)
+    notes = resolve_note_set(scope_path, fallback_root=runtime.session_state.cwd)
     scanned = len(notes)
 
     collection_cap = _COLLECTION_CAP_MULTIPLIER * args.limit

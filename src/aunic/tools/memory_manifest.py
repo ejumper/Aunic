@@ -23,11 +23,11 @@ MEMORY_TOOL_HINTS: dict[str, str] = {
         "distinguish \"where did I write about X\" from \"where did I actually do X\"."
     ),
     "read_map": (
-        "read_map: read the user's pre-built index of every Aunic note on this system "
-        "(~/.aunic/map.md). Each entry is a path + short summary. Reach for this when you do "
-        "not yet know a specific query or phrase to search for, and want to browse the user's "
-        "notes by topic. Pass scope=<path> to get only the subtree relevant to the current "
-        "task. If the index is missing, tell the user to run /map."
+        "read_map: read the canonical note map for the current workspace/context. "
+        "Each entry is a path + short summary. Reach for this when you do not yet "
+        "know a specific query or phrase to search for, and want to browse the "
+        "user's notes by topic. Pass scope=<path> to get only the subtree relevant "
+        "to the current task."
     ),
     "rag_search": (
         "rag_search: search the local RAG knowledge base across indexed scopes. "

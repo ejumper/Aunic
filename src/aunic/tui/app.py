@@ -29,6 +29,12 @@ from prompt_toolkit.widgets import Box, Button, Dialog, Frame, Label, RadioList,
 from prompt_toolkit.document import Document
 
 from aunic.context import FileManager
+from aunic.file_ui_state import (
+    load_file_ui_state,
+    load_project_include_state,
+    save_file_ui_state,
+    serialize_include_entries,
+)
 from aunic.modes import ChatModeRunner, NoteModeRunner
 from aunic.tui.controller import TuiController
 from aunic.tui.types import IncludeEntry, SleepStatusState
@@ -96,7 +102,7 @@ class AunicTuiApp:
             chat_runner=chat_runner,
         )
         self.controller.state.mode = initial_mode  # type: ignore[assignment]
-        file_ui_state = _load_tui_file_state(active_file)
+        file_ui_state = load_file_ui_state(active_file)
         if isinstance(file_ui_state.get("transcript_open"), bool):
             self.controller.state.transcript_open = file_ui_state["transcript_open"]
         if isinstance(file_ui_state.get("transcript_maximized"), bool):
@@ -105,33 +111,36 @@ class AunicTuiApp:
             self.controller.state.mode = file_ui_state["mode"]  # type: ignore[assignment]
         if isinstance(file_ui_state.get("work_mode"), str):
             self.controller.state.work_mode = file_ui_state["work_mode"]  # type: ignore[assignment]
-        raw_includes = file_ui_state.get("includes")
-        if isinstance(raw_includes, list):
-            self.controller.state.include_entries = _deserialize_include_entries(raw_includes)
+        project_state = load_project_include_state(active_file)
+        self.controller.state.include_entries = list(project_state.include_entries)
+        self.controller.state.include_inactive_children = project_state.inactive_children
+        if project_state.include_entries:
             self.controller._rebuild_available_files()
 
         def _save_file_ui_state(path: Path) -> None:
-            _save_tui_file_state(
+            save_file_ui_state(
                 path,
                 {
                     "transcript_open": self.controller.state.transcript_open,
                     "transcript_maximized": self.controller.transcript_view_state.maximized,
                     "mode": self.controller.state.mode,
                     "work_mode": self.controller.state.work_mode,
-                    "includes": _serialize_include_entries(self.controller.state.include_entries),
+                    "includes": serialize_include_entries(self.controller.state.include_entries),
+                    "project_inactive_children": list(self.controller.state.include_inactive_children),
                 },
             )
 
         def _on_file_switched(new_path: Path) -> None:
-            new_state = _load_tui_file_state(new_path)
+            new_state = load_file_ui_state(new_path)
             self.controller.state.transcript_open = bool(new_state.get("transcript_open", True))
             self.controller.transcript_view_state.maximized = bool(new_state.get("transcript_maximized", False))
             if isinstance(new_state.get("mode"), str):
                 self.controller.state.mode = new_state["mode"]  # type: ignore[assignment]
             if isinstance(new_state.get("work_mode"), str):
                 self.controller.state.work_mode = new_state["work_mode"]  # type: ignore[assignment]
-            raw = new_state.get("includes")
-            self.controller.state.include_entries = _deserialize_include_entries(raw) if isinstance(raw, list) else []
+            project_state = load_project_include_state(new_path)
+            self.controller.state.include_entries = list(project_state.include_entries)
+            self.controller.state.include_inactive_children = project_state.inactive_children
             self.controller._rebuild_available_files()
 
         self.controller._on_transcript_open_changed = lambda _open_state: _save_file_ui_state(self.controller.state.context_file or self.controller.state.active_file)
@@ -236,6 +245,10 @@ class AunicTuiApp:
         self.indicator_window = Window(
             FormattedTextControl(text=self._indicator_fragments, focusable=False),
             height=1,
+        )
+        self._attachment_control_window = self._control_window(
+            self._attachment_control_fragments,
+            lambda: self._background(self.controller.attach_prompt_images_via_picker()),
         )
         self._model_control_window = self._control_window(self._model_control_fragments, self._open_model_picker)
         self._work_control_window = self._control_window(self._work_control_fragments, self.controller.toggle_work_mode)
@@ -855,6 +868,7 @@ class AunicTuiApp:
             [
                 VSplit(
                     [
+                        self._attachment_control_window,
                         self._model_control_window,
                         self._work_control_window,
                         self._mode_control_window,
@@ -1454,7 +1468,24 @@ class AunicTuiApp:
         if self.controller.state.run_in_progress and self.controller.state.sleep_status is not None:
             return [("class:indicator.status", _sleep_banner(self.controller.state.sleep_status))]
         style = "class:indicator.error" if self.controller.state.indicator_kind == "error" else "class:indicator.status"
-        return [(style, self.controller.state.indicator_message)]
+        fragments = [(style, self.controller.state.indicator_message)]
+        for index, attachment in enumerate(self.controller.state.prompt_image_attachments):
+            fragments.extend(
+                [
+                    ("", " "),
+                    ("class:indicator.attachment", "["),
+                    (
+                        "class:indicator.attachment.remove",
+                        "x",
+                        lambda event, idx=index: self._fragment_click(
+                            event,
+                            lambda: self.controller.remove_prompt_image_attachment(idx),
+                        ),
+                    ),
+                    ("class:indicator.attachment", f" {_truncate_attachment_name(attachment.name)}]"),
+                ]
+            )
+        return fragments
 
     def _send_control_fragments(self):
         if self.controller.state.run_in_progress:
@@ -1504,6 +1535,20 @@ class AunicTuiApp:
         if self.controller.state.web_mode != "idle":
             return [("class:control.disabled", f"[ {self.controller.state.selected_model.label} ]")]
         return [("class:control", f"[ {self.controller.state.selected_model.label} ]", lambda event: self._fragment_click(event, self._open_model_picker))]
+
+    def _attachment_control_fragments(self):
+        if not self.controller.state.selected_model.supports_images:
+            return [("class:control.disabled", "[ + ]")]
+        return [
+            (
+                "class:control",
+                "[ + ]",
+                lambda event: self._fragment_click(
+                    event,
+                    lambda: self._background(self.controller.attach_prompt_images_via_picker()),
+                ),
+            )
+        ]
 
     def _fragment_click(self, mouse_event, callback) -> None:
         if mouse_event.event_type != MouseEventType.MOUSE_UP:
@@ -1821,10 +1866,6 @@ class ModelPickerView:
 
 _TUI_PREFS_PATH = Path.home() / ".aunic" / "tui_prefs.json"
 
-
-_MAX_FILE_STATE_ENTRIES = 100
-
-
 def _read_tui_prefs() -> dict:
     try:
         return json.loads(_TUI_PREFS_PATH.read_text())
@@ -1861,55 +1902,6 @@ def _save_tui_model_pref(provider: str, model: str, profile_id: str | None = Non
     else:
         data["profile_id"] = profile_id
     _write_tui_prefs(data)
-
-
-def _load_tui_file_state(file_path: Path) -> dict:
-    data = _read_tui_prefs()
-    file_state = data.get("file_state")
-    if not isinstance(file_state, dict):
-        return {}
-    key = str(file_path.resolve())
-    entry = file_state.get(key)
-    return entry if isinstance(entry, dict) else {}
-
-
-def _save_tui_file_state(file_path: Path, state: dict) -> None:
-    data = _read_tui_prefs()
-    file_state = data.get("file_state")
-    if not isinstance(file_state, dict):
-        file_state = {}
-    key = str(file_path.resolve())
-    file_state[key] = state
-    if len(file_state) > _MAX_FILE_STATE_ENTRIES:
-        keys = list(file_state)
-        for old_key in keys[: len(keys) - _MAX_FILE_STATE_ENTRIES]:
-            del file_state[old_key]
-    data["file_state"] = file_state
-    _write_tui_prefs(data)
-
-
-def _serialize_include_entries(entries: list[IncludeEntry]) -> list[dict]:
-    return [
-        {"path": e.path, "is_dir": e.is_dir, "recursive": e.recursive, "active": e.active}
-        for e in entries
-    ]
-
-
-def _deserialize_include_entries(raw: list) -> list[IncludeEntry]:
-    result = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        path = item.get("path")
-        if not isinstance(path, str):
-            continue
-        result.append(IncludeEntry(
-            path=path,
-            is_dir=bool(item.get("is_dir", False)),
-            recursive=bool(item.get("recursive", False)),
-            active=bool(item.get("active", True)),
-        ))
-    return result
 
 
 def _disambiguate_path_labels(paths: tuple[Path, ...]) -> list[str]:
@@ -2133,6 +2125,13 @@ def _display_to_source_position(control, display_row: int, display_col: int) -> 
         return display_row, display_col
     processed_line = get_processed_line(display_row)
     return display_row, processed_line.display_to_source(display_col)
+
+
+def _truncate_attachment_name(name: str, *, max_length: int = 28) -> str:
+    if len(name) <= max_length:
+        return name
+    head = max_length - 3
+    return f"{name[:head]}..."
 
 
 def _sleep_banner(status: SleepStatusState) -> str:

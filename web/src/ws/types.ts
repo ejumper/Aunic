@@ -4,6 +4,10 @@ export type TranscriptRole = "system" | "user" | "assistant" | "tool" | string;
 export type TranscriptRowType = "message" | "tool_call" | "tool_result" | "tool_error" | string;
 export type FileChangedKind = "created" | "modified" | "deleted";
 export type PermissionResolution = "once" | "always" | "reject";
+export type ImageTransport =
+  | "claude_sdk_multimodal"
+  | "openai_chat_vision"
+  | "unsupported";
 export type ProgressEventKind =
   | "status"
   | "error"
@@ -21,6 +25,14 @@ export interface ModelOptionPayload {
   model: string;
   profile_id: string | null;
   context_window: number | null;
+  supports_images?: boolean;
+  image_transport?: ImageTransport;
+}
+
+export interface PromptImageAttachmentPayload {
+  name: string;
+  data_base64: string;
+  size_bytes: number | null;
 }
 
 export interface TranscriptRowPayload {
@@ -71,6 +83,7 @@ export interface EditorSettingsPayload {
 }
 
 export interface SessionStatePayload {
+  instance_id: string;
   run_active: boolean;
   run_id: string | null;
   workspace_root: string;
@@ -87,6 +100,7 @@ export interface SessionStatePayload {
   capabilities?: {
     prompt_commands?: boolean;
     research_flow?: boolean;
+    plan_flow?: boolean;
   };
 }
 
@@ -178,4 +192,39 @@ export interface FileEntryPayload {
 export interface ListFilesPayload {
   path: string;
   entries: FileEntryPayload[];
+}
+
+export interface ProjectNodePayload {
+  id: string;
+  path: string;
+  name: string;
+  kind: "dir" | "file";
+  scope: "entry" | "child";
+  active: boolean;
+  effective_active: boolean;
+  checkable: boolean;
+  removable: boolean;
+  exists: boolean;
+  openable: boolean;
+  recursive: boolean;
+  children: ProjectNodePayload[];
+}
+
+export interface ProjectPlanPayload {
+  id: string;
+  plan_id: string;
+  path: string;
+  name: string;
+  title: string;
+  status: string;
+  active: boolean;
+  exists: boolean;
+  openable: boolean;
+}
+
+export interface ProjectStatePayload {
+  source_file: string;
+  entries: ProjectNodePayload[];
+  plans: ProjectPlanPayload[];
+  active_plan_id: string | null;
 }

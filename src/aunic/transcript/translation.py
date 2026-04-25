@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
-from aunic.domain import TranscriptRow
+from aunic.domain import ProviderImageInput, TranscriptRow
+from aunic.image_inputs import (
+    image_input_to_anthropic_block,
+    image_input_to_openai_chat_block,
+)
 from aunic.transcript.flattening import flatten_tool_result_for_provider
 
 TranscriptProtocol = Literal["anthropic", "openai_compatible"]
@@ -33,6 +37,8 @@ def translate_for_anthropic(
     groups: list[TranscriptRow | list[TranscriptRow]],
     note_snapshot: str,
     user_prompt: str,
+    persistent_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+    prompt_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
 ) -> list[dict[str, Any]]:
     translated: list[dict[str, Any]] = []
     index = 0
@@ -57,7 +63,17 @@ def translate_for_anthropic(
         translated.append({"role": item.role, "content": _content_as_text(item.content)})
         index += 1
 
-    translated.append({"role": "user", "content": compose_final_user_message(note_snapshot, user_prompt)})
+    translated.append(
+        {
+            "role": "user",
+            "content": compose_final_user_content_for_anthropic(
+                note_snapshot,
+                user_prompt,
+                persistent_images,
+                prompt_images,
+            ),
+        }
+    )
     return translated
 
 
@@ -65,6 +81,8 @@ def translate_for_openai(
     groups: list[TranscriptRow | list[TranscriptRow]],
     note_snapshot: str,
     user_prompt: str,
+    persistent_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+    prompt_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
 ) -> list[dict[str, Any]]:
     translated: list[dict[str, Any]] = []
     for item in groups:
@@ -84,7 +102,17 @@ def translate_for_openai(
 
         translated.append({"role": item.role, "content": _content_as_text(item.content)})
 
-    translated.append({"role": "user", "content": compose_final_user_message(note_snapshot, user_prompt)})
+    translated.append(
+        {
+            "role": "user",
+            "content": compose_final_user_content_for_openai_chat(
+                note_snapshot,
+                user_prompt,
+                persistent_images,
+                prompt_images,
+            ),
+        }
+    )
     return translated
 
 
@@ -93,12 +121,26 @@ def translate_transcript(
     protocol: TranscriptProtocol,
     note_snapshot: str,
     user_prompt: str,
+    persistent_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+    prompt_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
 ) -> list[dict[str, Any]]:
     groups = group_assistant_rows(rows)
     if protocol == "anthropic":
-        return translate_for_anthropic(groups, note_snapshot, user_prompt)
+        return translate_for_anthropic(
+            groups,
+            note_snapshot,
+            user_prompt,
+            persistent_images,
+            prompt_images,
+        )
     if protocol == "openai_compatible":
-        return translate_for_openai(groups, note_snapshot, user_prompt)
+        return translate_for_openai(
+            groups,
+            note_snapshot,
+            user_prompt,
+            persistent_images,
+            prompt_images,
+        )
     raise ValueError(f"Unsupported transcript protocol {protocol!r}.")
 
 
@@ -183,3 +225,35 @@ def _tool_input(content: Any) -> dict[str, Any]:
 
 def compose_final_user_message(note_snapshot: str, user_prompt: str) -> str:
     return f"{note_snapshot}\n\n---\n\n{user_prompt}"
+
+
+def compose_final_user_content_for_anthropic(
+    note_snapshot: str,
+    user_prompt: str,
+    persistent_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+    prompt_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+) -> str | list[dict[str, Any]]:
+    text = compose_final_user_message(note_snapshot, user_prompt)
+    images = [*persistent_images, *prompt_images]
+    if not images:
+        return text
+    return [
+        *[image_input_to_anthropic_block(image) for image in images],
+        {"type": "text", "text": text},
+    ]
+
+
+def compose_final_user_content_for_openai_chat(
+    note_snapshot: str,
+    user_prompt: str,
+    persistent_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+    prompt_images: list[ProviderImageInput] | tuple[ProviderImageInput, ...] = (),
+) -> str | list[dict[str, Any]]:
+    text = compose_final_user_message(note_snapshot, user_prompt)
+    images = [*persistent_images, *prompt_images]
+    if not images:
+        return text
+    return [
+        {"type": "text", "text": text},
+        *[image_input_to_openai_chat_block(image) for image in images],
+    ]

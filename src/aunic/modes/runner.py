@@ -9,6 +9,7 @@ from aunic.context import ContextBuildRequest, ContextEngine, FileManager
 from aunic.context.types import FileSnapshot
 from aunic.context.types import PromptRun
 from aunic.errors import NoteModeError
+from aunic.image_inputs import prepare_image_inputs_from_paths
 from aunic.loop import LoopRunRequest, ToolLoop
 from aunic.modes.synthesis import SynthesisPassResult, run_synthesis_pass, work_read_tools_were_used
 from aunic.modes.types import NoteModePromptResult, NoteModeRunRequest, NoteModeRunResult
@@ -56,6 +57,10 @@ class NoteModeRunner:
                     display_root=request.display_root,
                 )
             )
+            persistent_images = await prepare_image_inputs_from_paths(
+                request.included_image_files,
+                persistent=True,
+            )
             if not context_result.prompt_runs:
                 raise NoteModeError("Note mode requires a prompt run.")
 
@@ -85,6 +90,8 @@ class NoteModeRunner:
                         context_result=context_result,
                         active_file=request.active_file,
                         included_files=request.included_files,
+                        persistent_images=persistent_images,
+                        prompt_images=request.prompt_images,
                         active_plan_id=request.active_plan_id,
                         active_plan_path=request.active_plan_path,
                         planning_status=request.planning_status,
@@ -136,6 +143,7 @@ class NoteModeRunner:
                             prompt_run=last_prompt_result.prompt_run,
                             active_file=request.active_file,
                             included_files=request.included_files,
+                            persistent_images=persistent_images,
                             model=request.model,
                             reasoning_effort=request.reasoning_effort,
                             progress_sink=async_progress_sink,

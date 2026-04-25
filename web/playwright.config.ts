@@ -16,7 +16,9 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: `VITE_AUNIC_WS_URL=${wsUrl} npm run build && npm run preview -- --host ${host}`,
+    command:
+      `VITE_AUNIC_ALLOW_PROD_WS_URL=true VITE_AUNIC_WS_URL=${wsUrl} ` +
+      `npm run build && npm run preview -- --host ${host}`,
     url: `http://${host}:${port}`,
     reuseExistingServer: false,
     timeout: 120_000,

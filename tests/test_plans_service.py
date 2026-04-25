@@ -61,3 +61,18 @@ def test_save_plan_content_wraps_missing_frontmatter(tmp_path: Path) -> None:
     assert frontmatter["plan_id"] == document.entry.id
     assert frontmatter["status"] == "draft"
     assert body.startswith("# New Title")
+
+
+def test_delete_plan_removes_markdown_and_index_entry(tmp_path: Path) -> None:
+    source_note = tmp_path / "task.md"
+    source_note.write_text("# Task\n", encoding="utf-8")
+    service = PlanService(source_note)
+    first = service.create_plan("Keep Me")
+    second = service.create_plan("Delete Me")
+
+    deleted = service.delete_plan(second.entry.id)
+
+    assert deleted.id == second.entry.id
+    assert not second.path.exists()
+    index = json.loads(service.index_path.read_text(encoding="utf-8"))
+    assert [entry["path"] for entry in index["plans"]] == [first.entry.path]

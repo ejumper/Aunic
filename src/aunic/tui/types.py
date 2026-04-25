@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from aunic.domain import ReasoningEffort, WorkMode
+from aunic.domain import ImageTransport, ReasoningEffort, WorkMode
+from aunic.file_ui_state import IncludeEntry
 
 TuiMode = Literal["note", "chat"]
 DialogMode = Literal["file_menu", "file_switch_confirm", "reload_confirm", "model_picker", "permission_prompt", "note_conflict"]
@@ -39,6 +40,14 @@ class ModelOption:
     model: str
     profile_id: str | None = None
     context_window: int | None = None
+    supports_images: bool = False
+    image_transport: ImageTransport = "unsupported"
+
+
+@dataclass(frozen=True)
+class PromptImageAttachment:
+    path: Path
+    name: str
 
 
 @dataclass
@@ -47,14 +56,6 @@ class TranscriptViewState:
     sort_order: TranscriptSortOrder = "descending"
     expanded_rows: set[int] = field(default_factory=set)
     maximized: bool = False
-
-
-@dataclass
-class IncludeEntry:
-    path: str        # as typed by the user (relative or absolute)
-    is_dir: bool     # True → directory include
-    recursive: bool  # True → recursive glob (only when is_dir=True)
-    active: bool = True
 
 
 @dataclass(frozen=True)
@@ -121,8 +122,10 @@ class TuiState:
     transcript_open: bool = True
     active_file_missing_on_disk: bool = False
     create_parents_on_first_save: bool = False
+    prompt_image_attachments: tuple[PromptImageAttachment, ...] = ()
     find_ui: FindUiState = field(default_factory=FindUiState)
     include_entries: list[IncludeEntry] = field(default_factory=list)
+    include_inactive_children: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.context_file is None:

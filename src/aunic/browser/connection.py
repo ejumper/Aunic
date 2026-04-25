@@ -9,6 +9,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from aunic.browser.errors import BrowserError
 from aunic.browser.messages import MessageEnvelope, make_envelope, parse_client_message
 from aunic.browser.session import BrowserSession
+from aunic.browser.session_registry import BrowserSessionRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -18,21 +19,24 @@ _PROTOCOL_CLOSE_CODE = 1003
 
 
 class ConnectionHandler:
-    def __init__(self, *, websocket: WebSocket, session: BrowserSession) -> None:
+    def __init__(self, *, websocket: WebSocket, session_registry: BrowserSessionRegistry) -> None:
         self.websocket = websocket
-        self.session = session
+        self.session_registry = session_registry
+        self.session: BrowserSession | None = None
+        self.instance_id: str | None = None
+        self.page_id: str | None = None
         self._outbound: asyncio.Queue[str | None] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self._closed = False
 
     async def run(self) -> None:
         await self.websocket.accept()
-        await self.session.attach(self)
         writer = asyncio.create_task(self._writer(), name="aunic-browser-ws-writer")
         try:
             await self._reader()
         finally:
             self._closed = True
-            await self.session.detach(self)
+            if self.instance_id is not None:
+                await self.session_registry.detach(instance_id=self.instance_id, conn=self)
             await self._outbound.put(None)
             writer.cancel()
             try:
@@ -107,6 +111,21 @@ class ConnectionHandler:
     async def _dispatch(self, envelope: MessageEnvelope) -> None:
         payload = envelope.payload
         if envelope.type == "hello":
+            instance_id = _required_string(payload, "instance_id")
+            page_id = _required_string(payload, "page_id")
+            if self.session is None:
+                self.session = await self.session_registry.attach(
+                    instance_id=instance_id,
+                    page_id=page_id,
+                    conn=self,
+                )
+                self.instance_id = instance_id
+                self.page_id = page_id
+            elif instance_id != self.instance_id or page_id != self.page_id:
+                raise BrowserError(
+                    "invalid_payload",
+                    "Connection is already bound to a different browser instance.",
+                )
             await self.send_event(
                 "session_state",
                 self.session.session_state(),
@@ -116,6 +135,9 @@ class ConnectionHandler:
             if pending is not None:
                 await self.send_event("permission_request", pending)
             return
+
+        if self.session is None:
+            raise BrowserError("hello_required", "Send hello before using the browser websocket.")
 
         if envelope.type == "list_files":
             subpath = payload.get("subpath")
@@ -155,9 +177,108 @@ class ConnectionHandler:
             await self.send_response(envelope.id, await self.session.create_directory(path))
             return
 
+        if envelope.type == "rename_entry":
+            path = _required_string(payload, "path")
+            new_name = _required_string(payload, "new_name")
+            await self.send_response(envelope.id, await self.session.rename_entry(path, new_name))
+            return
+
         if envelope.type == "delete_entry":
             path = _required_string(payload, "path")
             await self.send_response(envelope.id, await self.session.delete_entry(path))
+            return
+
+        if envelope.type == "get_project_state":
+            source_file = _required_string(payload, "source_file")
+            await self.send_response(
+                envelope.id,
+                await self.session.get_project_state(source_file=source_file),
+            )
+            return
+
+        if envelope.type == "add_include":
+            source_file = _required_string(payload, "source_file")
+            target_path = _required_string(payload, "target_path")
+            recursive = payload.get("recursive", False)
+            if type(recursive) is not bool:
+                raise BrowserError("invalid_payload", "recursive must be a boolean.")
+            await self.send_response(
+                envelope.id,
+                await self.session.add_include(
+                    source_file=source_file,
+                    target_path=target_path,
+                    recursive=recursive,
+                ),
+            )
+            return
+
+        if envelope.type == "create_plan":
+            source_file = _required_string(payload, "source_file")
+            title = _required_string(payload, "title")
+            await self.send_response(
+                envelope.id,
+                await self.session.create_plan(source_file=source_file, title=title),
+            )
+            return
+
+        if envelope.type == "delete_plan":
+            source_file = _required_string(payload, "source_file")
+            plan_id = _required_string(payload, "plan_id")
+            await self.send_response(
+                envelope.id,
+                await self.session.delete_plan(source_file=source_file, plan_id=plan_id),
+            )
+            return
+
+        if envelope.type == "set_active_plan":
+            source_file = _required_string(payload, "source_file")
+            plan_id = payload.get("plan_id")
+            if plan_id is not None and not isinstance(plan_id, str):
+                raise BrowserError("invalid_payload", "plan_id must be a string or null.")
+            await self.send_response(
+                envelope.id,
+                await self.session.set_active_plan(source_file=source_file, plan_id=plan_id),
+            )
+            return
+
+        if envelope.type == "remove_include_entry":
+            source_file = _required_string(payload, "source_file")
+            include_path = _required_string(payload, "include_path")
+            await self.send_response(
+                envelope.id,
+                await self.session.remove_include_entry(
+                    source_file=source_file,
+                    include_path=include_path,
+                ),
+            )
+            return
+
+        if envelope.type == "set_include_entry_active":
+            source_file = _required_string(payload, "source_file")
+            include_path = _required_string(payload, "include_path")
+            active = _required_bool(payload, "active")
+            await self.send_response(
+                envelope.id,
+                await self.session.set_include_entry_active(
+                    source_file=source_file,
+                    include_path=include_path,
+                    active=active,
+                ),
+            )
+            return
+
+        if envelope.type == "set_project_child_active":
+            source_file = _required_string(payload, "source_file")
+            child_path = _required_string(payload, "child_path")
+            active = _required_bool(payload, "active")
+            await self.send_response(
+                envelope.id,
+                await self.session.set_project_child_active(
+                    source_file=source_file,
+                    child_path=child_path,
+                    active=active,
+                ),
+            )
             return
 
         if envelope.type == "delete_transcript_row":
@@ -203,7 +324,7 @@ class ConnectionHandler:
         if envelope.type == "set_work_mode":
             work_mode = _required_string(payload, "work_mode")
             await self.session.set_work_mode(work_mode)
-            await self.send_response(envelope.id, {"work_mode": self.session.work_mode})
+            await self.send_response(envelope.id, {"work_mode": self.session.session_state()["work_mode"]})
             return
 
         if envelope.type == "select_model":
@@ -226,10 +347,12 @@ class ConnectionHandler:
                 isinstance(item, str) for item in included_files
             ):
                 raise BrowserError("invalid_payload", "included_files must be a list of strings.")
+            image_attachments = _optional_image_attachments(payload, "image_attachments")
             run_id = await self.session.submit_prompt(
                 active_file=active_file,
                 included_files=included_files,
                 text=text,
+                image_attachments=image_attachments,
             )
             await self.send_response(envelope.id, {"run_id": run_id})
             return
@@ -319,3 +442,45 @@ def _required_int(payload: dict[str, Any], key: str) -> int:
     if type(value) is not int:
         raise BrowserError("invalid_payload", f"{key} must be an integer.")
     return value
+
+
+def _required_bool(payload: dict[str, Any], key: str) -> bool:
+    value = payload.get(key)
+    if type(value) is not bool:
+        raise BrowserError("invalid_payload", f"{key} must be a boolean.")
+    return value
+
+
+def _optional_image_attachments(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = payload.get(key, [])
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise BrowserError("invalid_payload", f"{key} must be a list.")
+    attachments: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise BrowserError("invalid_payload", f"{key} items must be objects.")
+        name = item.get("name")
+        data_base64 = item.get("data_base64")
+        size_bytes = item.get("size_bytes")
+        if not isinstance(name, str) or not name.strip():
+            raise BrowserError("invalid_payload", f"{key} items must include a non-empty name.")
+        if not isinstance(data_base64, str) or not data_base64.strip():
+            raise BrowserError(
+                "invalid_payload",
+                f"{key} items must include non-empty data_base64.",
+            )
+        if size_bytes is not None and type(size_bytes) is not int:
+            raise BrowserError(
+                "invalid_payload",
+                f"{key} item size_bytes must be an integer or null.",
+            )
+        attachments.append(
+            {
+                "name": name,
+                "data_base64": data_base64,
+                "size_bytes": size_bytes,
+            }
+        )
+    return attachments

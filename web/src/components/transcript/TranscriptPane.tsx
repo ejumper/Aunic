@@ -33,7 +33,6 @@ export function TranscriptPane() {
   const open = useTranscriptStore((store) => store.open);
   const maximized = useTranscriptStore((store) => store.maximized);
   const status = useTranscriptStore((store) => store.status);
-  const error = useTranscriptStore((store) => store.error);
   const loadFromSnapshot = useTranscriptStore((store) => store.loadFromSnapshot);
   const reset = useTranscriptStore((store) => store.reset);
   const toggleExpand = useTranscriptStore((store) => store.toggleExpand);
@@ -251,7 +250,6 @@ export function TranscriptPane() {
       {open ? (
         <>
           {status === "loading" ? <p className="muted transcript-empty">Loading transcript...</p> : null}
-          {error ? <p className="error-text">{error}</p> : null}
           <div ref={scrollerRef} className="transcript-scroll" onScroll={handleScroll}>
             <TranscriptList
               rows={rows}

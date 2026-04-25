@@ -34,7 +34,16 @@ def test_browser_client_message_types_match_typescript_contract() -> None:
         "resolve_permission",
         "create_file",
         "create_directory",
+        "rename_entry",
         "delete_entry",
+        "get_project_state",
+        "add_include",
+        "create_plan",
+        "delete_plan",
+        "remove_include_entry",
+        "set_active_plan",
+        "set_include_entry_active",
+        "set_project_child_active",
         "delete_transcript_row",
         "delete_search_result",
         "set_mode",
@@ -112,4 +121,12 @@ def test_browser_serializer_field_names_match_typescript_contract(tmp_path: Path
                 model="gpt-5.4",
             )
         )
-    ) == {"label", "provider_name", "model", "profile_id", "context_window"}
+    ) == {
+        "label",
+        "provider_name",
+        "model",
+        "profile_id",
+        "context_window",
+        "supports_images",
+        "image_transport",
+    }

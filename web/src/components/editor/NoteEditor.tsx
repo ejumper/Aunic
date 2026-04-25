@@ -8,6 +8,7 @@ import {
   foldGutter,
   foldKeymap,
   indentOnInput,
+  indentUnit,
   bracketMatching,
   unfoldEffect,
 } from "@codemirror/language";
@@ -27,6 +28,7 @@ import {
   highlightActiveLineGutter,
   keymap,
   lineNumbers,
+  scrollPastEnd,
 } from "@codemirror/view";
 import { highlightSelectionMatches, search } from "@codemirror/search";
 import { useFindStore } from "../../state/find";
@@ -38,12 +40,14 @@ import { useWs } from "../../ws/context";
 import { noteEditorRef } from "../../noteEditorRef";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import { activeLineRawMarkdown } from "./extensions/activeLineRawMarkdown";
+import { aunicMarkerEnterProtection } from "./extensions/aunicMarkerEnterProtection";
 import { markdownTablesExt } from "./extensions/markdownTables";
 import { aunicTheme } from "./extensions/aunicTheme";
 import { browserFindSyncExt } from "./extensions/browserFindSync";
 import { editCommandMarkersExt } from "./extensions/editCommandMarkers";
 import { fourSpaceIndent } from "./extensions/fourSpaceIndent";
 import { applyManagedSectionAutoFolds } from "./extensions/managedSectionAutoFold";
+import { monospaceTabWidth } from "./extensions/monospaceTabWidth";
 import { selectionSnapshotExt } from "./extensions/selectionSnapshot";
 import { selectionTrackerExt } from "./extensions/selectionTracker";
 import { softWrapIndent } from "./extensions/softWrapIndent";
@@ -60,8 +64,6 @@ export function NoteEditor() {
   const currentDoc = useNoteEditorStore((store) => store.currentDoc);
   const dirty = useNoteEditorStore((store) => store.dirty);
   const status = useNoteEditorStore((store) => store.status);
-  const error = useNoteEditorStore((store) => store.error);
-  const notice = useNoteEditorStore((store) => store.notice);
   const conflict = useNoteEditorStore((store) => store.conflict);
   const externalReloadPending = useNoteEditorStore((store) => store.externalReloadPending);
   const documentVersion = useNoteEditorStore((store) => store.documentVersion);
@@ -74,7 +76,6 @@ export function NoteEditor() {
   const save = useNoteEditorStore((store) => store.save);
   const resolveConflict = useNoteEditorStore((store) => store.resolveConflict);
   const resolveExternalReload = useNoteEditorStore((store) => store.resolveExternalReload);
-  const clearNotice = useNoteEditorStore((store) => store.clearNotice);
   const reset = useNoteEditorStore((store) => store.reset);
   const viewRef = useRef<EditorView | null>(null);
   const saveRef = useRef<() => void>(() => {});
@@ -98,14 +99,6 @@ export function NoteEditor() {
       void loadForPath(client, openFile);
     }
   }, [client, loadForPath, openFile, path, reset]);
-
-  useEffect(() => {
-    if (!notice) {
-      return;
-    }
-    const timer = setTimeout(() => clearNotice(), 3_000);
-    return () => clearTimeout(timer);
-  }, [clearNotice, notice]);
 
   useEffect(() => {
     if (
@@ -163,6 +156,7 @@ export function NoteEditor() {
         applyManagedSectionAutoFolds(view);
         syncBrowserFindQuery(view);
         syncBrowserFindMeasurements(view);
+        view.requestMeasure();
       }
     });
   }, []);
@@ -188,8 +182,6 @@ export function NoteEditor() {
         <p className="muted panel-empty">Select a markdown file from the explorer.</p>
       ) : null}
       {status === "loading" ? <p className="muted panel-empty">Loading note...</p> : null}
-      {notice ? <p className="notice-text">{notice}</p> : null}
-      {error ? <p className="error-text">{error}</p> : null}
 
       {externalReloadPending ? (
         <div className="editor-banner" role="status">
@@ -275,8 +267,11 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
     drawSelection(),
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
+    EditorState.tabSize.of(8),
+    indentUnit.of("\t"),
     indentOnInput(),
     bracketMatching(),
+    aunicMarkerEnterProtection(),
     markdown({
       base: markdownLanguage,
       extensions: GFM,
@@ -297,6 +292,7 @@ function buildNoteEditorExtensions(onSave: () => void): Extension[] {
     selectionTrackerExt(),
     markdownTablesExt(),
     activeLineRawMarkdown(),
+    monospaceTabWidth(),
     highlightActiveLine(),
     highlightSelectionMatches(),
     search(),

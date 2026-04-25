@@ -11,17 +11,26 @@ from starlette.websockets import WebSocket
 
 from aunic.browser.connection import ConnectionHandler
 from aunic.browser.session import BrowserSession
+from aunic.browser.session_registry import BrowserSessionRegistry
 from aunic.context import ContextEngine, FileManager
 from aunic.loop import ToolLoop
 from aunic.modes import ChatModeRunner, NoteModeRunner
 from aunic.research import FetchService, SearchService
 
 
-def build_browser_session(*, workspace_root: Path, cwd: Path | None = None) -> BrowserSession:
+def build_browser_session(
+    *,
+    workspace_root: Path,
+    cwd: Path | None = None,
+    instance_id: str = "browser",
+    acquire_run_file=None,
+    release_run_file=None,
+) -> BrowserSession:
     file_manager = FileManager()
     search_service = SearchService()
     fetch_service = FetchService()
     return BrowserSession(
+        instance_id=instance_id,
         workspace_root=workspace_root,
         cwd=cwd or workspace_root,
         file_manager=file_manager,
@@ -41,19 +50,43 @@ def build_browser_session(*, workspace_root: Path, cwd: Path | None = None) -> B
         ),
         search_service=search_service,
         fetch_service=fetch_service,
+        acquire_run_file=acquire_run_file,
+        release_run_file=release_run_file,
     )
 
 
-def create_browser_app(session: BrowserSession) -> Starlette:
+def build_browser_session_registry(
+    *,
+    workspace_root: Path,
+    cwd: Path | None = None,
+) -> BrowserSessionRegistry:
+    holder: dict[str, BrowserSessionRegistry] = {}
+
+    def session_factory(instance_id: str) -> BrowserSession:
+        registry = holder["registry"]
+        return build_browser_session(
+            workspace_root=workspace_root,
+            cwd=cwd,
+            instance_id=instance_id,
+            acquire_run_file=lambda path: registry.acquire_run_file(instance_id=instance_id, path=path),
+            release_run_file=lambda path: registry.release_run_file(instance_id=instance_id, path=path),
+        )
+
+    registry = BrowserSessionRegistry(session_factory=session_factory)
+    holder["registry"] = registry
+    return registry
+
+
+def create_browser_app(registry: BrowserSessionRegistry) -> Starlette:
     async def websocket_endpoint(websocket: WebSocket) -> None:
-        await ConnectionHandler(websocket=websocket, session=session).run()
+        await ConnectionHandler(websocket=websocket, session_registry=registry).run()
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncIterator[None]:
         try:
             yield
         finally:
-            await session.shutdown()
+            await registry.shutdown()
 
     return Starlette(
         routes=[WebSocketRoute("/ws", websocket_endpoint)],
@@ -69,8 +102,8 @@ async def run_browser_server(
     ssl_certfile: Path | None = None,
     ssl_keyfile: Path | None = None,
 ) -> int:
-    session = build_browser_session(workspace_root=workspace_root)
-    app = create_browser_app(session)
+    registry = build_browser_session_registry(workspace_root=workspace_root)
+    app = create_browser_app(registry)
     config = uvicorn.Config(
         app,
         host=host,

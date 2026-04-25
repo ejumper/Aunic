@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getCurrentBrowserPageId, getOrCreateBrowserInstanceId } from "../browserSession";
 import { useSessionStore } from "../state/session";
 import { useWs } from "../ws/context";
 import type { SessionStatePayload } from "../ws/types";
@@ -17,7 +18,10 @@ export function HelloPanel() {
   async function sendHello() {
     setError(null);
     try {
-      const nextSession = await client.request("hello", {});
+      const nextSession = await client.request("hello", {
+        instance_id: getOrCreateBrowserInstanceId(),
+        page_id: getCurrentBrowserPageId(),
+      });
       setResponse(nextSession);
     } catch (err) {
       setError(formatRequestError(err));

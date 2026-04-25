@@ -132,6 +132,7 @@ function openWorkspace(overrides: Partial<SessionStatePayload> = {}): void {
 
 function sessionPayload(): SessionStatePayload {
   return {
+    instance_id: "instance-1",
     run_active: false,
     run_id: null,
     workspace_root: "/home/ejumps",

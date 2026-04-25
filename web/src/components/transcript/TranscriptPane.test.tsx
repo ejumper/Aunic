@@ -165,8 +165,10 @@ describe("TranscriptPane", () => {
 
     await act(async () => {
       const ragRow = container.querySelector("[data-row-number='2']");
-      expect(ragRow).toBeTruthy();
-      ragRow.querySelector<HTMLButtonElement>("[aria-expanded='false']")?.click();
+      expect(ragRow).not.toBeNull();
+      const toggle = ragRow!.querySelector<HTMLButtonElement>("[aria-expanded='false']");
+      expect(toggle).not.toBeNull();
+      toggle!.click();
       await flushPromises();
     });
 

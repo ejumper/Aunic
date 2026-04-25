@@ -20,11 +20,11 @@ import type {
 
 interface ResearchPickerProps {
   client: WsClient;
-  activeFile: string;
+  sourceFile: string;
   research: ResearchStatePayload;
 }
 
-export function ResearchPicker({ client, activeFile, research }: ResearchPickerProps) {
+export function ResearchPicker({ client, sourceFile, research }: ResearchPickerProps) {
   const setIndicatorMessage = useSessionStore((store) => store.setIndicatorMessage);
   const pickerRef = useRef<HTMLElement | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(0);
@@ -87,7 +87,7 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
       }
       try {
         const snapshot = await client.request("research_fetch_result", {
-          active_file: activeFile,
+          active_file: sourceFile,
           result_index: targetIndex,
         });
         applySnapshot(snapshot, "Fetched research result.");
@@ -96,7 +96,7 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
         setIndicatorMessage(formatResearchError(error), "error");
       }
     },
-    [activeFile, busy, client, selectedResult, setIndicatorMessage],
+    [busy, client, selectedResult, setIndicatorMessage, sourceFile],
   );
 
   const insertChunks = useCallback(
@@ -110,7 +110,7 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
       }
       try {
         const snapshot = await client.request("research_insert_chunks", {
-          active_file: activeFile,
+          active_file: sourceFile,
           mode,
           chunk_indices:
             mode === "selected_chunks" ? [...selectedChunks].sort((a, b) => a - b) : undefined,
@@ -121,7 +121,7 @@ export function ResearchPicker({ client, activeFile, research }: ResearchPickerP
         setIndicatorMessage(formatResearchError(error), "error");
       }
     },
-    [activeFile, busy, client, selectedChunks, setIndicatorMessage],
+    [busy, client, selectedChunks, setIndicatorMessage, sourceFile],
   );
 
   const back = useCallback(async () => {

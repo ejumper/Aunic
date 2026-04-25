@@ -37,11 +37,12 @@ export function softWrapIndent() {
 
 function buildIndentDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
+  const tabSize = view.state.tabSize;
   for (const { from, to } of view.visibleRanges) {
     let pos = from;
     while (pos <= to) {
       const line = view.state.doc.lineAt(pos);
-      const indent = wrapIndentForLine(line.text);
+      const indent = wrapIndentForLine(line.text, tabSize);
       if (indent > 0) {
         builder.add(
           line.from,
@@ -62,11 +63,14 @@ function buildIndentDecorations(view: EditorView): DecorationSet {
   return builder.finish();
 }
 
-function wrapIndentForLine(line: string): number {
+function wrapIndentForLine(line: string, tabSize: number): number {
+  // Tab characters create their own indentation via CSS tab-size; mixing
+  // ch-unit padding-left with space-unit tab stops misaligns the grid.
+  if (line.startsWith("\t")) return 0;
   const match = /^(\s*)(?:(?:[-+*]|\d+[.)])\s+)?/.exec(line);
   if (!match) {
     return 0;
   }
-  const prefix = match[0].replace(/\t/g, "    ");
+  const prefix = match[0].replace(/\t/g, " ".repeat(tabSize));
   return Math.min(prefix.length, MAX_WRAP_INDENT_CH);
 }

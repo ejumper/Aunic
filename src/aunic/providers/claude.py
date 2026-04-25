@@ -94,8 +94,24 @@ class ClaudeProvider(LLMProvider):
         bridge_config = build_tool_bridge_config(request)
         system_prompt = _build_system_prompt(request.system_prompt)
         session_id = str(run_session_id or "default")
+        has_images = bool(request.persistent_images or request.prompt_images)
 
-        if run_session_id:
+        if has_images:
+            async with ClaudeSession(
+                self._settings,
+                cwd,
+                model,
+                system_prompt=system_prompt,
+                bridge_config=bridge_config,
+                effort=reasoning_effort,
+            ) as session:
+                result = await session.query(
+                    seeded_messages=build_claude_seed_messages(request, model=model),
+                    session_id=session_id,
+                )
+            history_seeded = True
+            session_reused = False
+        elif run_session_id:
             transport, session_reused = await self._get_or_create_run_transport(
                 run_session_id=run_session_id,
                 cwd=cwd,
@@ -212,6 +228,8 @@ def build_claude_seed_messages(
         group_assistant_rows(compacted_rows),
         request.note_snapshot or "",
         request.user_prompt or "",
+        request.persistent_images,
+        request.prompt_images,
     )
     seeded: list[dict[str, Any]] = []
     for message in translated:

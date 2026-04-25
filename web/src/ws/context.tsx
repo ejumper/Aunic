@@ -1,17 +1,29 @@
 import {
   createContext,
+  type MutableRefObject,
   type ReactNode,
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
+import {
+  getOrCreateBrowserInstanceId,
+  getCurrentBrowserPageId,
+  rotateBrowserInstanceId,
+} from "../browserSession";
 import { wsUrl } from "../env";
 import { ROOT_DIR, useExplorerStore } from "../state/explorer";
 import { useNoteEditorStore } from "../state/noteEditor";
 import { useSessionStore } from "../state/session";
 import { useTranscriptStore } from "../state/transcript";
-import { WsClient, type ConnectionState, type WsDiagnostics } from "./client";
+import {
+  WsClient,
+  type ConnectionState,
+  type WsDiagnostics,
+  type WsRequestError,
+} from "./client";
 import type {
   FileChangedPayload,
   NoteToolResultEventPayload,
@@ -39,25 +51,59 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
   const [state, setState] = useState<ConnectionState>("idle");
   const [lastConnectedAt, setLastConnectedAt] = useState<Date | null>(null);
   const [diagnostics, setDiagnostics] = useState<WsDiagnostics | null>(null);
+  const previousConnectionStateRef = useRef<ConnectionState>("idle");
   const setSession = useSessionStore((store) => store.setSession);
   const applyProgressEvent = useSessionStore((store) => store.applyProgressEvent);
   const setPendingPermission = useSessionStore((store) => store.setPendingPermission);
+  const setIndicatorMessage = useSessionStore((store) => store.setIndicatorMessage);
   const clearSession = useSessionStore((store) => store.clearSession);
+  const instanceIdRef = useRef<string>(getOrCreateBrowserInstanceId());
+  const pageIdRef = useRef<string>(getCurrentBrowserPageId());
+  const helloAttemptRef = useRef(0);
 
   const client = useMemo(
     () =>
       new WsClient({
         url,
+        autoHelloOnOpen: false,
         onStateChange: (nextState) => {
+          const previousState = previousConnectionStateRef.current;
+          previousConnectionStateRef.current = nextState;
           setState(nextState);
           if (nextState === "open") {
             setLastConnectedAt(new Date());
           }
+          if (nextState === "reconnecting" && previousState !== "reconnecting") {
+            setIndicatorMessage("Browser connection lost. Reconnecting...", "error");
+          } else if (nextState === "closed" && previousState !== "closed") {
+            setIndicatorMessage("Browser connection closed.", "error");
+          } else if (
+            nextState === "open" &&
+            (previousState === "reconnecting" || previousState === "closed")
+          ) {
+            setIndicatorMessage("Browser connection restored.");
+          }
         },
         onDiagnostics: setDiagnostics,
       }),
-    [url],
+    [setIndicatorMessage, url],
   );
+
+  useEffect(() => {
+    if (state !== "open") {
+      return;
+    }
+    const attemptId = ++helloAttemptRef.current;
+    void performHelloHandshake({
+      client,
+      attemptId,
+      instanceIdRef,
+      pageIdRef,
+      helloAttemptRef,
+      setIndicatorMessage,
+      clearSession,
+    });
+  }, [state, client, clearSession, setIndicatorMessage]);
 
   useEffect(() => {
     const unsubscribe = client.on("session_state", (session: SessionStatePayload) => {
@@ -112,6 +158,15 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
         setPendingPermission(event);
       },
     );
+    const unsubscribeError = client.on("error", (event) => {
+      if (event.reason === "instance_conflict") {
+        return;
+      }
+      setIndicatorMessage(
+        `${event.reason}${event.details ? ` ${JSON.stringify(event.details)}` : ""}`,
+        "error",
+      );
+    });
     client.start();
     return () => {
       unsubscribe();
@@ -120,19 +175,92 @@ export function WsProvider({ children, url = wsUrl }: WsProviderProps) {
       unsubscribeNoteToolResult();
       unsubscribeProgressEvent();
       unsubscribePermissionRequest();
+      unsubscribeError();
       client.stop();
       clearSession();
       useExplorerStore.getState().reset();
       useNoteEditorStore.getState().reset();
       useTranscriptStore.getState().reset();
     };
-  }, [applyProgressEvent, clearSession, client, setPendingPermission, setSession]);
+  }, [applyProgressEvent, clearSession, client, setIndicatorMessage, setPendingPermission, setSession]);
 
   return (
     <WsContext.Provider value={{ client, state, lastConnectedAt, diagnostics }}>
       {children}
     </WsContext.Provider>
   );
+}
+
+async function performHelloHandshake({
+  client,
+  attemptId,
+  instanceIdRef,
+  pageIdRef,
+  helloAttemptRef,
+  setIndicatorMessage,
+  clearSession,
+}: {
+  client: WsClient;
+  attemptId: number;
+  instanceIdRef: MutableRefObject<string>;
+  pageIdRef: MutableRefObject<string>;
+  helloAttemptRef: MutableRefObject<number>;
+  setIndicatorMessage: (text: string, kind?: string) => void;
+  clearSession: () => void;
+}): Promise<void> {
+  for (let retry = 0; retry < 5; retry += 1) {
+    try {
+      await client.request("hello", {
+        instance_id: instanceIdRef.current,
+        page_id: pageIdRef.current,
+      });
+      return;
+    } catch (error) {
+      if (attemptId !== helloAttemptRef.current) {
+        return;
+      }
+      if (!isWsRequestErrorLike(error) || error.reason !== "instance_conflict") {
+        if (isWsRequestErrorLike(error) && error.reason === "not_connected") {
+          return;
+        }
+        setIndicatorMessage(formatHelloError(error), "error");
+        return;
+      }
+      await sleep(100);
+      if (client.state !== "open") {
+        return;
+      }
+    }
+  }
+
+  instanceIdRef.current = rotateBrowserInstanceId();
+  clearSession();
+  useExplorerStore.getState().reset();
+  useNoteEditorStore.getState().reset();
+  useTranscriptStore.getState().reset();
+  setIndicatorMessage("Opened a fresh Aunic instance for this browser tab.");
+  client.stop();
+  client.start();
+}
+
+function isWsRequestErrorLike(error: unknown): error is WsRequestError {
+  return Boolean(error && typeof error === "object" && "reason" in error);
+}
+
+function formatHelloError(error: unknown): string {
+  if (isWsRequestErrorLike(error)) {
+    return error.reason;
+  }
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 export function useWs(): WsContextValue {

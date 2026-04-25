@@ -15,7 +15,7 @@ from aunic.domain import (
     TranscriptRow,
     Usage,
 )
-from aunic.errors import CodexProtocolError, StructuredOutputError
+from aunic.errors import CodexProtocolError, ConfigurationError, StructuredOutputError
 from aunic.providers.base import LLMProvider
 from aunic.providers.codex_client import (
     CodexAppServerSession,
@@ -97,6 +97,8 @@ class CodexProvider(LLMProvider):
             )
 
     async def generate(self, request: ProviderRequest) -> ProviderResponse:
+        if request.persistent_images or request.prompt_images:
+            raise ConfigurationError("Codex does not support image inputs yet.")
         cwd = Path(request.metadata.get("cwd", os.getcwd())).expanduser().resolve()
         run_session_id = request.metadata.get("run_session_id")
         model = request.model or self._settings.default_model
@@ -488,5 +490,4 @@ def usage_from_codex_token_usage(token_usage: dict[str, Any] | None) -> Usage | 
         reasoning_output_tokens=coerce_int(payload.get("reasoningOutputTokens")),
         model_context_window=coerce_int(token_usage.get("modelContextWindow")),
     )
-
 

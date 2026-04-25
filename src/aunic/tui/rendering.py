@@ -92,6 +92,8 @@ def build_tui_style() -> Style:
             "topbar.title": "ansiblue bold underline",
             "indicator.status": "italic",
             "indicator.error": "ansired italic",
+            "indicator.attachment": "ansiblue",
+            "indicator.attachment.remove": "ansired bold",
             "control": "",
             "control.active": "reverse",
             "control.disabled": "ansibrightblack",

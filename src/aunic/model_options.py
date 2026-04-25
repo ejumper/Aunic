@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aunic.config import SETTINGS
+from aunic.domain import ImageTransport
 from aunic.proto_settings import get_openai_compatible_profiles
 
 
@@ -14,6 +15,8 @@ class ModelOption:
     model: str
     profile_id: str | None = None
     context_window: int | None = None
+    supports_images: bool = False
+    image_transport: ImageTransport = "unsupported"
 
 
 def build_model_options(
@@ -27,7 +30,13 @@ def build_model_options(
         else SETTINGS.codex.default_model
     )
     options: list[ModelOption] = [
-        ModelOption(label=f"Codex ({codex_model})", provider_name="codex", model=codex_model),
+        ModelOption(
+            label=f"Codex ({codex_model})",
+            provider_name="codex",
+            model=codex_model,
+            supports_images=False,
+            image_transport="unsupported",
+        ),
     ]
 
     openai_profiles = get_openai_compatible_profiles(cwd)
@@ -47,6 +56,8 @@ def build_model_options(
                     model=model,
                     profile_id=profile.profile_id,
                     context_window=profile.context_window,
+                    supports_images=profile.supports_images,
+                    image_transport=profile.image_transport,  # type: ignore[arg-type]
                 )
             )
     else:
@@ -61,6 +72,8 @@ def build_model_options(
                 provider_name="openai_compatible",
                 model=llama_model,
                 profile_id="llama_addie",
+                supports_images=False,
+                image_transport="unsupported",
             )
         )
 
@@ -70,16 +83,22 @@ def build_model_options(
                 label="Claude Haiku",
                 provider_name="claude",
                 model=SETTINGS.claude.haiku_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
             ),
             ModelOption(
                 label="Claude Sonnet",
                 provider_name="claude",
                 model=SETTINGS.claude.sonnet_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
             ),
             ModelOption(
                 label="Claude Opus",
                 provider_name="claude",
                 model=SETTINGS.claude.opus_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
             ),
         ]
     )

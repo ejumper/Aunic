@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 import shutil
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -33,8 +33,19 @@ from aunic.browser.paths import (
 )
 from aunic.browser.watch_hub import FileWatchHub
 from aunic.context import ContextEngine, FileChange, FileManager
-from aunic.domain import ReasoningEffort, WorkMode
+from aunic.domain import ProviderImageInput, ReasoningEffort, WorkMode
 from aunic.errors import ChatModeError, FileReadError, NoteModeError, OptimisticWriteError
+from aunic.file_ui_state import (
+    IncludeEntry,
+    ProjectIncludeState,
+    load_project_include_state,
+    normalize_project_path_for_storage,
+    resolve_include_entry_path,
+    resolve_project_context_paths,
+    resolve_project_relative_path,
+    save_project_include_state,
+)
+from aunic.image_inputs import is_supported_image_path, prepare_image_input_from_base64
 from aunic.loop import ToolLoop
 from aunic.model_options import ModelOption, build_model_options
 from aunic.modes import (
@@ -44,6 +55,7 @@ from aunic.modes import (
     NoteModeRunResult,
     NoteModeRunner,
 )
+from aunic.plans import PlanService
 from aunic.progress import ProgressEvent
 from aunic.providers import ClaudeProvider, CodexProvider, OpenAICompatibleProvider
 from aunic.proto_settings import get_editor_save_mode
@@ -62,6 +74,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 BrowserMode = Literal["note", "chat"]
+BrowserAgentMode = Literal["off", "read", "work", "plan"]
 ProviderFactory = Callable[[ModelOption, Path], Any]
 _MAX_ENTRY_NAME_BYTES = 255
 _PROMPT_COMMANDS = (
@@ -71,6 +84,7 @@ _PROMPT_COMMANDS = (
     "/work",
     "/read",
     "/off",
+    "/plan",
     "/model",
     "/find",
     "/replace",
@@ -87,15 +101,6 @@ _PROMPT_COMMAND_RE = re.compile(
     + "|".join(re.escape(cmd) + r"\b" for cmd in sorted(_PROMPT_COMMANDS, key=len, reverse=True))
     + ")"
 )
-
-
-@dataclass(frozen=True)
-class BrowserIncludeEntry:
-    path: str
-    is_dir: bool
-    recursive: bool = False
-    active: bool = True
-
 
 @dataclass(frozen=True)
 class BrowserResearchResult:
@@ -125,6 +130,7 @@ class BrowserSession:
     def __init__(
         self,
         *,
+        instance_id: str = "browser",
         workspace_root: Path,
         file_manager: FileManager | None = None,
         note_runner: NoteModeRunner | None = None,
@@ -139,7 +145,10 @@ class BrowserSession:
         total_turn_budget: int = 100_000,
         model_options: tuple[ModelOption, ...] | None = None,
         selected_model_index: int = 0,
+        acquire_run_file: Callable[[Path], Awaitable[None]] | None = None,
+        release_run_file: Callable[[Path], Awaitable[None]] | None = None,
     ) -> None:
+        self.instance_id = instance_id
         self.workspace_root = workspace_root.expanduser().resolve()
         self.cwd = (cwd or self.workspace_root).expanduser().resolve()
         self.file_manager = file_manager or FileManager()
@@ -158,8 +167,10 @@ class BrowserSession:
         self.fetch_service = fetch_service or FetchService()
         self.mode: BrowserMode = mode
         self.work_mode = work_mode
+        self.agent_mode: BrowserAgentMode = work_mode
         self.reasoning_effort = reasoning_effort
         self.total_turn_budget = total_turn_budget
+        self._model_options_fixed = model_options is not None
         self.model_options = model_options or build_model_options(self.cwd, "codex", None)
         self.selected_model_index = min(max(selected_model_index, 0), len(self.model_options) - 1)
 
@@ -173,7 +184,6 @@ class BrowserSession:
         self._permission_id: str | None = None
         self._watch_hub = FileWatchHub(self.file_manager)
         self._watch_unsubscribe: Callable[[], None] | None = None
-        self._include_entries: list[BrowserIncludeEntry] = []
         self._research_mode: Literal["idle", "results", "chunks"] = "idle"
         self._research_source: Literal["web", "rag"] | None = None
         self._research_query = ""
@@ -184,6 +194,9 @@ class BrowserSession:
         self._ctx_tokens_used: int | None = None
         self._ctx_window_size: int | None = _known_context_window(self.selected_model)
         self._ctx_last_note_chars: int | None = None
+        self._acquire_run_file = acquire_run_file
+        self._release_run_file = release_run_file
+        self._leased_run_file: Path | None = None
 
     @property
     def run_active(self) -> bool:
@@ -202,9 +215,33 @@ class BrowserSession:
 
     async def attach(self, conn: "ConnectionHandler") -> None:
         self._connections.add(conn)
+        if not self._model_options_fixed:
+            current = self.selected_model
+            self.model_options = build_model_options(self.cwd, "codex", None)
+            new_index = next(
+                (
+                    i
+                    for i, opt in enumerate(self.model_options)
+                    if opt.provider_name == current.provider_name
+                    and opt.model == current.model
+                    and opt.profile_id == current.profile_id
+                ),
+                0,
+            )
+            self.selected_model_index = new_index
         if self._watch_unsubscribe is None:
             self._watch_unsubscribe = self._watch_hub.subscribe(self._handle_file_change)
         await self._watch_hub.start((self.workspace_root,))
+        if len(self._connections) == 1:
+            try:
+                from aunic.map.builder import ensure_map_ready_shared
+
+                await ensure_map_ready_shared(
+                    self.workspace_root,
+                    fallback_root=self.workspace_root,
+                )
+            except Exception as exc:
+                logger.warning("map ensure on browser attach failed: %s", exc)
 
     async def detach(self, conn: "ConnectionHandler") -> None:
         self._connections.discard(conn)
@@ -219,15 +256,17 @@ class BrowserSession:
         if self._run_id is not None:
             await self.cancel_run(self._run_id)
         await self._watch_hub.stop()
+        await self._release_run_file_lease()
 
     def session_state(self) -> dict[str, Any]:
         return {
+            "instance_id": self.instance_id,
             "run_active": self.run_active,
             "run_id": self._run_id,
             "workspace_root": str(self.workspace_root),
             "default_mode": self.mode,
             "mode": self.mode,
-            "work_mode": self.work_mode,
+            "work_mode": self.agent_mode,
             "models": [serialize_model_option(option) for option in self.model_options],
             "selected_model_index": self.selected_model_index,
             "selected_model": serialize_model_option(self.selected_model),
@@ -240,6 +279,7 @@ class BrowserSession:
             "capabilities": {
                 "prompt_commands": True,
                 "research_flow": True,
+                "plan_flow": True,
             },
         }
 
@@ -295,9 +335,11 @@ class BrowserSession:
                 "run_active",
                 "Wait for the current run to finish before switching work mode.",
             )
-        if work_mode not in {"off", "read", "work"}:
-            raise BrowserError("invalid_work_mode", "Work mode must be off, read, or work.")
-        self.work_mode = work_mode  # type: ignore[assignment]
+        if work_mode not in {"off", "read", "work", "plan"}:
+            raise BrowserError("invalid_work_mode", "Work mode must be off, read, work, or plan.")
+        self.agent_mode = work_mode  # type: ignore[assignment]
+        if work_mode in {"off", "read", "work"}:
+            self.work_mode = work_mode  # type: ignore[assignment]
         await self.broadcast_session_state()
 
     async def select_model(self, index: int) -> None:
@@ -327,6 +369,12 @@ class BrowserSession:
     async def read_file(self, subpath: str) -> dict[str, Any]:
         path = resolve_workspace_path(subpath, workspace_root=self.workspace_root)
         snapshot = await self.file_manager.read_snapshot(path)
+        try:
+            from aunic.map.builder import refresh_map_entry_if_stale
+
+            refresh_map_entry_if_stale(path, fallback_root=self.workspace_root)
+        except Exception as exc:
+            logger.warning("map refresh on browser file read failed: %s", exc)
         return serialize_file_snapshot(snapshot, workspace_root=self.workspace_root)
 
     async def write_file(
@@ -351,6 +399,12 @@ class BrowserSession:
                 "revision_conflict",
                 "File changed before the browser save completed.",
             ) from exc
+        try:
+            from aunic.map.builder import mark_map_entry_stale
+
+            mark_map_entry_stale(path)
+        except Exception as exc:
+            logger.warning("map stale-mark on browser save failed: %s", exc)
         return serialize_file_snapshot(written, workspace_root=self.workspace_root)
 
     async def delete_transcript_row(
@@ -411,6 +465,34 @@ class BrowserSession:
             "kind": "dir",
         }
 
+    async def rename_entry(self, subpath: str, new_name: str) -> dict[str, Any]:
+        if subpath in {"", "."}:
+            raise BrowserError("refused", "Refusing to rename workspace root.")
+        path = resolve_workspace_path(subpath, workspace_root=self.workspace_root)
+        if path == self.workspace_root:
+            raise BrowserError("refused", "Refusing to rename workspace root.")
+        if not await asyncio.to_thread(path.exists):
+            raise BrowserError("not_found", "File or directory does not exist.")
+
+        name = new_name.strip()
+        if not name:
+            raise BrowserError("invalid_name", "Enter a name.")
+        if "/" in name or "\\" in name:
+            raise BrowserError("invalid_name", "Name cannot contain path separators.")
+        _validate_new_entry_name(name)
+
+        new_path = path.parent / name
+        if await asyncio.to_thread(new_path.exists):
+            raise BrowserError("already_exists", "A file or directory already exists with that name.")
+
+        await asyncio.to_thread(path.rename, new_path)
+        kind = "dir" if await asyncio.to_thread(new_path.is_dir) else "file"
+        return {
+            "path": workspace_relative_path(new_path, workspace_root=self.workspace_root),
+            "old_path": workspace_relative_path(path, workspace_root=self.workspace_root),
+            "kind": kind,
+        }
+
     async def delete_entry(self, subpath: str) -> dict[str, Any]:
         if subpath in {"", "."}:
             raise BrowserError("refused", "Refusing to delete workspace root.")
@@ -459,30 +541,56 @@ class BrowserSession:
         active_file: str,
         included_files: Iterable[str],
         text: str,
+        image_attachments: Iterable[dict[str, Any]] = (),
     ) -> str:
-        if not text.strip():
+        attachments = tuple(image_attachments)
+        if not text.strip() and not attachments:
             raise BrowserError("empty_prompt", "Prompt text cannot be empty.")
 
         active_path = resolve_workspace_path(active_file, workspace_root=self.workspace_root)
-        included_paths = self._merge_included_paths(
+        included_paths, included_image_paths = self._merge_included_context(
             active_path,
             tuple(resolve_workspace_path(item, workspace_root=self.workspace_root) for item in included_files),
+        )
+        prompt_images = await self._prepare_browser_prompt_images(attachments)
+        self._ensure_selected_model_supports_images(
+            persistent_image_paths=included_image_paths,
+            prompt_images=prompt_images,
+        )
+        request_work_mode, active_plan_id, active_plan_path, planning_status = self._resolve_run_plan_context(
+            active_path
         )
         run_id = uuid4().hex
         async with self._run_lock:
             if self.run_active:
                 raise RunInProgress()
-            self._run_id = run_id
-            self._force_stopped = False
-            self._run_task = asyncio.create_task(
-                self._run_prompt(
-                    run_id=run_id,
-                    active_file=active_path,
-                    included_files=included_paths,
-                    text=text,
-                ),
-                name=f"aunic-browser-run-{run_id}",
-            )
+            lease_acquired = False
+            try:
+                if self._acquire_run_file is not None:
+                    await self._acquire_run_file(active_path)
+                    self._leased_run_file = active_path
+                    lease_acquired = True
+                self._run_id = run_id
+                self._force_stopped = False
+                self._run_task = asyncio.create_task(
+                    self._run_prompt(
+                        run_id=run_id,
+                        active_file=active_path,
+                        included_files=included_paths,
+                        included_image_files=included_image_paths,
+                        prompt_images=prompt_images,
+                        text=text,
+                        request_work_mode=request_work_mode,
+                        active_plan_id=active_plan_id,
+                        active_plan_path=active_plan_path,
+                        planning_status=planning_status,
+                    ),
+                    name=f"aunic-browser-run-{run_id}",
+                )
+            except Exception:
+                if lease_acquired:
+                    await self._release_run_file_lease()
+                raise
         await self.broadcast_session_state()
         return run_id
 
@@ -504,14 +612,20 @@ class BrowserSession:
             await self.set_work_mode(work_mode)
             return _command_response(draft=remaining, message=f"Agent mode set to {work_mode}.")
 
+        if command == "/plan":
+            await self.set_work_mode("plan")
+            return _command_response(draft=remaining, message="Agent mode set to plan.")
+
+        if command == "/map":
+            message = self._handle_map_command(active_path, remaining)
+            return _command_response(draft="", message=message)
+
         if command == "/include":
             message = self._handle_include_command(active_path, remaining)
-            await self.broadcast_session_state()
             return _command_response(draft="", message=message)
 
         if command == "/exclude":
-            message = self._handle_exclude_command(remaining)
-            await self.broadcast_session_state()
+            message = self._handle_exclude_command(active_path, remaining)
             return _command_response(draft="", message=message)
 
         if command == "/clear-history":
@@ -590,6 +704,226 @@ class BrowserSession:
             self._permission_future.set_result(resolution)  # type: ignore[arg-type]
         return {"ok": True}
 
+    async def get_project_state(self, *, source_file: str) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        return self._project_state_payload(source_path)
+
+    async def create_plan(self, *, source_file: str, title: str) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        clean_title = title.strip() or "Untitled Plan"
+        document = PlanService(source_path).create_plan(clean_title)
+        state = load_project_include_state(source_path)
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=state.include_entries,
+                inactive_children=state.inactive_children,
+                active_plan_id=document.entry.id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def delete_plan(self, *, source_file: str, plan_id: str) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        service = PlanService(source_path)
+        try:
+            service.delete_plan(plan_id)
+        except FileNotFoundError as exc:
+            raise BrowserError("plan_not_found", f"Plan not found: {plan_id}") from exc
+        state = load_project_include_state(source_path)
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=state.include_entries,
+                inactive_children=state.inactive_children,
+                active_plan_id=None if state.active_plan_id == plan_id else state.active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def set_active_plan(
+        self,
+        *,
+        source_file: str,
+        plan_id: str | None,
+    ) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        state = load_project_include_state(source_path)
+        active_plan_id: str | None = None
+        if plan_id is not None:
+            try:
+                PlanService(source_path).get_plan(plan_id)
+            except FileNotFoundError as exc:
+                raise BrowserError("plan_not_found", f"Plan not found: {plan_id}") from exc
+            active_plan_id = plan_id
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=state.include_entries,
+                inactive_children=state.inactive_children,
+                active_plan_id=active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def add_include(
+        self,
+        *,
+        source_file: str,
+        target_path: str,
+        recursive: bool = False,
+    ) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        target = resolve_workspace_path(target_path, workspace_root=self.workspace_root)
+        if target == source_path:
+            raise BrowserError("invalid_project_include", "The source file is already in project context.")
+        is_dir = target.is_dir()
+        state = load_project_include_state(source_path)
+        if self._find_project_include_index(
+            source_path,
+            state.include_entries,
+            raw_identifier=target_path,
+            resolved_identifiers=(target,),
+        ) is not None:
+            return self._project_state_payload(source_path)
+
+        include_entries = [
+            *state.include_entries,
+            IncludeEntry(
+                path=normalize_project_path_for_storage(source_path, target, is_dir=is_dir),
+                is_dir=is_dir,
+                recursive=recursive if is_dir else False,
+                active=True,
+            ),
+        ]
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=tuple(include_entries),
+                inactive_children=state.inactive_children,
+                active_plan_id=state.active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def remove_include_entry(
+        self,
+        *,
+        source_file: str,
+        include_path: str,
+    ) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        state = load_project_include_state(source_path)
+        resolved_identifiers = self._project_identifier_candidates(
+            source_path,
+            include_path,
+            prefer_source_relative=False,
+        )
+        index = self._find_project_include_index(
+            source_path,
+            state.include_entries,
+            raw_identifier=include_path,
+            resolved_identifiers=resolved_identifiers,
+        )
+        if index is None:
+            raise BrowserError("project_include_not_found", f"Not in include list: {include_path}")
+
+        entry = state.include_entries[index]
+        entry_target = resolve_include_entry_path(source_path, entry)
+        include_entries = [
+            current
+            for current_index, current in enumerate(state.include_entries)
+            if current_index != index
+        ]
+        inactive_children = tuple(
+            raw
+            for raw in state.inactive_children
+            if not self._inactive_child_matches(source_path, raw, entry_target, entry.is_dir)
+        )
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=tuple(include_entries),
+                inactive_children=inactive_children,
+                active_plan_id=state.active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def set_include_entry_active(
+        self,
+        *,
+        source_file: str,
+        include_path: str,
+        active: bool,
+    ) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        state = load_project_include_state(source_path)
+        resolved_identifiers = self._project_identifier_candidates(
+            source_path,
+            include_path,
+            prefer_source_relative=False,
+        )
+        index = self._find_project_include_index(
+            source_path,
+            state.include_entries,
+            raw_identifier=include_path,
+            resolved_identifiers=resolved_identifiers,
+        )
+        if index is None:
+            raise BrowserError("project_include_not_found", f"Not in include list: {include_path}")
+        include_entries = list(state.include_entries)
+        entry = include_entries[index]
+        include_entries[index] = IncludeEntry(
+            path=entry.path,
+            is_dir=entry.is_dir,
+            recursive=entry.recursive,
+            active=active,
+        )
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=tuple(include_entries),
+                inactive_children=state.inactive_children,
+                active_plan_id=state.active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
+    async def set_project_child_active(
+        self,
+        *,
+        source_file: str,
+        child_path: str,
+        active: bool,
+    ) -> dict[str, Any]:
+        source_path = resolve_workspace_path(source_file, workspace_root=self.workspace_root)
+        child = resolve_workspace_path(child_path, workspace_root=self.workspace_root)
+        state = load_project_include_state(source_path)
+        if not any(
+            entry.is_dir and child.is_relative_to(resolve_include_entry_path(source_path, entry))
+            for entry in state.include_entries
+        ):
+            raise BrowserError("project_child_not_found", f"File is not part of an included directory: {child_path}")
+
+        normalized_child = normalize_project_path_for_storage(source_path, child, is_dir=False)
+        inactive_children = [
+            raw
+            for raw in state.inactive_children
+            if resolve_project_relative_path(source_path, raw) != child
+        ]
+        if not active:
+            inactive_children.append(normalized_child)
+        save_project_include_state(
+            source_path,
+            ProjectIncludeState(
+                include_entries=state.include_entries,
+                inactive_children=tuple(dict.fromkeys(inactive_children)),
+                active_plan_id=state.active_plan_id,
+            ),
+        )
+        return self._project_state_payload(source_path)
+
     def _handle_include_command(self, active_path: Path, arg: str) -> str:
         raw = arg.strip()
         recursive = False
@@ -600,60 +934,480 @@ class BrowserSession:
             raise BrowserError("invalid_prompt_command", "Usage: /include [-r] <path>")
 
         target = _resolve_command_path(raw, base=active_path.parent)
+        self._ensure_workspace_scoped(target, raw)
         is_dir = raw.endswith("/") or target.is_dir()
-        if raw in {entry.path for entry in self._include_entries}:
+        if target == active_path:
+            raise BrowserError("invalid_project_include", "The source file is already in project context.")
+        state = load_project_include_state(active_path)
+        if self._find_project_include_index(
+            active_path,
+            state.include_entries,
+            raw_identifier=raw,
+            resolved_identifiers=(target,),
+        ) is not None:
             return f"Already included: {raw}"
-        self._include_entries.append(
-            BrowserIncludeEntry(path=raw, is_dir=is_dir, recursive=recursive)
+        include_entries = [
+            *state.include_entries,
+            IncludeEntry(
+                path=normalize_project_path_for_storage(active_path, target, is_dir=is_dir),
+                is_dir=is_dir,
+                recursive=recursive if is_dir else False,
+                active=True,
+            ),
+        ]
+        save_project_include_state(
+            active_path,
+            ProjectIncludeState(
+                include_entries=tuple(include_entries),
+                inactive_children=state.inactive_children,
+                active_plan_id=state.active_plan_id,
+            ),
         )
         kind = "directory" if is_dir else "file"
         return f"Included {kind}: {raw}"
 
-    def _handle_exclude_command(self, arg: str) -> str:
+    def _handle_exclude_command(self, active_path: Path, arg: str) -> str:
         raw = arg.strip()
         if not raw:
             raise BrowserError("invalid_prompt_command", "Usage: /exclude <path>")
-        before = len(self._include_entries)
-        self._include_entries = [entry for entry in self._include_entries if entry.path != raw]
-        if len(self._include_entries) == before:
+        state = load_project_include_state(active_path)
+        resolved_identifiers = self._project_identifier_candidates(
+            active_path,
+            raw,
+            prefer_source_relative=True,
+        )
+        index = self._find_project_include_index(
+            active_path,
+            state.include_entries,
+            raw_identifier=raw,
+            resolved_identifiers=resolved_identifiers,
+        )
+        if index is None:
             raise BrowserError("invalid_prompt_command", f"Not in include list: {raw}")
+        entry = state.include_entries[index]
+        entry_target = resolve_include_entry_path(active_path, entry)
+        include_entries = [
+            current
+            for current_index, current in enumerate(state.include_entries)
+            if current_index != index
+        ]
+        inactive_children = tuple(
+            child
+            for child in state.inactive_children
+            if not self._inactive_child_matches(active_path, child, entry_target, entry.is_dir)
+        )
+        save_project_include_state(
+            active_path,
+            ProjectIncludeState(
+                include_entries=tuple(include_entries),
+                inactive_children=inactive_children,
+                active_plan_id=state.active_plan_id,
+            ),
+        )
         return f"Excluded: {raw}"
 
-    def _merge_included_paths(
+    def _handle_map_command(self, active_path: Path, remaining: str) -> str:
+        tokens = remaining.split(None, 1)
+        first = tokens[0] if tokens else ""
+
+        if first == "--generate-summary":
+            raise BrowserError(
+                "invalid_prompt_command",
+                "--generate-summary is deferred to a follow-up; use --set-summary <text> for now.",
+            )
+
+        if first == "--set-summary":
+            text = tokens[1].strip() if len(tokens) > 1 else ""
+            if not text:
+                raise BrowserError("invalid_prompt_command", "Usage: /map --set-summary <text>")
+            from aunic.map.builder import set_summary
+
+            set_summary(active_path, text, fallback_root=self.workspace_root)
+            return f"Summary locked for {active_path.name}."
+
+        if first == "--clear-summary":
+            from aunic.map.builder import clear_summary
+
+            clear_summary(active_path, fallback_root=self.workspace_root)
+            return f"Summary cleared for {active_path.name}."
+
+        scope: Path | None = None
+        if first:
+            raw = Path(first).expanduser()
+            if not raw.is_absolute():
+                raw = active_path.parent / raw
+            scope = raw.resolve()
+            if not scope.exists() or not scope.is_dir():
+                raise BrowserError(
+                    "invalid_prompt_command",
+                    f"/map: path not found or not a directory: {scope}",
+                )
+
+        from aunic.map.builder import build_map
+
+        result = build_map(
+            scope,
+            subject_path=scope or active_path,
+            fallback_root=self.workspace_root,
+        )
+        scope_label = f" under {scope}" if scope is not None else ""
+        return (
+            f"Mapped {result.entry_count} notes{scope_label}"
+            f" (+{result.entries_added} -{result.entries_removed}"
+            f", {result.entries_reused_from_cache} unchanged)"
+            f" in {result.elapsed_seconds:.1f}s."
+        )
+
+    def _merge_included_context(
         self,
         active_path: Path,
         explicit_paths: tuple[Path, ...],
-    ) -> tuple[Path, ...]:
-        seen: set[Path] = set()
-        merged: list[Path] = []
-        for path in (*self._resolve_included_paths(active_path), *explicit_paths):
-            resolved = path.resolve()
-            if resolved == active_path or resolved in seen:
-                continue
-            seen.add(resolved)
-            merged.append(resolved)
-        return tuple(merged)
+    ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+        project_state = load_project_include_state(active_path)
+        resolved = resolve_project_context_paths(
+            active_path,
+            project_state.include_entries,
+            inactive_children=project_state.inactive_children,
+        )
+        persisted_text_paths = tuple(
+            path for path in resolved.text_files if self._is_workspace_scoped(path)
+        )
+        persisted_image_paths = tuple(
+            path for path in resolved.image_files if self._is_workspace_scoped(path)
+        )
 
-    def _resolve_included_paths(self, active_path: Path) -> tuple[Path, ...]:
-        base = active_path.parent
-        seen: set[Path] = set()
-        resolved: list[Path] = []
-        for entry in self._include_entries:
-            if not entry.active:
-                continue
-            target = _resolve_command_path(entry.path, base=base)
-            if entry.is_dir:
-                pattern = "**/*.md" if entry.recursive else "*.md"
-                candidates = sorted(target.glob(pattern)) if target.is_dir() else []
-            else:
-                candidates = [target]
-            for candidate in candidates:
-                item = candidate.resolve()
-                if item == active_path or item in seen:
+        explicit_text_paths = tuple(
+            path for path in explicit_paths if not is_supported_image_path(path)
+        )
+        explicit_image_paths = tuple(
+            path for path in explicit_paths if is_supported_image_path(path)
+        )
+
+        return (
+            _merge_unique_paths((*persisted_text_paths, *explicit_text_paths), exclude=active_path),
+            _merge_unique_paths((*persisted_image_paths, *explicit_image_paths)),
+        )
+
+    async def _prepare_browser_prompt_images(
+        self,
+        attachments: tuple[dict[str, Any], ...],
+    ) -> tuple[ProviderImageInput, ...]:
+        prepared: list[ProviderImageInput] = []
+        for attachment in attachments:
+            name = str(attachment.get("name", "")).strip()
+            data_base64 = str(attachment.get("data_base64", "")).strip()
+            if not name or not data_base64:
+                raise BrowserError(
+                    "invalid_image_attachment",
+                    "Image attachments must include a filename and base64 data.",
+                )
+            try:
+                prepared.append(
+                    await prepare_image_input_from_base64(
+                        name=name,
+                        data_base64=data_base64,
+                        persistent=False,
+                    )
+                )
+            except FileReadError as exc:
+                raise BrowserError("invalid_image_attachment", str(exc)) from exc
+        return tuple(prepared)
+
+    def _ensure_selected_model_supports_images(
+        self,
+        *,
+        persistent_image_paths: tuple[Path, ...],
+        prompt_images: tuple[ProviderImageInput, ...],
+    ) -> None:
+        if not persistent_image_paths and not prompt_images:
+            return
+        if self.selected_model.supports_images and self.selected_model.image_transport != "unsupported":
+            return
+        raise BrowserError(
+            "images_unsupported",
+            f"{self.selected_model.label} does not support image inputs.",
+        )
+
+    def _resolve_run_plan_context(
+        self,
+        active_path: Path,
+    ) -> tuple[WorkMode, str | None, Path | None, str]:
+        if self.agent_mode != "plan":
+            return self.work_mode, None, None, "none"
+
+        state = load_project_include_state(active_path)
+        if not state.active_plan_id:
+            raise BrowserError("no_active_plan", "Select or create a plan before using Agent: Plan.")
+
+        try:
+            document = PlanService(active_path).get_plan(state.active_plan_id)
+        except FileNotFoundError as exc:
+            save_project_include_state(
+                active_path,
+                ProjectIncludeState(
+                    include_entries=state.include_entries,
+                    inactive_children=state.inactive_children,
+                    active_plan_id=None,
+                ),
+            )
+            raise BrowserError("plan_not_found", "The selected plan no longer exists.") from exc
+
+        planning_status = {
+            "draft": "drafting",
+            "awaiting_approval": "awaiting_approval",
+            "approved": "approved",
+        }.get(document.entry.status, "none")
+        request_work_mode: WorkMode = "work" if planning_status == "approved" else self.work_mode
+        return request_work_mode, document.entry.id, document.path, planning_status
+
+    def _project_state_payload(self, source_path: Path) -> dict[str, Any]:
+        state = load_project_include_state(source_path)
+        inactive_children = {
+            resolve_project_relative_path(source_path, raw).resolve()
+            for raw in state.inactive_children
+            if isinstance(raw, str) and raw.strip()
+        }
+        plan_service = PlanService(source_path)
+        plans = list(plan_service.list_plans_for_source_note())
+        active_plan_id = state.active_plan_id if any(entry.id == state.active_plan_id for entry in plans) else None
+        if active_plan_id != state.active_plan_id:
+            save_project_include_state(
+                source_path,
+                ProjectIncludeState(
+                    include_entries=state.include_entries,
+                    inactive_children=state.inactive_children,
+                    active_plan_id=active_plan_id,
+                ),
+            )
+        entries = [
+            self._project_entry_payload(source_path, entry, inactive_children)
+            for entry in state.include_entries
+        ]
+        return {
+            "source_file": workspace_relative_path(source_path, workspace_root=self.workspace_root),
+            "entries": entries,
+            "plans": [
+                self._project_plan_payload(plan_service, entry, active_plan_id=active_plan_id)
+                for entry in plans
+            ],
+            "active_plan_id": active_plan_id,
+        }
+
+    def _project_plan_payload(
+        self,
+        plan_service: PlanService,
+        entry: Any,
+        *,
+        active_plan_id: str | None,
+    ) -> dict[str, Any]:
+        path = entry.file_path(plan_service.plans_dir)
+        in_workspace = self._is_workspace_scoped(path)
+        actual_path = workspace_relative_path(path, workspace_root=self.workspace_root) if in_workspace else str(path)
+        exists = path.exists()
+        return {
+            "id": f"plan:{entry.id}",
+            "plan_id": entry.id,
+            "path": actual_path,
+            "name": path.name,
+            "title": entry.title,
+            "status": entry.status,
+            "active": entry.id == active_plan_id,
+            "exists": exists and in_workspace,
+            "openable": exists and in_workspace,
+        }
+
+    def _project_entry_payload(
+        self,
+        source_path: Path,
+        entry: IncludeEntry,
+        inactive_children: set[Path],
+    ) -> dict[str, Any]:
+        target = resolve_include_entry_path(source_path, entry)
+        in_workspace = self._is_workspace_scoped(target)
+        actual_path = (
+            workspace_relative_path(target, workspace_root=self.workspace_root)
+            if in_workspace
+            else entry.path
+        )
+        exists = target.exists()
+        is_dir = entry.is_dir
+        return {
+            "id": f"entry:{entry.path}",
+            "path": actual_path,
+            "name": target.name or Path(entry.path.rstrip("/")).name or entry.path,
+            "kind": "dir" if is_dir else "file",
+            "scope": "entry",
+            "active": entry.active,
+            "effective_active": entry.active,
+            "checkable": True,
+            "removable": True,
+            "exists": exists and in_workspace,
+            "openable": (not is_dir) and exists and in_workspace and target.suffix.lower() == ".md",
+            "recursive": entry.recursive,
+            "children": (
+                self._project_directory_children(
+                    source_path,
+                    top_level_key=entry.path,
+                    directory=target,
+                    recursive=entry.recursive,
+                    parent_active=entry.active,
+                    inactive_children=inactive_children,
+                )
+                if is_dir and exists and target.is_dir() and in_workspace
+                else []
+            ),
+        }
+
+    def _project_directory_children(
+        self,
+        source_path: Path,
+        *,
+        top_level_key: str,
+        directory: Path,
+        recursive: bool,
+        parent_active: bool,
+        inactive_children: set[Path],
+    ) -> list[dict[str, Any]]:
+        try:
+            items = sorted(directory.iterdir(), key=_project_tree_sort_key)
+        except OSError:
+            return []
+
+        children: list[dict[str, Any]] = []
+        for item in items:
+            resolved = item.resolve()
+            if item.is_dir():
+                if not recursive:
                     continue
-                seen.add(item)
-                resolved.append(item)
-        return tuple(resolved)
+                nested = self._project_directory_children(
+                    source_path,
+                    top_level_key=top_level_key,
+                    directory=resolved,
+                    recursive=True,
+                    parent_active=parent_active,
+                    inactive_children=inactive_children,
+                )
+                if not nested:
+                    continue
+                rel_path = workspace_relative_path(resolved, workspace_root=self.workspace_root)
+                children.append(
+                    {
+                        "id": f"child-dir:{top_level_key}:{rel_path}",
+                        "path": rel_path,
+                        "name": resolved.name,
+                        "kind": "dir",
+                        "scope": "child",
+                        "active": True,
+                        "effective_active": parent_active,
+                        "checkable": False,
+                        "removable": False,
+                        "exists": True,
+                        "openable": False,
+                        "recursive": False,
+                        "children": nested,
+                    }
+                )
+                continue
+            is_markdown = item.suffix.lower() == ".md"
+            is_image = is_supported_image_path(item)
+            if not is_markdown and not is_image:
+                continue
+            rel_path = workspace_relative_path(resolved, workspace_root=self.workspace_root)
+            active = resolved not in inactive_children
+            children.append(
+                {
+                    "id": f"child-file:{top_level_key}:{rel_path}",
+                    "path": rel_path,
+                    "name": resolved.name,
+                    "kind": "file",
+                    "scope": "child",
+                    "active": active,
+                    "effective_active": parent_active and active,
+                    "checkable": True,
+                    "removable": True,
+                    "exists": True,
+                    "openable": is_markdown,
+                    "recursive": False,
+                    "children": [],
+                }
+            )
+        return children
+
+    def _find_project_include_index(
+        self,
+        source_path: Path,
+        entries: Iterable[IncludeEntry],
+        *,
+        raw_identifier: str | None,
+        resolved_identifiers: tuple[Path, ...],
+    ) -> int | None:
+        for index, entry in enumerate(entries):
+            if raw_identifier is not None and entry.path == raw_identifier:
+                return index
+            if resolved_identifiers and any(
+                resolve_include_entry_path(source_path, entry) == candidate.resolve()
+                for candidate in resolved_identifiers
+            ):
+                return index
+        return None
+
+    def _project_identifier_candidates(
+        self,
+        source_path: Path,
+        identifier: str,
+        *,
+        prefer_source_relative: bool,
+    ) -> tuple[Path, ...]:
+        if not identifier.strip():
+            return ()
+        candidates: list[Path] = []
+        if prefer_source_relative:
+            try:
+                candidates.append(resolve_project_relative_path(source_path, identifier))
+            except Exception:
+                pass
+        try:
+            workspace_candidate = resolve_workspace_path(identifier, workspace_root=self.workspace_root)
+        except WorkspacePathError:
+            workspace_candidate = None
+        if workspace_candidate is not None:
+            candidates.append(workspace_candidate)
+        if not prefer_source_relative:
+            try:
+                candidates.append(resolve_project_relative_path(source_path, identifier))
+            except Exception:
+                pass
+        unique: list[Path] = []
+        for candidate in candidates:
+            resolved = candidate.resolve()
+            if resolved not in unique:
+                unique.append(resolved)
+        return tuple(unique)
+
+    def _inactive_child_matches(
+        self,
+        source_path: Path,
+        raw_child: str,
+        target_path: Path,
+        target_is_dir: bool,
+    ) -> bool:
+        child = resolve_project_relative_path(source_path, raw_child)
+        if target_is_dir:
+            return child == target_path or child.is_relative_to(target_path)
+        return child == target_path
+
+    def _ensure_workspace_scoped(self, path: Path, raw: str) -> None:
+        try:
+            workspace_relative_path(path, workspace_root=self.workspace_root)
+        except WorkspacePathError as exc:
+            raise BrowserError(exc.reason, f"Included path resolves outside the workspace: {raw}") from exc
+
+    def _is_workspace_scoped(self, path: Path) -> bool:
+        try:
+            workspace_relative_path(path, workspace_root=self.workspace_root)
+            return True
+        except WorkspacePathError:
+            return False
 
     async def _clear_transcript(self, active_path: Path) -> dict[str, Any]:
         current = await self.file_manager.read_snapshot(active_path)
@@ -1124,7 +1878,13 @@ class BrowserSession:
         run_id: str,
         active_file: Path,
         included_files: tuple[Path, ...],
+        included_image_files: tuple[Path, ...],
+        prompt_images: tuple[ProviderImageInput, ...],
         text: str,
+        request_work_mode: WorkMode,
+        active_plan_id: str | None,
+        active_plan_path: Path | None,
+        planning_status: str,
     ) -> None:
         try:
             provider = self.provider_factory(self.selected_model, self.cwd)
@@ -1133,6 +1893,11 @@ class BrowserSession:
                     NoteModeRunRequest(
                         active_file=active_file,
                         included_files=included_files,
+                        included_image_files=included_image_files,
+                        prompt_images=prompt_images,
+                        active_plan_id=active_plan_id,
+                        active_plan_path=active_plan_path,
+                        planning_status=planning_status,
                         provider=provider,
                         user_prompt=text,
                         total_turn_budget=self.total_turn_budget,
@@ -1141,7 +1906,7 @@ class BrowserSession:
                         display_root=self.workspace_root,
                         progress_sink=self.handle_progress_event,
                         metadata={"cwd": str(self.cwd), "browser_run_id": run_id},
-                        work_mode=self.work_mode,
+                        work_mode=request_work_mode,
                         permission_handler=self.request_permission,
                     )
                 )
@@ -1151,6 +1916,11 @@ class BrowserSession:
                     ChatModeRunRequest(
                         active_file=active_file,
                         included_files=included_files,
+                        included_image_files=included_image_files,
+                        prompt_images=prompt_images,
+                        active_plan_id=active_plan_id,
+                        active_plan_path=active_plan_path,
+                        planning_status=planning_status,
                         provider=provider,
                         user_prompt=text,
                         total_turn_budget=self.total_turn_budget,
@@ -1159,7 +1929,7 @@ class BrowserSession:
                         display_root=self.workspace_root,
                         progress_sink=self.handle_progress_event,
                         metadata={"cwd": str(self.cwd), "browser_run_id": run_id},
-                        work_mode=self.work_mode,
+                        work_mode=request_work_mode,
                         permission_handler=self.request_permission,
                     )
                 )
@@ -1200,7 +1970,15 @@ class BrowserSession:
                     self._run_task = None
                     self._run_id = None
                     self._force_stopped = False
+            await self._release_run_file_lease()
             await self.broadcast_session_state()
+
+    async def _release_run_file_lease(self) -> None:
+        leased_run_file = self._leased_run_file
+        self._leased_run_file = None
+        if leased_run_file is None or self._release_run_file is None:
+            return
+        await self._release_run_file(leased_run_file)
 
     async def handle_progress_event(self, event: ProgressEvent) -> None:
         await self.broadcast(
@@ -1446,6 +2224,31 @@ def _append_block_to_note_content(note_text: str, block: str) -> str:
 def _resolve_command_path(raw_path: str, *, base: Path) -> Path:
     path = Path(raw_path)
     return path.resolve() if path.is_absolute() else (base / path).resolve()
+
+
+def _merge_unique_paths(
+    paths: Iterable[Path],
+    *,
+    exclude: Path | None = None,
+) -> tuple[Path, ...]:
+    excluded = exclude.resolve() if exclude is not None else None
+    seen: set[Path] = set()
+    merged: list[Path] = []
+    for path in paths:
+        resolved = path.resolve()
+        if resolved == excluded or resolved in seen:
+            continue
+        seen.add(resolved)
+        merged.append(resolved)
+    return tuple(merged)
+
+
+def _project_tree_sort_key(path: Path) -> tuple[int, str]:
+    try:
+        is_dir = path.is_dir()
+    except OSError:
+        is_dir = False
+    return (0 if is_dir else 1, path.name.lower())
 
 
 def _tool_error_payload(*, reason: str, message: str, **details: object) -> dict[str, object]:

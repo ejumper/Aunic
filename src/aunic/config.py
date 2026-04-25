@@ -96,6 +96,21 @@ class ContextSettings:
 
 
 @dataclass(frozen=True)
+class ImageInputSettings:
+    supported_extensions: tuple[str, ...] = (
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".gif",
+    )
+    max_original_bytes: int = 20 * 1024 * 1024
+    max_processed_bytes: int = 5 * 1024 * 1024
+    max_dimension_px: int = 1568
+    jpeg_quality: int = 85
+
+
+@dataclass(frozen=True)
 class LoopSettings:
     malformed_turn_limit: int = 4
     protected_rejection_limit: int = 3
@@ -150,6 +165,7 @@ class AppSettings:
     ollama: OllamaSettings = field(default_factory=OllamaSettings)
     research: ResearchSettings = field(default_factory=ResearchSettings)
     context: ContextSettings = field(default_factory=ContextSettings)
+    image_inputs: ImageInputSettings = field(default_factory=ImageInputSettings)
     loop: LoopSettings = field(default_factory=LoopSettings)
     sleep: SleepSettings = field(default_factory=SleepSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)

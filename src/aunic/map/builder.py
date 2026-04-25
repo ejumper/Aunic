@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -10,11 +11,17 @@ from pathlib import Path
 from aunic.discovery import is_aunic_note, walk_aunic_notes
 from aunic.map.manifest import NoteMetadata, load_meta, save_meta
 from aunic.map.render import MapEntry, parse_map, render_map
+from aunic.map.runtime import (
+    is_map_globally_stale,
+    resolve_map_location,
+)
 from aunic.map.snippet import compute_auto_snippet
 
 logger = logging.getLogger(__name__)
 
 MAP_PATH = Path.home() / ".aunic" / "map.md"
+_SHARED_ENSURE_LOCK = asyncio.Lock()
+_SHARED_ENSURE_TASKS: dict[Path, asyncio.Task[BuildResult | None]] = {}
 
 
 @dataclass(frozen=True)
@@ -29,24 +36,41 @@ class BuildResult:
     elapsed_seconds: float
 
 
-def build_map(scope: Path | None = None) -> BuildResult:
-    """Walk Aunic notes and write ~/.aunic/map.md (and a local scoped copy).
+def build_map(
+    scope: Path | None = None,
+    *,
+    subject_path: Path | None = None,
+    fallback_root: Path | None = None,
+) -> BuildResult:
+    """Walk Aunic notes and write the canonical map (and a local scoped copy).
 
-    When scope is None, walks from Path.home().
-    When scope is provided, out-of-scope entries from the existing map are preserved.
+    When scope is None, walks from the resolved canonical anchor root.
+    When scope is provided, out-of-scope entries from the existing canonical map
+    are preserved.
     """
     t0 = time.monotonic()
-    walk_root = (scope or Path.home()).resolve()
+    resolved_subject = (
+        (subject_path or scope or fallback_root or Path.home())
+        .expanduser()
+        .resolve()
+    )
+    resolved_fallback = (fallback_root or resolved_subject).expanduser().resolve()
+    location = resolve_map_location(
+        resolved_subject,
+        fallback_root=resolved_fallback,
+        create=True,
+    )
+    walk_root = scope.resolve() if scope is not None else location.anchor_root
 
     # Load existing map for incremental refresh
     prev_entries: dict[Path, MapEntry] = {}
-    if MAP_PATH.exists():
+    if location.map_path.exists():
         try:
-            prev_entries = parse_map(MAP_PATH.read_text(encoding="utf-8"))
+            prev_entries = parse_map(location.map_path.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.warning("Could not parse existing map: %s", exc)
 
-    notes = walk_aunic_notes(scope if scope is not None else None)
+    notes = walk_aunic_notes(walk_root)
 
     new_entries: dict[Path, MapEntry] = {}
     entries_added = 0
@@ -133,13 +157,13 @@ def build_map(scope: Path | None = None) -> BuildResult:
         [p for p in prev_entries if p in combined_entries]
     )
 
-    # Atomic write of global map
+    # Atomic write of canonical map
     map_text = render_map(combined_entries, walk_root=walk_root, generated_at=generated_at)
-    _atomic_write(MAP_PATH, map_text)
+    _atomic_write(location.map_path, map_text)
 
     # Write local scoped copy (entries under walk_root only)
     local_map_path = walk_root / ".aunic" / "map.md"
-    if local_map_path != MAP_PATH:
+    if local_map_path != location.map_path:
         local_entries = {p: e for p, e in combined_entries.items() if _is_under(p, walk_root)}
         if local_entries:
             local_text = render_map(local_entries, walk_root=walk_root, generated_at=generated_at)
@@ -150,7 +174,7 @@ def build_map(scope: Path | None = None) -> BuildResult:
 
     elapsed = time.monotonic() - t0
     return BuildResult(
-        map_path=MAP_PATH,
+        map_path=location.map_path,
         entry_count=len(combined_entries),
         walk_root=walk_root,
         entries_added=entries_added,
@@ -186,18 +210,23 @@ def mark_map_entry_stale(note_path: Path) -> None:
         logger.warning("mark_map_entry_stale failed for %s: %s", note_path, exc)
 
 
-def refresh_map_entry_if_stale(note_path: Path) -> None:
+def refresh_map_entry_if_stale(
+    note_path: Path,
+    *,
+    fallback_root: Path | None = None,
+) -> None:
     """Rebuild a single map entry if marked stale. No-op in many conditions.
 
     No-op when:
-    - ~/.aunic/map.md does not exist
+    - the canonical map does not exist
     - note is not an Aunic note
     - meta.auto_snippet_stale is False
     - summary_locked is True
     Never raises.
     """
     try:
-        if not MAP_PATH.exists():
+        location = resolve_map_location(note_path, fallback_root=fallback_root)
+        if not location.map_path.exists():
             return
         if not is_aunic_note(note_path):
             return
@@ -225,7 +254,7 @@ def refresh_map_entry_if_stale(note_path: Path) -> None:
 
         # Update map entry
         try:
-            map_text = MAP_PATH.read_text(encoding="utf-8")
+            map_text = location.map_path.read_text(encoding="utf-8")
             entries = parse_map(map_text)
         except Exception as exc:
             logger.warning("Could not read map for refresh: %s", exc)
@@ -239,9 +268,9 @@ def refresh_map_entry_if_stale(note_path: Path) -> None:
         )
 
         # Re-derive walk_root from existing top-matter or fall back to home
-        walk_root = _parse_walk_root(map_text)
+        walk_root = _parse_walk_root(map_text, fallback_root=location.anchor_root)
         new_text = render_map(entries, walk_root=walk_root)
-        _atomic_write(MAP_PATH, new_text)
+        _atomic_write(location.map_path, new_text)
 
         # Persist updated meta
         updated_meta = NoteMetadata(
@@ -258,7 +287,56 @@ def refresh_map_entry_if_stale(note_path: Path) -> None:
         logger.warning("refresh_map_entry_if_stale failed for %s: %s", note_path, exc)
 
 
-def set_summary(note_path: Path, text: str) -> None:
+def ensure_map_ready(
+    subject_path: Path,
+    *,
+    fallback_root: Path | None = None,
+) -> BuildResult | None:
+    location = resolve_map_location(
+        subject_path,
+        fallback_root=fallback_root,
+        create=True,
+    )
+    if location.map_path.exists() and not is_map_globally_stale(location.map_path):
+        return None
+    return build_map(
+        None,
+        subject_path=subject_path,
+        fallback_root=fallback_root or location.anchor_root,
+    )
+
+
+async def ensure_map_ready_shared(
+    subject_path: Path,
+    *,
+    fallback_root: Path | None = None,
+) -> BuildResult | None:
+    location = resolve_map_location(subject_path, fallback_root=fallback_root)
+    async with _SHARED_ENSURE_LOCK:
+        task = _SHARED_ENSURE_TASKS.get(location.map_path)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                asyncio.to_thread(
+                    ensure_map_ready,
+                    subject_path,
+                    fallback_root=fallback_root,
+                )
+            )
+            _SHARED_ENSURE_TASKS[location.map_path] = task
+    try:
+        return await task
+    finally:
+        async with _SHARED_ENSURE_LOCK:
+            if _SHARED_ENSURE_TASKS.get(location.map_path) is task and task.done():
+                _SHARED_ENSURE_TASKS.pop(location.map_path, None)
+
+
+def set_summary(
+    note_path: Path,
+    text: str,
+    *,
+    fallback_root: Path | None = None,
+) -> None:
     """Set a locked summary for a note and update map.md if present."""
     meta = load_meta(note_path)
     snippet = text[:200]
@@ -272,16 +350,26 @@ def set_summary(note_path: Path, text: str) -> None:
     )
     save_meta(note_path, updated_meta)
 
-    if MAP_PATH.exists():
-        _update_single_entry(note_path, MapEntry(
-            path=note_path,
-            snippet=snippet,
-            mtime_ns=0,
-            locked=True,
-        ))
+    location = resolve_map_location(note_path, fallback_root=fallback_root)
+    if location.map_path.exists():
+        _update_single_entry(
+            note_path,
+            MapEntry(
+                path=note_path,
+                snippet=snippet,
+                mtime_ns=0,
+                locked=True,
+            ),
+            map_path=location.map_path,
+            fallback_root=location.anchor_root,
+        )
 
 
-def clear_summary(note_path: Path) -> None:
+def clear_summary(
+    note_path: Path,
+    *,
+    fallback_root: Path | None = None,
+) -> None:
     """Clear a locked summary for a note, recompute auto snippet, update map.md."""
     meta = load_meta(note_path)
 
@@ -307,13 +395,19 @@ def clear_summary(note_path: Path) -> None:
     )
     save_meta(note_path, updated_meta)
 
-    if MAP_PATH.exists() and current_mtime is not None:
-        _update_single_entry(note_path, MapEntry(
-            path=note_path,
-            snippet=snippet,
-            mtime_ns=current_mtime,
-            locked=False,
-        ))
+    location = resolve_map_location(note_path, fallback_root=fallback_root)
+    if location.map_path.exists() and current_mtime is not None:
+        _update_single_entry(
+            note_path,
+            MapEntry(
+                path=note_path,
+                snippet=snippet,
+                mtime_ns=current_mtime,
+                locked=False,
+            ),
+            map_path=location.map_path,
+            fallback_root=location.anchor_root,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +438,8 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def _parse_walk_root(map_text: str) -> Path:
-    """Extract the walk root from the Generated: line, or fall back to home."""
+def _parse_walk_root(map_text: str, *, fallback_root: Path | None = None) -> Path:
+    """Extract the walk root from the Generated: line, or fall back to the anchor."""
     for line in map_text.splitlines():
         if line.startswith("Generated:") and " from " in line:
             # "Generated: 2026-... from /home/user (N notes)."
@@ -353,7 +447,7 @@ def _parse_walk_root(map_text: str) -> Path:
             root_str = after_from.split(" (")[0].strip()
             if root_str:
                 return Path(root_str)
-    return Path.home()
+    return (fallback_root or Path.home()).expanduser().resolve()
 
 
 def _clear_stale_flag(note_path: Path, meta: NoteMetadata) -> None:
@@ -368,14 +462,20 @@ def _clear_stale_flag(note_path: Path, meta: NoteMetadata) -> None:
     save_meta(note_path, updated_meta)
 
 
-def _update_single_entry(note_path: Path, new_entry: MapEntry) -> None:
+def _update_single_entry(
+    note_path: Path,
+    new_entry: MapEntry,
+    *,
+    map_path: Path,
+    fallback_root: Path | None = None,
+) -> None:
     """Parse map.md, update one entry, atomic-write."""
     try:
-        map_text = MAP_PATH.read_text(encoding="utf-8")
+        map_text = map_path.read_text(encoding="utf-8")
         entries = parse_map(map_text)
         entries[note_path] = new_entry
-        walk_root = _parse_walk_root(map_text)
+        walk_root = _parse_walk_root(map_text, fallback_root=fallback_root)
         new_text = render_map(entries, walk_root=walk_root)
-        _atomic_write(MAP_PATH, new_text)
+        _atomic_write(map_path, new_text)
     except Exception as exc:
         logger.warning("_update_single_entry failed for %s: %s", note_path, exc)

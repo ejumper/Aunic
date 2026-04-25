@@ -7,6 +7,7 @@ from typing import Any
 
 _VALID_POLICIES = {"allow", "ask", "deny"}
 _VALID_EDITOR_SAVE_MODES = {"manual", "auto"}
+_VALID_IMAGE_TRANSPORTS = {"claude_sdk_multimodal", "openai_chat_vision", "unsupported"}
 _CACHE: dict[Path, tuple[int | None, dict[str, Any]]] = {}
 
 
@@ -25,6 +26,8 @@ class OpenAICompatibleProfile:
     replay_reasoning_details: bool = False
     reasoning_replay_turns: int = 1
     context_window: int | None = None
+    supports_images: bool = False
+    image_transport: str = "unsupported"
 
     @property
     def display_label(self) -> str:
@@ -257,6 +260,15 @@ def _parse_openai_compatible_profile(
     if not isinstance(context_window, int) or context_window <= 0:
         context_window = None
 
+    supports_images = bool(payload.get("supports_images", False))
+    raw_image_transport = payload.get("image_transport")
+    if isinstance(raw_image_transport, str):
+        image_transport = raw_image_transport.strip()
+    else:
+        image_transport = "unsupported"
+    if image_transport not in _VALID_IMAGE_TRANSPORTS:
+        image_transport = "unsupported"
+
     return OpenAICompatibleProfile(
         profile_id=profile_id,
         provider_label=provider_label,
@@ -271,6 +283,8 @@ def _parse_openai_compatible_profile(
         replay_reasoning_details=replay_reasoning_details,
         reasoning_replay_turns=reasoning_replay_turns,
         context_window=context_window,
+        supports_images=supports_images,
+        image_transport=image_transport,
     )
 
 

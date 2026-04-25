@@ -1,13 +1,18 @@
 import { create } from "zustand";
+import { getOrCreateBrowserInstanceId, getLastOpenFileStorageKey } from "../browserSession";
 import type { WsClient } from "../ws/client";
-import type { FileChangedPayload, FileEntryPayload } from "../ws/types";
+import type {
+  FileChangedPayload,
+  FileEntryPayload,
+  ProjectNodePayload,
+  ProjectPlanPayload,
+  ProjectStatePayload,
+} from "../ws/types";
 
 export const ROOT_DIR = "";
-
-const LAST_OPEN_FILE_KEY = "aunic:lastOpenFile";
-
 const MAX_ENTRY_NAME_BYTES = 255;
 
+export type ExplorerViewMode = "tree" | "project";
 export type ExplorerWsClient = Pick<WsClient, "request">;
 
 export interface ExplorerSlice {
@@ -16,14 +21,52 @@ export interface ExplorerSlice {
   loading: Set<string>;
   selected: string | null;
   openFile: string | null;
+  sourceFile: string | null;
   error: Record<string, string>;
+  viewMode: ExplorerViewMode;
+  projectState: ProjectStatePayload | null;
+  projectExpanded: Set<string>;
+  projectSelected: string | null;
+  projectLoading: boolean;
+  projectError: string | null;
   loadDir: (client: ExplorerWsClient, dirPath: string) => Promise<void>;
   toggleExpand: (client: ExplorerWsClient, dirPath: string) => Promise<void>;
   setExpanded: (dirPaths: Set<string>) => void;
   select: (path: string | null) => void;
   open: (path: string) => void;
+  openProjectFile: (path: string, nodeId?: string | null) => void;
+  returnToSource: () => void;
+  setViewMode: (mode: ExplorerViewMode) => void;
+  loadProjectState: (client: ExplorerWsClient, sourceFile?: string | null) => Promise<void>;
+  refreshProjectState: (client: ExplorerWsClient) => Promise<void>;
+  setProjectExpanded: (nodeIds: Set<string>) => void;
+  toggleProjectExpand: (nodeId: string) => void;
+  selectProject: (nodeId: string | null) => void;
+  addInclude: (
+    client: ExplorerWsClient,
+    targetPath: string,
+    options?: { recursive?: boolean },
+  ) => Promise<ProjectStatePayload>;
+  removeIncludeEntry: (client: ExplorerWsClient, includePath: string) => Promise<ProjectStatePayload>;
+  createPlan: (client: ExplorerWsClient, title: string) => Promise<ProjectStatePayload>;
+  deletePlan: (client: ExplorerWsClient, planId: string) => Promise<ProjectStatePayload>;
+  setActivePlan: (client: ExplorerWsClient, planId: string | null) => Promise<ProjectStatePayload>;
+  setIncludeEntryActive: (
+    client: ExplorerWsClient,
+    includePath: string,
+    active: boolean,
+  ) => Promise<ProjectStatePayload>;
+  setProjectChildActive: (
+    client: ExplorerWsClient,
+    childPath: string,
+    active: boolean,
+  ) => Promise<ProjectStatePayload>;
   createFile: (client: ExplorerWsClient, dirPath: string, name: string) => Promise<void>;
   createDirectory: (client: ExplorerWsClient, dirPath: string, name: string) => Promise<void>;
+  createProjectFile: (client: ExplorerWsClient, name: string) => Promise<string>;
+  createProjectDirectory: (client: ExplorerWsClient, name: string) => Promise<string>;
+  expandToFile: (client: ExplorerWsClient, path: string) => Promise<void>;
+  renameEntry: (client: ExplorerWsClient, path: string, newName: string) => Promise<void>;
   deleteEntry: (client: ExplorerWsClient, path: string) => Promise<void>;
   handleFileChanged: (client: ExplorerWsClient, event: FileChangedPayload) => void;
   reset: () => void;
@@ -35,7 +78,14 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
   loading: new Set(),
   selected: null,
   openFile: null,
+  sourceFile: null,
   error: {},
+  viewMode: "tree",
+  projectState: null,
+  projectExpanded: new Set(),
+  projectSelected: null,
+  projectLoading: false,
+  projectError: null,
 
   async loadDir(client, dirPath) {
     const dir = normalizeDirPath(dirPath);
@@ -95,8 +145,203 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
 
   open(path) {
     const normalized = normalizePath(path);
-    localStorage.setItem(LAST_OPEN_FILE_KEY, normalized);
-    set({ selected: normalized, openFile: normalized });
+    setLastOpenFile(normalized);
+    set({
+      selected: normalized,
+      openFile: normalized,
+      sourceFile: normalized,
+      projectSelected: null,
+      projectError: null,
+    });
+  },
+
+  openProjectFile(path, nodeId = null) {
+    const normalized = normalizePath(path);
+    set({
+      selected: normalized,
+      openFile: normalized,
+      projectSelected: nodeId,
+      projectError: null,
+    });
+  },
+
+  returnToSource() {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      return;
+    }
+    set({
+      selected: sourceFile,
+      openFile: sourceFile,
+      projectSelected: null,
+    });
+  },
+
+  setViewMode(mode) {
+    set({ viewMode: mode });
+  },
+
+  async loadProjectState(client, sourceFileArg) {
+    const sourceFile = normalizeOptionalPath(sourceFileArg ?? get().sourceFile);
+    if (!sourceFile) {
+      set({
+        projectState: null,
+        projectExpanded: new Set(),
+        projectSelected: null,
+        projectLoading: false,
+        projectError: null,
+      });
+      return;
+    }
+    set({ projectLoading: true, projectError: null });
+    try {
+      const projectState = await client.request("get_project_state", { source_file: sourceFile });
+      if (get().sourceFile !== sourceFile) {
+        return;
+      }
+      set((state) => applyProjectStatePatch(state, projectState));
+    } catch (error) {
+      if (get().sourceFile !== sourceFile) {
+        return;
+      }
+      set({
+        projectLoading: false,
+        projectError: formatExplorerError(error),
+      });
+    }
+  },
+
+  async refreshProjectState(client) {
+    await get().loadProjectState(client, get().sourceFile);
+  },
+
+  setProjectExpanded(nodeIds) {
+    set({ projectExpanded: new Set(nodeIds) });
+  },
+
+  toggleProjectExpand(nodeId) {
+    set((state) => {
+      const expanded = new Set(state.projectExpanded);
+      if (expanded.has(nodeId)) {
+        expanded.delete(nodeId);
+      } else {
+        expanded.add(nodeId);
+      }
+      return { projectExpanded: expanded };
+    });
+  },
+
+  selectProject(nodeId) {
+    set({ projectSelected: nodeId });
+  },
+
+  async addInclude(client, targetPath, options = {}) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before adding project includes.");
+    }
+    const projectState = await client.request("add_include", {
+      source_file: sourceFile,
+      target_path: normalizePath(targetPath),
+      recursive: Boolean(options.recursive),
+    });
+    set((state) => applyProjectStatePatch(state, projectState));
+    return projectState;
+  },
+
+  async removeIncludeEntry(client, includePath) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before removing project includes.");
+    }
+    const projectState = await client.request("remove_include_entry", {
+      source_file: sourceFile,
+      include_path: includePath,
+    });
+    set((state) => applyProjectStatePatch(state, projectState));
+    return projectState;
+  },
+
+  async createPlan(client, title) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before creating a plan.");
+    }
+    const projectState = await client.request("create_plan", {
+      source_file: sourceFile,
+      title: title.trim() || "Untitled Plan",
+    });
+    const activePlan = findProjectPlanById(projectState.plans, projectState.active_plan_id);
+    set((state) => ({
+      ...applyProjectStatePatch(state, projectState),
+      selected: activePlan ? normalizePath(activePlan.path) : state.selected,
+      openFile: activePlan ? normalizePath(activePlan.path) : state.openFile,
+      projectSelected: activePlan?.id ?? state.projectSelected,
+    }));
+    return projectState;
+  },
+
+  async deletePlan(client, planId) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before deleting a plan.");
+    }
+    const deletedPlan = findProjectPlanById(get().projectState?.plans ?? [], planId);
+    const deletedPath = deletedPlan ? normalizePath(deletedPlan.path) : null;
+    const projectState = await client.request("delete_plan", {
+      source_file: sourceFile,
+      plan_id: planId,
+    });
+    set((state) => {
+      const reopenSource = deletedPath !== null && state.openFile === deletedPath && state.sourceFile !== null;
+      return {
+        ...applyProjectStatePatch(state, projectState),
+        selected: reopenSource ? state.sourceFile : state.selected,
+        openFile: reopenSource ? state.sourceFile : state.openFile,
+      };
+    });
+    return projectState;
+  },
+
+  async setActivePlan(client, planId) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before changing the active plan.");
+    }
+    const projectState = await client.request("set_active_plan", {
+      source_file: sourceFile,
+      plan_id: planId,
+    });
+    set((state) => applyProjectStatePatch(state, projectState));
+    return projectState;
+  },
+
+  async setIncludeEntryActive(client, includePath, active) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before changing include state.");
+    }
+    const projectState = await client.request("set_include_entry_active", {
+      source_file: sourceFile,
+      include_path: includePath,
+      active,
+    });
+    set((state) => applyProjectStatePatch(state, projectState));
+    return projectState;
+  },
+
+  async setProjectChildActive(client, childPath, active) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before changing project files.");
+    }
+    const projectState = await client.request("set_project_child_active", {
+      source_file: sourceFile,
+      child_path: normalizePath(childPath),
+      active,
+    });
+    set((state) => applyProjectStatePatch(state, projectState));
+    return projectState;
   },
 
   async createFile(client, dirPath, name) {
@@ -105,8 +350,8 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
     const path = joinPath(dir, entryName);
     const created = await client.request("create_file", { path });
     const newPath = normalizePath(created.path);
-    localStorage.setItem(LAST_OPEN_FILE_KEY, newPath);
-    set({ selected: newPath, openFile: newPath });
+    setLastOpenFile(newPath);
+    set({ selected: newPath, openFile: newPath, sourceFile: newPath });
     await get().loadDir(client, dir);
   },
 
@@ -119,12 +364,99 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
     await get().loadDir(client, dir);
   },
 
+  async createProjectFile(client, name) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before creating project files.");
+    }
+    const entryName = validateEntryName(name, { requireMarkdown: true });
+    const dir = parentDir(sourceFile);
+    const path = joinPath(dir, entryName);
+    const created = await client.request("create_file", { path });
+    const projectState = await client.request("add_include", {
+      source_file: sourceFile,
+      target_path: created.path,
+      recursive: false,
+    });
+    set((state) => ({
+      ...applyProjectStatePatch(state, projectState),
+      selected: normalizePath(created.path),
+      openFile: normalizePath(created.path),
+      projectSelected:
+        findProjectNodeByPath(projectState.entries, normalizePath(created.path), "entry")?.id ?? null,
+    }));
+    if (get().entriesByDir[dir] !== undefined) {
+      await get().loadDir(client, dir);
+    }
+    return normalizePath(created.path);
+  },
+
+  async createProjectDirectory(client, name) {
+    const sourceFile = get().sourceFile;
+    if (!sourceFile) {
+      throw new Error("Open a source file before creating project folders.");
+    }
+    const entryName = validateEntryName(name, { requireMarkdown: false });
+    const dir = parentDir(sourceFile);
+    const path = joinPath(dir, entryName);
+    const created = await client.request("create_directory", { path });
+    const projectState = await client.request("add_include", {
+      source_file: sourceFile,
+      target_path: created.path,
+      recursive: true,
+    });
+    set((state) => ({
+      ...applyProjectStatePatch(state, projectState),
+      selected: normalizePath(created.path),
+      projectSelected:
+        findProjectNodeByPath(projectState.entries, normalizePath(created.path), "entry")?.id ?? null,
+    }));
+    if (get().entriesByDir[dir] !== undefined) {
+      await get().loadDir(client, dir);
+    }
+    return normalizePath(created.path);
+  },
+
+  async expandToFile(client, path) {
+    const normalized = normalizePath(path);
+    const ancestors = ancestorDirs(normalized);
+    if (ancestors.length === 0) return;
+    set((state) => ({ expanded: new Set([...state.expanded, ...ancestors]) }));
+    for (const dir of ancestors) {
+      if (get().entriesByDir[dir] === undefined) {
+        await get().loadDir(client, dir);
+      }
+    }
+  },
+
+  async renameEntry(client, path, newName) {
+    const normalized = normalizePath(path);
+    const result = await client.request("rename_entry", { path: normalized, new_name: newName });
+    const newNormalized = normalizePath(result.path);
+    const parent = parentDir(normalized);
+    set((state) => {
+      const patch: Partial<ExplorerSlice> = {};
+      if (state.openFile === normalized) {
+        patch.openFile = newNormalized;
+        setLastOpenFile(newNormalized);
+      }
+      if (state.sourceFile === normalized) {
+        patch.sourceFile = newNormalized;
+      }
+      if (state.selected === normalized) {
+        patch.selected = newNormalized;
+      }
+      return patch;
+    });
+    await get().loadDir(client, parent);
+  },
+
   async deleteEntry(client, path) {
     const normalized = normalizePath(path);
     await client.request("delete_entry", { path: normalized });
-    const saved = localStorage.getItem(LAST_OPEN_FILE_KEY);
+    const saved = getLastOpenFile();
     if (saved && isSelfOrChild(saved, normalized)) {
-      localStorage.removeItem(LAST_OPEN_FILE_KEY);
+      clearLastOpenFile();
     }
     const parent = parentDir(normalized);
     set((state) => removeEntryPatch(state, normalized));
@@ -140,6 +472,9 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
     if (get().entriesByDir[parent] !== undefined) {
       void get().loadDir(client, parent);
     }
+    if (get().sourceFile) {
+      void get().loadProjectState(client, get().sourceFile);
+    }
   },
 
   reset() {
@@ -149,7 +484,14 @@ export const useExplorerStore = create<ExplorerSlice>((set, get) => ({
       loading: new Set(),
       selected: null,
       openFile: null,
+      sourceFile: null,
       error: {},
+      viewMode: "tree",
+      projectState: null,
+      projectExpanded: new Set(),
+      projectSelected: null,
+      projectLoading: false,
+      projectError: null,
     });
   },
 }));
@@ -178,6 +520,10 @@ export function parentDir(path: string): string {
 export function joinPath(dirPath: string, name: string): string {
   const dir = normalizeDirPath(dirPath);
   return dir ? `${dir}/${name}` : name;
+}
+
+function normalizeOptionalPath(path: string | null | undefined): string | null {
+  return path ? normalizePath(path) : null;
 }
 
 function normalizeEntry(entry: FileEntryPayload): FileEntryPayload {
@@ -248,6 +594,7 @@ function removeEntryPatch(
 
   const expanded = new Set([...state.expanded].filter((dir) => !isSelfOrChild(dir, path)));
   const loading = new Set([...state.loading].filter((dir) => !isSelfOrChild(dir, path)));
+  const sourceCleared = state.sourceFile !== null && isSelfOrChild(state.sourceFile, path);
   return {
     entriesByDir,
     expanded,
@@ -256,7 +603,82 @@ function removeEntryPatch(
       state.selected !== null && isSelfOrChild(state.selected, path) ? null : state.selected,
     openFile:
       state.openFile !== null && isSelfOrChild(state.openFile, path) ? null : state.openFile,
+    sourceFile: sourceCleared ? null : state.sourceFile,
+    projectState: sourceCleared ? null : state.projectState,
+    projectExpanded: sourceCleared ? new Set() : state.projectExpanded,
+    projectSelected: sourceCleared ? null : state.projectSelected,
+    projectError: sourceCleared ? null : state.projectError,
   };
+}
+
+function applyProjectStatePatch(
+  state: ExplorerSlice,
+  projectState: ProjectStatePayload,
+): Partial<ExplorerSlice> {
+  const validIds = collectProjectItemIds(projectState);
+  return {
+    projectState,
+    projectLoading: false,
+    projectError: null,
+    projectExpanded: new Set([...state.projectExpanded].filter((id) => validIds.has(id))),
+    projectSelected:
+      state.projectSelected && validIds.has(state.projectSelected) ? state.projectSelected : null,
+  };
+}
+
+function collectProjectItemIds(projectState: ProjectStatePayload): Set<string> {
+  const ids = new Set<string>();
+  const stack = [...projectState.entries];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node) {
+      continue;
+    }
+    ids.add(node.id);
+    stack.push(...node.children);
+  }
+  for (const plan of projectState.plans) {
+    ids.add(plan.id);
+  }
+  return ids;
+}
+
+function findProjectNodeByPath(
+  nodes: ProjectNodePayload[],
+  path: string,
+  scope?: ProjectNodePayload["scope"],
+): ProjectNodePayload | null {
+  const stack = [...nodes];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node) {
+      continue;
+    }
+    if (normalizePath(node.path) === normalizePath(path) && (scope === undefined || node.scope === scope)) {
+      return node;
+    }
+    stack.push(...node.children);
+  }
+  return null;
+}
+
+function findProjectPlanById(
+  plans: ProjectPlanPayload[],
+  planId: string | null,
+): ProjectPlanPayload | null {
+  if (!planId) {
+    return null;
+  }
+  return plans.find((plan) => plan.plan_id === planId) ?? null;
+}
+
+function ancestorDirs(filePath: string): string[] {
+  const parts = filePath.split("/");
+  const ancestors: string[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    ancestors.push(parts.slice(0, i).join("/"));
+  }
+  return ancestors;
 }
 
 function isSelfOrChild(candidate: string, parent: string): boolean {
@@ -268,4 +690,20 @@ function formatExplorerError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function lastOpenFileStorageKey(): string {
+  return getLastOpenFileStorageKey(getOrCreateBrowserInstanceId());
+}
+
+function getLastOpenFile(): string | null {
+  return window.sessionStorage.getItem(lastOpenFileStorageKey());
+}
+
+function setLastOpenFile(path: string): void {
+  window.sessionStorage.setItem(lastOpenFileStorageKey(), path);
+}
+
+function clearLastOpenFile(): void {
+  window.sessionStorage.removeItem(lastOpenFileStorageKey());
 }

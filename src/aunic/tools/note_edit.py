@@ -21,6 +21,7 @@ from aunic.tools.runtime import RunToolContext, failure_from_payload, failure_pa
 from aunic.tools.memory_tools import build_memory_tool_registry
 from aunic.tools.sleep import build_sleep_tool_registry
 from aunic.tools.stop_process import build_stop_process_tool_registry
+from aunic.tools.task_tools import build_task_tool_registry
 
 try:
     from aunic.tools.bash import build_bash_tool_registry
@@ -63,6 +64,8 @@ def build_note_tool_registry(
     registry.extend(build_research_tool_registry())
     if work_mode in {"read", "work"} or planning_active:
         registry.extend(build_read_tool_registry())
+    if work_mode in {"read", "work"}:
+        registry.extend(build_task_tool_registry())
     if work_mode == "work" and not planning_active:
         registry.extend(build_mutating_file_tool_registry())
         registry.extend(build_bash_tool_registry())
@@ -78,6 +81,7 @@ def build_chat_tool_registry(
     registry.extend(build_research_tool_registry())
     if work_mode in {"read", "work"}:
         registry.extend(build_read_tool_registry())
+        registry.extend(build_task_tool_registry())
     if work_mode == "work":
         registry.extend(build_mutating_file_tool_registry())
         registry.extend(build_bash_tool_registry())

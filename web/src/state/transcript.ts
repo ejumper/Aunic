@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useNoteEditorStore } from "./noteEditor";
+import { useSessionStore } from "./session";
 import type { WsClient, WsRequestError } from "../ws/client";
 import type {
   FileChangedPayload,
@@ -119,7 +120,9 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
       }
       get().loadFromSnapshot(snapshot);
     } catch (error) {
-      set({ status: "error", error: formatTranscriptError(error) });
+      const message = formatTranscriptError(error);
+      set({ status: "error", error: message });
+      setTranscriptIndicator(message, "error");
     }
   },
 
@@ -169,7 +172,9 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
   async deleteRow(client, rowNumber) {
     const { path, revisionId } = get();
     if (!path || !revisionId) {
-      set({ status: "error", error: "Open a file before deleting transcript rows." });
+      const message = "Open a file before deleting transcript rows.";
+      set({ status: "error", error: message });
+      setTranscriptIndicator(message, "error");
       return;
     }
 
@@ -182,15 +187,20 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
       });
       get().loadFromSnapshot(snapshot);
       applySnapshotToNoteEditor(snapshot);
+      setTranscriptIndicator(`Deleted transcript row ${rowNumber}.`);
     } catch (error) {
-      set({ status: "error", error: formatTranscriptError(error) });
+      const message = formatTranscriptError(error);
+      set({ status: "error", error: message });
+      setTranscriptIndicator(message, "error");
     }
   },
 
   async deleteSearchResult(client, rowNumber, resultIndex) {
     const { path, revisionId } = get();
     if (!path || !revisionId) {
-      set({ status: "error", error: "Open a file before deleting search results." });
+      const message = "Open a file before deleting search results.";
+      set({ status: "error", error: message });
+      setTranscriptIndicator(message, "error");
       return;
     }
 
@@ -204,8 +214,11 @@ export const useTranscriptStore = create<TranscriptSlice>((set, get) => ({
       });
       get().loadFromSnapshot(snapshot);
       applySnapshotToNoteEditor(snapshot);
+      setTranscriptIndicator(`Deleted search result ${resultIndex + 1}.`);
     } catch (error) {
-      set({ status: "error", error: formatTranscriptError(error) });
+      const message = formatTranscriptError(error);
+      set({ status: "error", error: message });
+      setTranscriptIndicator(message, "error");
     }
   },
 
@@ -246,4 +259,8 @@ function formatTranscriptError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function setTranscriptIndicator(text: string, kind: "status" | "error" = "status"): void {
+  useSessionStore.getState().setIndicatorMessage(text, kind);
 }

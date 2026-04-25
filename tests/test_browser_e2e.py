@@ -10,6 +10,7 @@ import websockets
 
 from aunic.browser.server import create_browser_app
 from aunic.browser.session import BrowserSession
+from aunic.browser.session_registry import BrowserSessionRegistry
 from aunic.context import FileManager
 
 
@@ -22,13 +23,15 @@ async def test_browser_websocket_smoke_hello_and_read_file(tmp_path: Path, unuse
     note = tmp_path / "note.md"
     note.write_text("# Note\n", encoding="utf-8")
     session = BrowserSession(
+        instance_id="instance-1",
         workspace_root=tmp_path,
         file_manager=FileManager(),
         note_runner=None,
         chat_runner=None,
         provider_factory=lambda _option, _cwd: FakeProvider(),
     )
-    app = create_browser_app(session)
+    registry = BrowserSessionRegistry(session_factory=lambda _instance_id: session)
+    app = create_browser_app(registry)
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=unused_tcp_port, log_level="warning")
     )
@@ -36,7 +39,15 @@ async def test_browser_websocket_smoke_hello_and_read_file(tmp_path: Path, unuse
     try:
         await _wait_until_started(server)
         async with websockets.connect(f"ws://127.0.0.1:{unused_tcp_port}/ws") as ws:
-            await ws.send(json.dumps({"id": "1", "type": "hello", "payload": {}}))
+            await ws.send(
+                json.dumps(
+                    {
+                        "id": "1",
+                        "type": "hello",
+                        "payload": {"instance_id": "instance-1", "page_id": "page-1"},
+                    }
+                )
+            )
             hello = json.loads(await ws.recv())
             assert hello["id"] == "1"
             assert hello["type"] == "session_state"

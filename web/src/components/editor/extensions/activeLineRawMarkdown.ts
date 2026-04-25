@@ -33,10 +33,12 @@ export function activeLineRawMarkdown() {
 type PendingDecoration = {
   from: number;
   to: number;
-  decoration: Decoration;
-};
+} & ({ decoration: Decoration } | { kind: "hidden" });
 
 type FencedLineKind = "start" | "content" | "end";
+type FencedLineInfo = { kind: FencedLineKind; maxColumns: number };
+
+const TAB_VISUAL_COLUMNS = 3;
 
 class PageBreakWidget extends WidgetType {
   toDOM(): HTMLElement {
@@ -45,6 +47,8 @@ class PageBreakWidget extends WidgetType {
     return element;
   }
 }
+
+const hiddenMarkupDecoration = Decoration.replace({});
 
 function buildDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
@@ -60,20 +64,60 @@ function buildDecorations(view: EditorView): DecorationSet {
       const fencedLine = fencedLines.get(line.from);
       if (isActive) {
         const decorations = activeLineDecorations(line.from, line.text);
+        // Apply inline code styling (unrendered: backticks visible but green-styled)
+        if (!isInsideCodeBlock(tree, line.from)) {
+          const inlineCodeRanges = collectInlineCodeRanges(tree, line.from, line.to);
+          addInlineCodeDecorations(decorations, line.from, line.text, inlineCodeRanges, false);
+        }
+        // Apply code block background even when cursor is on the fenced line
+        if (fencedLine) {
+          const fenceDecorations = fencedCodeLineDecorations(
+            line.from,
+            line.text,
+            fencedLine.kind,
+            fencedLine.maxColumns,
+            true,
+          );
+          decorations.push(...fenceDecorations);
+        }
         decorations
           .sort((left, right) => left.from - right.from || left.to - right.to)
-          .forEach((item) => builder.add(item.from, item.to, item.decoration));
+          .forEach((item) =>
+            builder.add(
+              item.from,
+              item.to,
+              "kind" in item ? hiddenMarkupDecoration : item.decoration,
+            ),
+          );
       } else if (fencedLine) {
-        const decorations = fencedCodeLineDecorations(line.from, line.text, fencedLine);
+        const decorations = fencedCodeLineDecorations(
+          line.from,
+          line.text,
+          fencedLine.kind,
+          fencedLine.maxColumns,
+          false,
+        );
         decorations
           .sort((left, right) => left.from - right.from || left.to - right.to)
-          .forEach((item) => builder.add(item.from, item.to, item.decoration));
+          .forEach((item) =>
+            builder.add(
+              item.from,
+              item.to,
+              "kind" in item ? hiddenMarkupDecoration : item.decoration,
+            ),
+          );
       } else if (!isInsideCodeBlock(tree, line.from)) {
         const inlineCodeRanges = collectInlineCodeRanges(tree, line.from, line.to);
         const decorations = lineDecorations(line.from, line.text, inlineCodeRanges);
         decorations
           .sort((left, right) => left.from - right.from || left.to - right.to)
-          .forEach((item) => builder.add(item.from, item.to, item.decoration));
+          .forEach((item) =>
+            builder.add(
+              item.from,
+              item.to,
+              "kind" in item ? hiddenMarkupDecoration : item.decoration,
+            ),
+          );
       }
       if (line.to >= to) {
         break;
@@ -99,9 +143,10 @@ function activeLineDecorations(lineStart: number, text: string): PendingDecorati
   ];
 }
 
-function collectFencedCodeLines(doc: Text): Map<number, FencedLineKind> {
-  const lines = new Map<number, FencedLineKind>();
+function collectFencedCodeLines(doc: Text): Map<number, FencedLineInfo> {
+  const result = new Map<number, FencedLineInfo>();
   let fence: string | null = null;
+  let blockLines: Array<{ from: number; columns: number; kind: FencedLineKind }> = [];
 
   for (let lineNo = 1; lineNo <= doc.lines; lineNo++) {
     const line = doc.line(lineNo);
@@ -111,19 +156,42 @@ function collectFencedCodeLines(doc: Text): Map<number, FencedLineKind> {
         continue;
       }
       fence = fenceMatch[1];
-      lines.set(line.from, "start");
+      blockLines = [
+        { from: line.from, columns: codeBlockVisualColumns(line.text), kind: "start" },
+      ];
       continue;
     }
 
     if (fenceMatch && fenceMatch[1][0] === fence[0] && fenceMatch[1].length >= fence.length) {
-      lines.set(line.from, "end");
+      blockLines.push({
+        from: line.from,
+        columns: codeBlockVisualColumns(line.text),
+        kind: "end",
+      });
+      const maxColumns = Math.max(...blockLines.map((l) => l.columns));
+      for (const { from, kind } of blockLines) {
+        result.set(from, { kind, maxColumns });
+      }
+      blockLines = [];
       fence = null;
     } else {
-      lines.set(line.from, "content");
+      blockLines.push({
+        from: line.from,
+        columns: codeBlockVisualColumns(line.text),
+        kind: "content",
+      });
     }
   }
 
-  return lines;
+  return result;
+}
+
+export function codeBlockVisualColumns(text: string): number {
+  let columns = 0;
+  for (const char of text) {
+    columns += char === "\t" ? TAB_VISUAL_COLUMNS : 1;
+  }
+  return columns;
 }
 
 function fenceLineMatch(text: string): RegExpExecArray | null {
@@ -201,11 +269,13 @@ function lineDecorations(
     });
   }
 
+  addPairedTokenHides(decorations, lineStart, text, "***", inlineCodeRanges);
+  addPairedTokenHides(decorations, lineStart, text, "___", inlineCodeRanges);
   addPairedTokenHides(decorations, lineStart, text, "**", inlineCodeRanges);
   addPairedTokenHides(decorations, lineStart, text, "__", inlineCodeRanges);
   addPairedTokenHides(decorations, lineStart, text, "*", inlineCodeRanges);
   addPairedTokenHides(decorations, lineStart, text, "_", inlineCodeRanges);
-  addInlineCodeDecorations(decorations, lineStart, text, inlineCodeRanges);
+  addInlineCodeDecorations(decorations, lineStart, text, inlineCodeRanges, true);
   addLinkHides(decorations, lineStart, text, inlineCodeRanges);
   return decorations;
 }
@@ -218,6 +288,8 @@ function fencedCodeLineDecorations(
   lineStart: number,
   text: string,
   kind: FencedLineKind,
+  maxColumns: number,
+  isActive: boolean,
 ): PendingDecoration[] {
   const decorations: PendingDecoration[] = [
     {
@@ -225,13 +297,21 @@ function fencedCodeLineDecorations(
       to: lineStart,
       decoration: Decoration.line({
         class: `cm-aunic-code-block-line cm-aunic-code-block-line--${kind}`,
+        attributes: { style: `--code-block-max-cols: ${maxColumns}` },
       }),
     },
   ];
-  if (kind === "start" || kind === "end") {
+  // In rendered state, make fence markers invisible while preserving line height.
+  // visibility:hidden (cm-aunic-hidden-fence) is used instead of display:none so the
+  // line doesn't collapse to zero height when the only content is the backtick sequence.
+  if (!isActive && (kind === "start" || kind === "end")) {
     const match = fenceLineMatch(text);
-    if (match) {
-      addHidden(decorations, lineStart, match.index, match.index + match[1].length);
+    if (match && match.index < match.index + match[1].length) {
+      decorations.push({
+        from: lineStart + match.index,
+        to: lineStart + match.index + match[1].length,
+        decoration: Decoration.mark({ class: "cm-aunic-hidden-fence" }),
+      });
     }
   }
   return decorations;
@@ -246,6 +326,7 @@ function addInlineCodeDecorations(
   lineStart: number,
   text: string,
   inlineCodeRanges: Array<[number, number]>,
+  hideMarkup: boolean,
 ): void {
   for (const [from, to] of inlineCodeRanges) {
     const localFrom = from - lineStart;
@@ -254,11 +335,14 @@ function addInlineCodeDecorations(
     if (ticks <= 0 || localFrom + ticks > localTo - ticks) {
       continue;
     }
-    addHidden(decorations, lineStart, localFrom, localFrom + ticks);
-    addHidden(decorations, lineStart, localTo - ticks, localTo);
+    if (hideMarkup) {
+      addHidden(decorations, lineStart, localFrom, localFrom + ticks);
+      addHidden(decorations, lineStart, localTo - ticks, localTo);
+    }
+    // Rendered: mark only the content (no ticks). Unrendered: mark full range (ticks visible but styled).
     decorations.push({
-      from: lineStart + localFrom + ticks,
-      to: lineStart + localTo - ticks,
+      from: lineStart + localFrom + (hideMarkup ? ticks : 0),
+      to: lineStart + localTo - (hideMarkup ? ticks : 0),
       decoration: Decoration.mark({ class: "cm-aunic-inline-code" }),
     });
   }
@@ -341,10 +425,24 @@ function addHidden(
   if (from >= to) {
     return;
   }
+  let mergedFrom = lineStart + from;
+  let mergedTo = lineStart + to;
+  for (let index = decorations.length - 1; index >= 0; index -= 1) {
+    const item = decorations[index];
+    if (!("kind" in item) || item.kind !== "hidden") {
+      continue;
+    }
+    if (item.to < mergedFrom || item.from > mergedTo) {
+      continue;
+    }
+    mergedFrom = Math.min(mergedFrom, item.from);
+    mergedTo = Math.max(mergedTo, item.to);
+    decorations.splice(index, 1);
+  }
   decorations.push({
-    from: lineStart + from,
-    to: lineStart + to,
-    decoration: Decoration.mark({ class: "cm-aunic-hidden-markup" }),
+    from: mergedFrom,
+    to: mergedTo,
+    kind: "hidden",
   });
 }
 

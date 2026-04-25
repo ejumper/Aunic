@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useExplorerStore } from "./explorer";
 import { useNoteEditorStore } from "./noteEditor";
 import { usePromptStore, type PromptWsClient } from "./prompt";
 import { useSessionStore } from "./session";
@@ -13,6 +14,7 @@ type RequestRecord = {
 
 describe("usePromptStore", () => {
   beforeEach(() => {
+    useExplorerStore.getState().reset();
     usePromptStore.getState().clear();
     useNoteEditorStore.getState().reset();
     useSessionStore.getState().clearSession();
@@ -53,6 +55,7 @@ describe("usePromptStore", () => {
           active_file: "note.md",
           included_files: [],
           text: "Do the thing",
+          image_attachments: [],
         },
       },
     ]);
@@ -197,6 +200,104 @@ describe("usePromptStore", () => {
       kind: "error",
     });
   });
+
+  it("creates and opens a plan through the browser-side /plan command", async () => {
+    const requests: RequestRecord[] = [];
+    const client = mockClient(async (type, payload) => {
+      requests.push({ type, payload });
+      if (type === "set_work_mode") {
+        return { work_mode: "plan" };
+      }
+      if (type === "create_plan") {
+        return {
+          source_file: "note.md",
+          entries: [],
+          plans: [
+            {
+              id: "plan:browser-plan",
+              plan_id: "browser-plan",
+              path: ".aunic/plans/browser-plan.md",
+              name: "browser-plan.md",
+              title: "Browser Plan",
+              status: "draft",
+              active: true,
+              exists: true,
+              openable: true,
+            },
+          ],
+          active_plan_id: "browser-plan",
+        };
+      }
+      throw new Error(`unexpected request ${type}`);
+    });
+    useExplorerStore.setState({ openFile: "note.md", sourceFile: "note.md" });
+    useSessionStore.getState().setSession({
+      ...sessionPayload(),
+      capabilities: { prompt_commands: true, plan_flow: true },
+    });
+    usePromptStore.getState().setDraft("/plan Browser Plan");
+
+    await expect(usePromptStore.getState().submit(client, "note.md", [])).resolves.toBe(true);
+
+    expect(requests).toEqual([
+      {
+        type: "set_work_mode",
+        payload: { work_mode: "plan" },
+      },
+      {
+        type: "create_plan",
+        payload: { source_file: "note.md", title: "Browser Plan" },
+      },
+    ]);
+    expect(useExplorerStore.getState().sourceFile).toBe("note.md");
+    expect(useExplorerStore.getState().openFile).toBe(".aunic/plans/browser-plan.md");
+    expect(useSessionStore.getState().indicatorMessage?.text).toBe("Created plan: Browser Plan.");
+  });
+
+  it("submits prompt image attachments and clears them after a successful send", async () => {
+    const requests: RequestRecord[] = [];
+    const client = mockClient(async (type, payload) => {
+      requests.push({ type, payload });
+      return { run_id: "run-1" };
+    });
+    useSessionStore.getState().setSession({
+      ...sessionPayload(),
+      selected_model: {
+        ...sessionPayload().selected_model,
+        supports_images: true,
+      },
+    });
+    usePromptStore.getState().setDraft("Describe this");
+    usePromptStore.getState().addImageAttachments([
+      {
+        id: "img-1",
+        name: "diagram.png",
+        data_base64: "ZmFrZQ==",
+        size_bytes: 4,
+      },
+    ]);
+
+    await expect(usePromptStore.getState().submit(client, "note.md", [])).resolves.toBe(true);
+
+    expect(requests).toEqual([
+      {
+        type: "submit_prompt",
+        payload: {
+          active_file: "note.md",
+          included_files: [],
+          text: "Describe this",
+          image_attachments: [
+            {
+              name: "diagram.png",
+              data_base64: "ZmFrZQ==",
+              size_bytes: 4,
+            },
+          ],
+        },
+      },
+    ]);
+    expect(usePromptStore.getState().imageAttachments).toEqual([]);
+  });
 });
 
 function mockClient(
@@ -237,6 +338,7 @@ function wsError(reason: string): WsRequestError {
 
 function sessionPayload() {
   return {
+    instance_id: "instance-1",
     run_active: false,
     run_id: null,
     workspace_root: "/home/ejumps",
@@ -251,6 +353,8 @@ function sessionPayload() {
       model: "test",
       profile_id: null,
       context_window: null,
+      supports_images: false,
+      image_transport: "unsupported" as const,
     },
     pending_permission: null,
   };

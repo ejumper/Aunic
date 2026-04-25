@@ -25,6 +25,9 @@ from aunic.context import FileManager
 from aunic.context.types import TextSpan
 from aunic.domain import TranscriptRow
 from aunic.errors import ChatModeError, FileReadError, NoteModeError, OptimisticWriteError
+from aunic.file_ui_state import resolve_project_context_paths
+from aunic.image_inputs import is_supported_image_path, prepare_image_inputs_from_paths
+from aunic.image_picker import pick_image_files
 from aunic.modes import ChatModeRunRequest, ChatModeRunner, NoteModeRunRequest, NoteModeRunner, NoteModeRunResult
 from aunic.plans import PlanService
 from aunic.progress import ProgressEvent
@@ -55,6 +58,7 @@ from aunic.tui.types import (
     NoteConflictState,
     PlanMenuEntry,
     PermissionPromptState,
+    PromptImageAttachment,
     SleepStatusState,
     TranscriptFilter,
     TranscriptViewState,
@@ -376,26 +380,12 @@ class TuiController:
     def _rebuild_available_files(self) -> None:
         """Resolve include_entries to concrete paths and update available_files."""
         active = self._context_file()
-        base = active.parent
-        seen: set[Path] = set()
-        resolved: list[Path] = []
-        for entry in self.state.include_entries:
-            if not entry.active:
-                continue
-            raw = Path(entry.path)
-            target = (base / raw).resolve() if not raw.is_absolute() else raw.resolve()
-            if entry.is_dir:
-                pattern = "**/*.md" if entry.recursive else "*.md"
-                for p in sorted(target.glob(pattern)):
-                    rp = p.resolve()
-                    if rp != active and rp not in seen:
-                        seen.add(rp)
-                        resolved.append(rp)
-            else:
-                if target != active and target not in seen:
-                    seen.add(target)
-                    resolved.append(target)
-        self.state.available_files = (active, *resolved)
+        resolved = resolve_project_context_paths(
+            active,
+            self.state.include_entries,
+            inactive_children=self.state.include_inactive_children,
+        )
+        self.state.available_files = (active, *resolved.text_files)
         if self._on_includes_changed is not None:
             self._on_includes_changed()
 
@@ -410,6 +400,37 @@ class TuiController:
     def remove_include(self, index: int) -> None:
         self.state.include_entries.pop(index)
         self._rebuild_available_files()
+        self._invalidate()
+
+    async def attach_prompt_images_via_picker(self) -> None:
+        if not self.state.selected_model.supports_images:
+            self._set_error(f"{self.state.selected_model.label} does not support image inputs.")
+            self._invalidate()
+            return
+        try:
+            paths = await asyncio.to_thread(pick_image_files)
+        except Exception as exc:
+            self._set_error(str(exc) or "Image picker failed.")
+            self._invalidate()
+            return
+        if not paths:
+            return
+        existing = {attachment.path: attachment for attachment in self.state.prompt_image_attachments}
+        for path in paths:
+            existing[path] = PromptImageAttachment(path=path, name=path.name)
+        self.state.prompt_image_attachments = tuple(existing.values())
+        self._set_status(
+            f"Attached {len(paths)} image{'s' if len(paths) != 1 else ''}."
+        )
+        self._invalidate()
+
+    def remove_prompt_image_attachment(self, index: int) -> None:
+        if index < 0 or index >= len(self.state.prompt_image_attachments):
+            return
+        attachments = list(self.state.prompt_image_attachments)
+        removed = attachments.pop(index)
+        self.state.prompt_image_attachments = tuple(attachments)
+        self._set_status(f"Removed attachment: {removed.name}")
         self._invalidate()
 
     def open_file_menu(self) -> None:
@@ -1115,7 +1136,10 @@ class TuiController:
         elif event.kind == "loop_event":
             loop_kind = event.details.get("loop_kind")
             if loop_kind == "provider_request":
-                msg = f"Pontificating... ({self._run_turn_count})"
+                raw_label = event.details.get("active_task_label") if isinstance(event.details, dict) else None
+                label_text = raw_label.strip() if isinstance(raw_label, str) else ""
+                base = label_text if label_text else "Pontificating"
+                msg = f"{base}... ({self._run_turn_count})"
                 elapsed = time.monotonic() - self._tool_status_set_at
                 remaining = _MIN_TOOL_STATUS_SECONDS - elapsed
                 if remaining > 0:
@@ -1203,9 +1227,29 @@ class TuiController:
         isolate = self._isolate_override
         self._isolate_override = None
         if isolate is not None:
-            run_included = isolate  # may be empty (active file only) or explicit list
+            run_included = tuple(path for path in isolate if not is_supported_image_path(path))
+            run_included_images = tuple(path for path in isolate if is_supported_image_path(path))
         else:
-            run_included = self.state.included_files
+            resolved_context = resolve_project_context_paths(
+                self._context_file(),
+                self.state.include_entries,
+                inactive_children=self.state.include_inactive_children,
+            )
+            run_included = resolved_context.text_files
+            run_included_images = resolved_context.image_files
+        if (run_included_images or self.state.prompt_image_attachments) and not self.state.selected_model.supports_images:
+            self._set_error(f"{self.state.selected_model.label} does not support image inputs.")
+            self._invalidate()
+            return
+        try:
+            prompt_images = await prepare_image_inputs_from_paths(
+                (attachment.path for attachment in self.state.prompt_image_attachments),
+                persistent=False,
+            )
+        except FileReadError as exc:
+            self._set_error(str(exc))
+            self._invalidate()
+            return
         try:
             provider = self._build_provider()
             if self.state.mode == "note":
@@ -1213,6 +1257,8 @@ class TuiController:
                     NoteModeRunRequest(
                         active_file=self._context_file(),
                         included_files=run_included,
+                        included_image_files=run_included_images,
+                        prompt_images=prompt_images,
                         active_plan_id=self.state.active_plan_id,
                         active_plan_path=self.state.active_plan_path,
                         planning_status=self.state.planning_status,
@@ -1247,6 +1293,8 @@ class TuiController:
                     ChatModeRunRequest(
                         active_file=self._context_file(),
                         included_files=run_included,
+                        included_image_files=run_included_images,
+                        prompt_images=prompt_images,
                         active_plan_id=self.state.active_plan_id,
                         active_plan_path=self.state.active_plan_path,
                         planning_status=self.state.planning_status,
@@ -1272,6 +1320,7 @@ class TuiController:
                 else:
                     self._set_status(f"Finished!{stats}")
                 await self._load_active_file(reset_dirty=True)
+            self.state.prompt_image_attachments = ()
             if self._ctx_tokens_used is not None:
                 self._ctx_last_file_len = len(self._full_text)
                 self._save_ctx_cache()
@@ -1445,16 +1494,19 @@ class TuiController:
             self._clear_editor_selection()
 
         try:
-            from aunic.map.builder import refresh_map_entry_if_stale
+            from aunic.map.builder import ensure_map_ready, refresh_map_entry_if_stale
+
+            ensure_map_ready(self._context_file(), fallback_root=self._cwd)
             if display_file == self._context_file():
-                refresh_map_entry_if_stale(self._context_file())
+                refresh_map_entry_if_stale(self._context_file(), fallback_root=self._cwd)
         except Exception as exc:
             logger.warning("map refresh on file open failed: %s", exc)
 
     async def _switch_active_file(self, path: Path) -> None:
         try:
             from aunic.map.builder import refresh_map_entry_if_stale
-            refresh_map_entry_if_stale(self._context_file())
+
+            refresh_map_entry_if_stale(self._context_file(), fallback_root=self._cwd)
         except Exception as exc:
             logger.warning("map refresh on file switch-away failed: %s", exc)
 
@@ -1796,7 +1848,7 @@ class TuiController:
                 return
             try:
                 from aunic.map.builder import set_summary
-                set_summary(self._context_file(), text)
+                set_summary(self._context_file(), text, fallback_root=self._cwd)
                 self._set_status(f"Summary locked for {self._context_file().name}.")
             except Exception as exc:
                 self._set_error(f"/map --set-summary failed: {exc}")
@@ -1805,7 +1857,7 @@ class TuiController:
         if first == "--clear-summary":
             try:
                 from aunic.map.builder import clear_summary
-                clear_summary(self._context_file())
+                clear_summary(self._context_file(), fallback_root=self._cwd)
                 self._set_status(f"Summary cleared for {self._context_file().name}.")
             except Exception as exc:
                 self._set_error(f"/map --clear-summary failed: {exc}")
@@ -1824,7 +1876,7 @@ class TuiController:
 
         try:
             from aunic.map.builder import build_map
-            result = build_map(scope)
+            result = build_map(scope, subject_path=scope or self._context_file(), fallback_root=self._cwd)
             scope_label = f" under {scope}" if scope is not None else ""
             self._set_status(
                 f"Mapped {result.entry_count} notes{scope_label}"
@@ -2655,7 +2707,13 @@ def _build_model_options(
 ) -> tuple[ModelOption, ...]:
     codex_model = initial_model if initial_provider == "codex" and initial_model else SETTINGS.codex.default_model
     options: list[ModelOption] = [
-        ModelOption(label=f"Codex ({codex_model})", provider_name="codex", model=codex_model),
+        ModelOption(
+            label=f"Codex ({codex_model})",
+            provider_name="codex",
+            model=codex_model,
+            supports_images=False,
+            image_transport="unsupported",
+        ),
     ]
 
     openai_profiles = get_openai_compatible_profiles(cwd)
@@ -2674,6 +2732,8 @@ def _build_model_options(
                     model=model,
                     profile_id=profile.profile_id,
                     context_window=profile.context_window,
+                    supports_images=profile.supports_images,
+                    image_transport=profile.image_transport,  # type: ignore[arg-type]
                 )
             )
     else:
@@ -2688,14 +2748,34 @@ def _build_model_options(
                 provider_name="openai_compatible",
                 model=llama_model,
                 profile_id="llama_addie",
+                supports_images=False,
+                image_transport="unsupported",
             )
         )
 
     options.extend(
         [
-            ModelOption(label="Claude Haiku", provider_name="claude", model=SETTINGS.claude.haiku_model),
-            ModelOption(label="Claude Sonnet", provider_name="claude", model=SETTINGS.claude.sonnet_model),
-            ModelOption(label="Claude Opus", provider_name="claude", model=SETTINGS.claude.opus_model),
+            ModelOption(
+                label="Claude Haiku",
+                provider_name="claude",
+                model=SETTINGS.claude.haiku_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
+            ),
+            ModelOption(
+                label="Claude Sonnet",
+                provider_name="claude",
+                model=SETTINGS.claude.sonnet_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
+            ),
+            ModelOption(
+                label="Claude Opus",
+                provider_name="claude",
+                model=SETTINGS.claude.opus_model,
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
+            ),
         ]
     )
     return tuple(options)
@@ -2862,6 +2942,10 @@ _TOOL_VERBS: dict[str, str] = {
     "note_edit": "Editing",
     "note_write": "Writing",
     "sleep": "Sleeping",
+    "task_create": "Creating task",
+    "task_get": "Reading task",
+    "task_list": "Listing tasks",
+    "task_update": "Updating task",
 }
 
 

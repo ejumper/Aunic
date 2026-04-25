@@ -153,6 +153,18 @@ class PlanService:
             frontmatter=_frontmatter_from_entry(entry),
         )
 
+    def delete_plan(self, plan_id: str) -> PlanEntry:
+        entry = self._entry_for(plan_id)
+        path = entry.file_path(self.plans_dir)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        entries = [existing for existing in self._load_index() if existing.id != entry.id]
+        if entries or self.index_path.exists():
+            self._write_index(entries)
+        return entry
+
     def recover_index(self) -> tuple[PlanEntry, ...]:
         entries: list[PlanEntry] = []
         if not self.plans_dir.exists():

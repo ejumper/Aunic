@@ -141,6 +141,90 @@ describe("PromptComposer", () => {
       active_file: "note.md",
       included_files: [],
       text: "Do the thing",
+      image_attachments: [],
+    });
+  });
+
+  it("submits and researches against the anchored source file", async () => {
+    useExplorerStore.setState({ openFile: "child.md", sourceFile: "source.md" });
+    useNoteEditorStore.setState({
+      path: "child.md",
+      revisionId: "rev-1",
+      initialDoc: "base",
+      currentDoc: "base",
+      dirty: false,
+    });
+    useSessionStore.getState().setSession(sessionPayload());
+    usePromptStore.getState().setDraft("Anchor test");
+
+    await act(async () => {
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      container.querySelector(".cm-content")?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          code: "Enter",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await flushPromises();
+    });
+
+    expect(request).toHaveBeenCalledWith("submit_prompt", {
+      active_file: "source.md",
+      included_files: [],
+      text: "Anchor test",
+      image_attachments: [],
+    });
+
+    request.mockClear();
+    request.mockResolvedValue(fileSnapshot("source.md", "rev-2"));
+
+    await act(async () => {
+      useSessionStore.getState().setSession({
+        ...sessionPayload(),
+        research_state: {
+          mode: "results",
+          source: "web",
+          query: "python",
+          scope: null,
+          busy: null,
+          results: [
+            {
+              title: "Python",
+              url: "https://www.python.org/",
+              snippet: "Official Python site",
+              source: null,
+              result_id: null,
+              local_path: null,
+              score: 1,
+              heading_path: [],
+            },
+          ],
+          packet: null,
+        },
+      });
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLInputElement>("input[type='checkbox']")?.click();
+      await flushPromises();
+    });
+    await act(async () => {
+      button("Fetch")?.click();
+      await flushPromises();
+    });
+
+    expect(request).toHaveBeenCalledWith("research_fetch_result", {
+      active_file: "source.md",
+      result_index: 0,
     });
   });
 
@@ -160,6 +244,7 @@ describe("PromptComposer", () => {
 
     expect(request).toHaveBeenCalledWith("set_mode", { mode: "chat" });
     expect(request).toHaveBeenCalledWith("set_work_mode", { work_mode: "read" });
+    expect(useSessionStore.getState().indicatorMessage?.text).toBe("Agent mode set to read.");
   });
 
   it("fills the context meter from session usage and unsaved note edits", async () => {
@@ -182,6 +267,54 @@ describe("PromptComposer", () => {
     expect(meter).not.toBeNull();
     expect(meter?.style.getPropertyValue("--context-fill")).toBe("50.10%");
     expect(meter?.getAttribute("aria-label")).toContain("Context usage ~1,002 / 2,000 tokens");
+  });
+
+  it("attaches pasted images from the prompt editor", async () => {
+    openComposer({
+      selected_model: {
+        ...sessionPayload().selected_model,
+        supports_images: true,
+        image_transport: "openai_chat_vision",
+      },
+    });
+
+    await act(async () => {
+      root.render(<PromptComposer />);
+      await flushPromises();
+    });
+
+    const file = new File(["fake"], "clipboard.png", { type: "image/png" });
+    const event = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "clipboardData", {
+      value: {
+        items: [
+          {
+            kind: "file",
+            type: "image/png",
+            getAsFile: () => file,
+          },
+        ],
+        files: [],
+      },
+    });
+
+    await act(async () => {
+      container.querySelector(".cm-content")?.dispatchEvent(event);
+      await flushPromises();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(usePromptStore.getState().imageAttachments).toMatchObject([
+      {
+        name: "clipboard.png",
+        size_bytes: 4,
+      },
+    ]);
+    expect(container.querySelector<HTMLButtonElement>("[aria-label='Send']")?.disabled).toBe(
+      false,
+    );
+    expect(useSessionStore.getState().indicatorMessage?.text).toBe("Attached 1 image.");
   });
 
   it("replaces the prompt editor with research results", async () => {
@@ -449,7 +582,7 @@ describe("PromptComposer", () => {
 });
 
 function openComposer(overrides: Partial<SessionStatePayload> = {}): void {
-  useExplorerStore.setState({ openFile: "note.md" });
+  useExplorerStore.setState({ openFile: "note.md", sourceFile: "note.md" });
   useNoteEditorStore.setState({
     path: "note.md",
     revisionId: "rev-1",
@@ -462,6 +595,7 @@ function openComposer(overrides: Partial<SessionStatePayload> = {}): void {
 
 function sessionPayload(): SessionStatePayload {
   return {
+    instance_id: "instance-1",
     run_active: false,
     run_id: null,
     workspace_root: "/home/ejumps",

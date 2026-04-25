@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from aunic.context.types import ContextBuildResult, FileSnapshot, PromptRun, StructuralNode, TextSpan
-from aunic.domain import ReasoningEffort, TranscriptRow, UsageLog, WorkMode
+from aunic.domain import ProviderImageInput, ReasoningEffort, TranscriptRow, UsageLog, WorkMode
 from aunic.progress import ProgressSink
 from aunic.providers.base import LLMProvider
 from aunic.research.types import ResearchSummary
@@ -73,6 +73,8 @@ class LoopRunRequest:
     context_result: ContextBuildResult
     active_file: Path | None = None
     included_files: tuple[Path, ...] = ()
+    persistent_images: tuple[ProviderImageInput, ...] = ()
+    prompt_images: tuple[ProviderImageInput, ...] = ()
     active_plan_id: str | None = None
     active_plan_path: Path | None = None
     planning_status: str = "none"

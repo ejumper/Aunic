@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
+import aunic.file_ui_state as file_ui_state
 from aunic.browser.errors import BrowserError, RevisionConflict
 from aunic.browser.session import BrowserSession
 from aunic.context import FileManager
 from aunic.domain import TranscriptRow
 from aunic.model_options import ModelOption
+from aunic.plans import PlanService
 from aunic.progress import ProgressEvent
 from aunic.research.types import (
     FetchPacket,
@@ -217,6 +221,25 @@ def _session(
     )
 
 
+def _write_test_png(path: Path) -> None:
+    image = Image.new("RGBA", (1, 1), (255, 0, 0, 255))
+    image.save(path, format="PNG")
+
+
+def _test_png_base64() -> str:
+    image = Image.new("RGBA", (1, 1), (255, 0, 0, 255))
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@pytest.fixture(autouse=True)
+def _tmp_tui_prefs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(file_ui_state, "_TUI_PREFS_PATH", tmp_path / "tui_prefs.json")
+
+
 @pytest.mark.asyncio
 async def test_session_reads_and_writes_note_content_preserving_transcript(tmp_path: Path) -> None:
     note = tmp_path / "note.md"
@@ -235,6 +258,68 @@ async def test_session_reads_and_writes_note_content_preserving_transcript(tmp_p
     assert written["note_content"] == "# Changed"
     assert written["transcript_rows"][0]["content"] == "hi"
     assert join_note_and_transcript("# Changed\n", None).strip() in note.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_session_attach_ensures_map_ready_once_per_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+    first = FakeConnection()
+    second = FakeConnection()
+    calls: list[Path] = []
+
+    async def fake_ensure(subject_path: Path, *, fallback_root: Path | None = None):
+        calls.append(subject_path)
+        return None
+
+    monkeypatch.setattr("aunic.map.builder.ensure_map_ready_shared", fake_ensure)
+
+    await session.attach(first)
+    await session.attach(second)
+    await session.detach(first)
+    await session.detach(second)
+
+    assert calls == [tmp_path.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_session_read_file_refreshes_map_entry_if_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+    calls: list[tuple[Path, Path | None]] = []
+
+    def fake_refresh(note_path: Path, *, fallback_root: Path | None = None) -> None:
+        calls.append((note_path, fallback_root))
+
+    monkeypatch.setattr("aunic.map.builder.refresh_map_entry_if_stale", fake_refresh)
+
+    await session.read_file("note.md")
+
+    assert calls == [(note.resolve(), tmp_path.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_session_write_file_marks_map_entry_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+    snapshot = await session.read_file("note.md")
+    calls: list[Path] = []
+
+    def fake_mark(note_path: Path) -> None:
+        calls.append(note_path)
+
+    monkeypatch.setattr("aunic.map.builder.mark_map_entry_stale", fake_mark)
+
+    await session.write_file(
+        "note.md",
+        text="changed",
+        expected_revision=snapshot["revision_id"],
+    )
+
+    assert calls == [note.resolve()]
 
 
 @pytest.mark.asyncio
@@ -517,6 +602,21 @@ async def test_set_work_mode_updates_state_and_broadcasts(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_set_work_mode_accepts_plan_without_overwriting_base_work_mode(tmp_path: Path) -> None:
+    session = _session(tmp_path)
+    conn = FakeConnection()
+    await session.attach(conn)  # type: ignore[arg-type]
+
+    await session.set_work_mode("plan")
+    await session.shutdown()
+
+    assert session.agent_mode == "plan"
+    assert session.work_mode == "off"
+    assert conn.events[-1]["type"] == "session_state"
+    assert conn.events[-1]["payload"]["work_mode"] == "plan"
+
+
+@pytest.mark.asyncio
 async def test_set_work_mode_rejects_invalid_input(tmp_path: Path) -> None:
     session = _session(tmp_path)
 
@@ -608,6 +708,246 @@ async def test_include_command_affects_next_browser_run(tmp_path: Path) -> None:
 
     assert response["message"] == "Included file: ./other.md"
     assert runner.requests[0].included_files == (other.resolve(),)
+
+
+@pytest.mark.asyncio
+async def test_exclude_command_removes_persisted_include_from_next_browser_run(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    other = tmp_path / "other.md"
+    note.write_text("body", encoding="utf-8")
+    other.write_text("other", encoding="utf-8")
+    runner = ScriptedNoteRunner()
+    session = _session(tmp_path, note_runner=runner)
+
+    await session.run_prompt_command(active_file="note.md", text="/include ./other.md")
+    response = await session.run_prompt_command(active_file="note.md", text="/exclude ./other.md")
+    await session.submit_prompt(active_file="note.md", included_files=[], text="Do it")
+    await _wait_for(lambda: not session.run_active)
+
+    assert response["message"] == "Excluded: ./other.md"
+    assert runner.requests[0].included_files == ()
+
+
+@pytest.mark.asyncio
+async def test_map_command_rebuilds_canonical_map_in_browser(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+
+    response = await session.run_prompt_command(active_file="note.md", text="/map")
+
+    assert response["message"].startswith("Mapped ")
+    assert (tmp_path / ".aunic" / "map.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_map_set_and_clear_summary_work_in_browser(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+
+    locked = await session.run_prompt_command(
+        active_file="note.md",
+        text="/map --set-summary Important note",
+    )
+    cleared = await session.run_prompt_command(
+        active_file="note.md",
+        text="/map --clear-summary",
+    )
+
+    assert locked["message"] == "Summary locked for note.md."
+    assert cleared["message"] == "Summary cleared for note.md."
+
+
+@pytest.mark.asyncio
+async def test_project_state_endpoints_round_trip_include_visibility(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    docs = tmp_path / "docs"
+    keep = docs / "keep.md"
+    skip = docs / "skip.md"
+    note.write_text("body", encoding="utf-8")
+    docs.mkdir()
+    keep.write_text("keep", encoding="utf-8")
+    skip.write_text("skip", encoding="utf-8")
+    session = _session(tmp_path)
+
+    state = await session.add_include(
+        source_file="note.md",
+        target_path="docs",
+        recursive=True,
+    )
+    assert state["plans"] == []
+    assert state["active_plan_id"] is None
+    assert state["entries"][0]["path"] == "docs"
+    assert state["entries"][0]["kind"] == "dir"
+    assert [child["path"] for child in state["entries"][0]["children"]] == [
+        "docs/keep.md",
+        "docs/skip.md",
+    ]
+
+    state = await session.set_project_child_active(
+        source_file="note.md",
+        child_path="docs/skip.md",
+        active=False,
+    )
+
+    children = {child["path"]: child for child in state["entries"][0]["children"]}
+    assert children["docs/keep.md"]["active"] is True
+    assert children["docs/skip.md"]["active"] is False
+    assert children["docs/skip.md"]["effective_active"] is False
+
+    state = await session.set_include_entry_active(
+        source_file="note.md",
+        include_path="docs",
+        active=False,
+    )
+    assert state["entries"][0]["active"] is False
+    assert all(child["effective_active"] is False for child in state["entries"][0]["children"])
+
+    reloaded = await session.get_project_state(source_file="note.md")
+    assert reloaded == state
+
+
+@pytest.mark.asyncio
+async def test_project_state_marks_included_images_as_non_openable(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    image = tmp_path / "diagram.png"
+    note.write_text("body", encoding="utf-8")
+    _write_test_png(image)
+    session = _session(tmp_path)
+
+    state = await session.add_include(source_file="note.md", target_path="diagram.png")
+
+    assert len(state["entries"]) == 1
+    assert state["entries"][0]["path"] == "diagram.png"
+    assert state["entries"][0]["kind"] == "file"
+    assert state["entries"][0]["openable"] is False
+
+
+@pytest.mark.asyncio
+async def test_submit_prompt_passes_persistent_and_ephemeral_images_into_note_runs(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    image = tmp_path / "diagram.png"
+    note.write_text("body", encoding="utf-8")
+    _write_test_png(image)
+    runner = ScriptedNoteRunner()
+    session = _session(
+        tmp_path,
+        note_runner=runner,
+        model_options=(
+            ModelOption(
+                label="Claude Sonnet",
+                provider_name="claude",
+                model="claude-sonnet",
+                supports_images=True,
+                image_transport="claude_sdk_multimodal",
+            ),
+        ),
+    )
+
+    await session.add_include(source_file="note.md", target_path="diagram.png")
+    await session.submit_prompt(
+        active_file="note.md",
+        included_files=[],
+        text="Describe the image",
+        image_attachments=[
+            {
+                "name": "attach.png",
+                "data_base64": _test_png_base64(),
+                "size_bytes": 70,
+            }
+        ],
+    )
+    await _wait_for(lambda: not session.run_active)
+
+    assert len(runner.requests) == 1
+    assert runner.requests[0].included_image_files == (image.resolve(),)
+    assert len(runner.requests[0].prompt_images) == 1
+    assert runner.requests[0].prompt_images[0].name == "attach.png"
+    assert runner.requests[0].prompt_images[0].persistent is False
+
+
+@pytest.mark.asyncio
+async def test_remove_include_entry_removes_persisted_project_entry(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    other = tmp_path / "other.md"
+    note.write_text("body", encoding="utf-8")
+    other.write_text("other", encoding="utf-8")
+    session = _session(tmp_path)
+
+    await session.add_include(source_file="note.md", target_path="other.md")
+    state = await session.remove_include_entry(source_file="note.md", include_path="other.md")
+
+    assert state["entries"] == []
+
+
+@pytest.mark.asyncio
+async def test_project_state_lists_plans_and_tracks_active_plan(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+
+    created = await session.create_plan(source_file="note.md", title="Ship browser plan mode")
+
+    assert created["active_plan_id"] is not None
+    assert len(created["plans"]) == 1
+    assert created["plans"][0]["active"] is True
+    assert created["plans"][0]["status"] == "draft"
+    assert created["plans"][0]["path"].startswith(".aunic/plans/")
+
+    cleared = await session.set_active_plan(source_file="note.md", plan_id=None)
+
+    assert cleared["active_plan_id"] is None
+    assert cleared["plans"][0]["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_plan_removes_project_plan_and_clears_active_selection(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    session = _session(tmp_path)
+
+    created = await session.create_plan(source_file="note.md", title="Delete browser plan mode")
+    deleted = await session.delete_plan(source_file="note.md", plan_id=created["active_plan_id"])
+
+    assert deleted["plans"] == []
+    assert deleted["active_plan_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_mode_passes_selected_draft_plan_into_note_runs(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    runner = ScriptedNoteRunner()
+    session = _session(tmp_path, note_runner=runner)
+
+    state = await session.create_plan(source_file="note.md", title="Implement browser plans")
+    await session.set_work_mode("plan")
+    await session.submit_prompt(active_file="note.md", included_files=[], text="Keep planning")
+    await _wait_for(lambda: not session.run_active)
+
+    assert runner.requests[0].active_plan_id == state["active_plan_id"]
+    assert runner.requests[0].active_plan_path.name.endswith(".md")
+    assert runner.requests[0].planning_status == "drafting"
+    assert runner.requests[0].work_mode == "off"
+
+
+@pytest.mark.asyncio
+async def test_plan_agent_mode_uses_work_mode_for_approved_plan_runs(tmp_path: Path) -> None:
+    note = tmp_path / "note.md"
+    note.write_text("body", encoding="utf-8")
+    runner = ScriptedNoteRunner()
+    session = _session(tmp_path, note_runner=runner)
+
+    state = await session.create_plan(source_file="note.md", title="Implement browser plans")
+    PlanService(note).set_status(state["active_plan_id"], "approved")
+    await session.set_work_mode("plan")
+    await session.submit_prompt(active_file="note.md", included_files=[], text="Implement it")
+    await _wait_for(lambda: not session.run_active)
+
+    assert runner.requests[0].active_plan_id == state["active_plan_id"]
+    assert runner.requests[0].planning_status == "approved"
+    assert runner.requests[0].work_mode == "work"
 
 
 @pytest.mark.asyncio

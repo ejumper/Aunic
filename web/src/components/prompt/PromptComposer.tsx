@@ -1,4 +1,12 @@
-import { useCallback, useEffect, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type CSSProperties,
+  type DragEvent,
+} from "react";
 import {
   closeBrowserFind,
   findNextBrowserMatch,
@@ -33,6 +41,7 @@ import { CmdsMenu } from "./CmdsMenu";
 export function PromptComposer() {
   const { client } = useWs();
   const openFile = useExplorerStore((store) => store.openFile);
+  const sourceFile = useExplorerStore((store) => store.sourceFile);
   const noteStatus = useNoteEditorStore((store) => store.status);
   const session = useSessionStore((store) => store.session);
   const runActive = useSessionStore((store) => store.runActive);
@@ -44,45 +53,60 @@ export function PromptComposer() {
   const draft = usePromptStore((store) => store.draft);
   const documentVersion = usePromptStore((store) => store.documentVersion);
   const submitting = usePromptStore((store) => store.submitting);
+  const imageAttachments = usePromptStore((store) => store.imageAttachments);
   const findActive = useFindStore((store) => store.active);
   const setDraft = usePromptStore((store) => store.setDraft);
+  const addImageAttachments = usePromptStore((store) => store.addImageAttachments);
+  const removeImageAttachment = usePromptStore((store) => store.removeImageAttachment);
   const submit = usePromptStore((store) => store.submit);
   const cancel = usePromptStore((store) => store.cancel);
   const currentDoc = useNoteEditorStore((store) => store.currentDoc);
+  const promptTargetFile = sourceFile ?? openFile;
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const sendPrompt = useCallback(() => {
-    void submit(client, openFile, []);
-  }, [client, openFile, submit]);
+    void submit(client, promptTargetFile, []);
+  }, [client, promptTargetFile, submit]);
 
   const cancelRun = useCallback(() => {
     void cancel(client, currentRunId);
   }, [cancel, client, currentRunId]);
 
   const setMode = useCallback(
-    (mode: BrowserMode) => {
-      void client.request("set_mode", { mode }).catch((error) => {
+    async (mode: BrowserMode) => {
+      try {
+        await client.request("set_mode", { mode });
+        setIndicatorMessage(`Switched to ${mode} mode.`);
+      } catch (error) {
         setIndicatorMessage(formatControlError(error), "error");
-      });
+      }
     },
     [client, setIndicatorMessage],
   );
 
   const setWorkMode = useCallback(
-    (workMode: WorkMode) => {
-      void client.request("set_work_mode", { work_mode: workMode }).catch((error) => {
+    async (workMode: WorkMode) => {
+      try {
+        await client.request("set_work_mode", { work_mode: workMode });
+        setIndicatorMessage(`Agent mode set to ${workMode}.`);
+      } catch (error) {
         setIndicatorMessage(formatControlError(error), "error");
-      });
+      }
     },
     [client, setIndicatorMessage],
   );
 
   const selectModel = useCallback(
-    (index: number) => {
-      void client.request("select_model", { index }).catch((error) => {
+    async (index: number) => {
+      try {
+        await client.request("select_model", { index });
+        const label = session?.models[index]?.label ?? "model";
+        setIndicatorMessage(`Selected model: ${label}.`);
+      } catch (error) {
         setIndicatorMessage(formatControlError(error), "error");
-      });
+      }
     },
-    [client, setIndicatorMessage],
+    [client, session, setIndicatorMessage],
   );
 
   const resolvePermission = useCallback(
@@ -112,8 +136,89 @@ export function PromptComposer() {
     !submitting &&
     noteStatus !== "loading" &&
     noteStatus !== "saving" &&
-    draft.trim().length > 0;
+    (draft.trim().length > 0 || imageAttachments.length > 0);
   const contextMeter = contextMeterState(session, currentDoc);
+  const selectedModelSupportsImages = Boolean(session?.selected_model.supports_images);
+
+  const handleImageFiles = useCallback(
+    async (files: File[]) => {
+      if (files.length === 0) {
+        return;
+      }
+      if (!selectedModelSupportsImages) {
+        setIndicatorMessage(
+          `${session?.selected_model.label ?? "This model"} does not support image inputs.`,
+          "error",
+        );
+        return;
+      }
+      const accepted = files.filter(isSupportedImageFile);
+      if (accepted.length === 0) {
+        setIndicatorMessage("Only PNG, JPEG, WEBP, and GIF images can be attached.", "error");
+        return;
+      }
+      try {
+        const attachments = await Promise.all(accepted.map(fileToPromptAttachment));
+        addImageAttachments(attachments);
+        if (accepted.length !== files.length) {
+          setIndicatorMessage(
+            `Attached ${attachments.length} image${attachments.length === 1 ? "" : "s"} and ignored unsupported files.`,
+          );
+        } else {
+          setIndicatorMessage(
+            `Attached ${attachments.length} image${attachments.length === 1 ? "" : "s"}.`,
+          );
+        }
+      } catch (error) {
+        setIndicatorMessage(formatControlError(error), "error");
+      }
+    },
+    [addImageAttachments, selectedModelSupportsImages, session, setIndicatorMessage],
+  );
+
+  const handleAttachmentInputChange = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const files = event.target.files ? [...event.target.files] : [];
+      void handleImageFiles(files);
+      event.target.value = "";
+    },
+    [handleImageFiles],
+  );
+
+  const handlePromptDrop = useCallback(
+    (event: DragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.files.length) {
+        return;
+      }
+      event.preventDefault();
+      void handleImageFiles([...event.dataTransfer.files]);
+    },
+    [handleImageFiles],
+  );
+
+  const handlePromptPaste = useCallback(
+    (event: ClipboardEvent<HTMLDivElement>) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".prompt-editor-host")) {
+        return;
+      }
+      const files = imageFilesFromClipboard(event.clipboardData);
+      if (files.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      void handleImageFiles(files);
+    },
+    [handleImageFiles],
+  );
+
+  const handlePromptDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }, []);
 
   useEffect(() => {
     if (!openFile) {
@@ -164,6 +269,14 @@ export function PromptComposer() {
         return;
       }
 
+      if (modKey && lowerKey === "h" && !event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        openBrowserFind({ replaceMode: true });
+        focusFindInput();
+        return;
+      }
+
       if (
         event.key === "F3" ||
         (modKey && lowerKey === "g" && !event.altKey)
@@ -192,7 +305,7 @@ export function PromptComposer() {
     return () => document.removeEventListener("keydown", handleKeyDown, true);
   }, [openFile, pendingPermission, researchActive]);
 
-  if (!openFile) {
+  if (!openFile || !promptTargetFile) {
     return null;
   }
 
@@ -202,11 +315,31 @@ export function PromptComposer() {
         <PermissionPrompt permission={pendingPermission} onResolve={resolvePermission} />
       ) : null}
 
-      <IndicatorLine session={session} indicator={indicatorMessage} />
+      <IndicatorLine
+        session={session}
+        indicator={indicatorMessage}
+        attachments={imageAttachments}
+        onRemoveAttachment={removeImageAttachment}
+      />
 
-      <div className="prompt-message-block">
+      <input
+        ref={attachmentInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        tabIndex={-1}
+        className="prompt-attachment-input"
+        onChange={handleAttachmentInputChange}
+      />
+
+      <div
+        className="prompt-message-block"
+        onDragOver={handlePromptDragOver}
+        onDrop={handlePromptDrop}
+        onPasteCapture={handlePromptPaste}
+      >
         {researchActive && !pendingPermission && researchState ? (
-          <ResearchPicker client={client} activeFile={openFile} research={researchState} />
+          <ResearchPicker client={client} sourceFile={promptTargetFile} research={researchState} />
         ) : findActive ? (
           <PromptFind />
         ) : (
@@ -230,6 +363,16 @@ export function PromptComposer() {
 
             <div className="prompt-composer__footer">
               <div className="prompt-composer__controls">
+                <button
+                  type="button"
+                  className="mode-pill prompt-attach-button"
+                  disabled={controlsDisabled || !selectedModelSupportsImages}
+                  aria-label="Attach image"
+                  title={selectedModelSupportsImages ? "Attach image" : "Selected model does not support image inputs"}
+                  onClick={() => attachmentInputRef.current?.click()}
+                >
+                  +
+                </button>
                 <ModelPicker
                   models={session?.models ?? []}
                   selectedIndex={session?.selected_model_index ?? 0}
@@ -321,4 +464,85 @@ function formatControlError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+const SUPPORTED_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+function isSupportedImageFile(file: File): boolean {
+  if (file.type.startsWith("image/")) {
+    return true;
+  }
+  const dotIndex = file.name.lastIndexOf(".");
+  const extension = dotIndex >= 0 ? file.name.slice(dotIndex).toLowerCase() : "";
+  return SUPPORTED_IMAGE_EXTENSIONS.has(extension);
+}
+
+async function fileToPromptAttachment(file: File) {
+  const name = file.name || fallbackImageName(file.type);
+  return {
+    id: createAttachmentId(name),
+    name,
+    data_base64: await readFileAsBase64(file),
+    size_bytes: Number.isFinite(file.size) ? file.size : null,
+  };
+}
+
+function imageFilesFromClipboard(data: DataTransfer): File[] {
+  const files: File[] = [];
+  const addFile = (file: File | null) => {
+    if (!file || !isSupportedImageFile(file)) {
+      return;
+    }
+    const key = `${file.name}:${file.type}:${file.size}:${file.lastModified}`;
+    const alreadyAdded = files.some(
+      (existing) =>
+        `${existing.name}:${existing.type}:${existing.size}:${existing.lastModified}` === key,
+    );
+    if (alreadyAdded) {
+      return;
+    }
+    files.push(file);
+  };
+
+  for (const item of Array.from(data.items)) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      addFile(item.getAsFile());
+    }
+  }
+  for (const file of Array.from(data.files)) {
+    addFile(file);
+  }
+  return files;
+}
+
+function fallbackImageName(mimeType: string): string {
+  if (mimeType === "image/jpeg") {
+    return "pasted-image.jpg";
+  }
+  const subtype = mimeType.startsWith("image/") ? mimeType.slice("image/".length) : "png";
+  return `pasted-image.${subtype || "png"}`;
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`));
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") {
+        reject(new Error(`Could not read ${file.name}`));
+        return;
+      }
+      const commaIndex = result.indexOf(",");
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function createAttachmentId(name: string): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}-${name}`;
 }

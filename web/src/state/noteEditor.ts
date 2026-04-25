@@ -5,6 +5,7 @@ import type {
   FileSnapshotPayload,
   NoteToolResultEventPayload,
 } from "../ws/types";
+import { useSessionStore } from "./session";
 
 export type NoteEditorWsClient = Pick<WsClient, "request">;
 
@@ -117,10 +118,12 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
       if (get().path !== path) {
         return;
       }
+      const message = formatNoteEditorError(error);
       set({
         status: "error",
-        error: formatNoteEditorError(error),
+        error: message,
       });
+      setNoteIndicator(message, "error");
     }
   },
 
@@ -135,7 +138,9 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
   async save(client, currentDoc) {
     const { path, revisionId } = get();
     if (!path || !revisionId) {
-      set({ status: "error", error: "Open a file before saving." });
+      const message = "Open a file before saving.";
+      set({ status: "error", error: message });
+      setNoteIndicator(message, "error");
       return false;
     }
 
@@ -156,10 +161,12 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         await get().loadConflict(client, path);
         return false;
       }
+      const message = formatNoteEditorError(error);
       set({
         status: "error",
-        error: formatNoteEditorError(error),
+        error: message,
       });
+      setNoteIndicator(message, "error");
       return false;
     }
   },
@@ -184,10 +191,12 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
     }
     if (!change.exists || change.kind === "deleted") {
       if (state.dirty) {
+        const message = "This file was deleted on disk while browser edits are unsaved.";
         set({
           status: "error",
-          error: "This file was deleted on disk while browser edits are unsaved.",
+          error: message,
         });
+        setNoteIndicator(message, "error");
       } else {
         set({ ...EMPTY_STATE, documentVersion: state.documentVersion + 1 });
       }
@@ -205,17 +214,21 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
           status: "idle",
           error: null,
         });
+        setNoteIndicator("The active file changed on disk while you had unsaved edits.", "error");
         return;
       }
       set((current) => ({
         ...snapshotPatch(snapshot, current.documentVersion + 1),
         notice: "Reloaded from disk.",
       }));
+      setNoteIndicator("Reloaded active file after an external change.");
     } catch (error) {
+      const message = formatNoteEditorError(error);
       set({
         status: "error",
-        error: formatNoteEditorError(error),
+        error: message,
       });
+      setNoteIndicator(message, "error");
     }
   },
 
@@ -241,6 +254,7 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         ...snapshotPatch(snapshot, current.documentVersion + 1),
         notice: "Applied model update.",
       }));
+      setNoteIndicator("Applied model update.");
       return;
     }
 
@@ -265,6 +279,7 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
               mergedDoc,
               "Merged model edit into browser edits.",
             ));
+          setNoteIndicator("Merged model edit into browser edits.");
           return;
         } catch (error) {
           if (isWsRequestError(error) && error.reason === "revision_conflict") {
@@ -274,10 +289,12 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
             });
             return;
           }
+          const message = formatNoteEditorError(error);
           set({
             status: "error",
-            error: formatNoteEditorError(error),
+            error: message,
           });
+          setNoteIndicator(message, "error");
           return;
         }
       }
@@ -296,6 +313,10 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         toolName: event.tool_name,
       },
     });
+    setNoteIndicator(
+      "Your note changed during the run. Choose whether the model update or your edits should win.",
+      "error",
+    );
   },
 
   applySnapshot(snapshot, options = {}) {
@@ -335,12 +356,14 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         externalReloadPending: null,
         notice: "Keeping browser edits.",
       });
+      setNoteIndicator("Ignored the external file change for now.");
       return;
     }
     set((state) => ({
       ...snapshotPatch(pending.snapshot, state.documentVersion + 1),
       notice: "Reloaded from disk.",
     }));
+    setNoteIndicator("Reloaded the active file from disk.");
   },
 
   async resolveConflict(client, currentDoc, strategy) {
@@ -361,6 +384,9 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
           ...snapshotPatch(conflict.remoteSnapshot as FileSnapshotPayload, state.documentVersion + 1),
           notice: conflict.reason === "model_update" ? "Applied model update." : "Reloaded their version.",
         }));
+        setNoteIndicator(
+          conflict.reason === "model_update" ? "Conflict resolved: model wins." : "Reloaded their version.",
+        );
         return true;
       }
       set((state) => ({
@@ -377,6 +403,7 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         externalReloadPending: null,
         documentVersion: state.documentVersion + 1,
       }));
+      setNoteIndicator("Reloaded their version.");
       return true;
     }
 
@@ -391,16 +418,21 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
         return true;
       }
       set((state) => applySuccessfulSavePatch(state, snapshot, currentDoc, currentDoc, "Saved."));
+      setNoteIndicator(
+        conflict.reason === "model_update" ? "Conflict resolved: user wins." : "Saved active file.",
+      );
       return true;
     } catch (error) {
       if (isWsRequestError(error) && error.reason === "revision_conflict") {
         await get().loadConflict(client, path);
         return false;
       }
+      const message = formatNoteEditorError(error);
       set({
         status: "error",
-        error: formatNoteEditorError(error),
+        error: message,
       });
+      setNoteIndicator(message, "error");
       return false;
     }
   },
@@ -433,11 +465,19 @@ export const useNoteEditorStore = create<NoteEditorSlice>((set, get) => ({
           toolName: options.toolName ?? null,
         },
       });
+      setNoteIndicator(
+        options.reason === "model_update"
+          ? "Your note changed during the run. Choose whether the model update or your edits should win."
+          : "The file changed on disk. Reload or ignore before saving.",
+        "error",
+      );
     } catch (error) {
+      const message = formatNoteEditorError(error);
       set({
         status: "error",
-        error: formatNoteEditorError(error),
+        error: message,
       });
+      setNoteIndicator(message, "error");
     }
   },
 }));
@@ -563,4 +603,8 @@ function formatNoteEditorError(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function setNoteIndicator(text: string, kind: "status" | "error" = "status"): void {
+  useSessionStore.getState().setIndicatorMessage(text, kind);
 }

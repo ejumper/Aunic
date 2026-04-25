@@ -36,6 +36,13 @@ from aunic.tools.runtime import ActiveMarkdownNote, RunToolContext, ToolSessionS
 from aunic.tools.search_transcripts import SearchTranscriptsArgs, build_search_transcripts_tool_registry
 from aunic.tools.sleep import SleepArgs, build_sleep_tool_registry
 from aunic.tools.stop_process import StopProcessArgs, build_stop_process_tool_registry
+from aunic.tools.task_tools import (
+    TaskCreateArgs,
+    TaskGetArgs,
+    TaskListArgs,
+    TaskUpdateArgs,
+    build_task_tool_registry,
+)
 
 __all__ = [
     "ActiveMarkdownNote",
@@ -61,6 +68,10 @@ __all__ = [
     "SearchTranscriptsArgs",
     "SleepArgs",
     "StopProcessArgs",
+    "TaskCreateArgs",
+    "TaskGetArgs",
+    "TaskListArgs",
+    "TaskUpdateArgs",
     "ToolDefinition",
     "ToolExecutionResult",
     "ToolSessionState",
@@ -83,4 +94,5 @@ __all__ = [
     "build_search_transcripts_tool_registry",
     "build_sleep_tool_registry",
     "build_stop_process_tool_registry",
+    "build_task_tool_registry",
 ]

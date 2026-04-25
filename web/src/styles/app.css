@@ -1,8 +1,168 @@
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-Thin.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-Thin.ttf") format("truetype");
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-ThinItalic.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-ThinItalic.ttf") format("truetype");
+  font-weight: 100;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-Regular.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-RegularItalic.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-RegularItalic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-Bold.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "ProLisa";
+  src: url("/fonts/ProLisa WOFF2/ProLisa-BoldItalic.woff2") format("woff2"),
+       url("/fonts/ProLisa TTF/ProLisa-BoldItalic.ttf") format("truetype");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Thin.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Thin.ttf") format("truetype");
+  font-weight: 100;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-ThinItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-ThinItalic.ttf") format("truetype");
+  font-weight: 100;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-ExtraLight.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-ExtraLight.ttf") format("truetype");
+  font-weight: 200;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-ExtraLightItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-ExtraLightItalic.ttf") format("truetype");
+  font-weight: 200;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Light.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Light.ttf") format("truetype");
+  font-weight: 300;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-LightItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-LightItalic.ttf") format("truetype");
+  font-weight: 300;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Regular.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-RegularItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-RegularItalic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Medium.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-MediumItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-MediumItalic.ttf") format("truetype");
+  font-weight: 500;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Bold.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-BoldItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-BoldItalic.ttf") format("truetype");
+  font-weight: 700;
+  font-style: italic;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-Black.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-Black.ttf") format("truetype");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "MonoLisa";
+  src: url("/fonts/Monolisa WOFF2/MonoLisa-BlackItalic.woff2") format("woff2"),
+       url("/fonts/MonoLisa TTS/MonoLisa-BlackItalic.ttf") format("truetype");
+  font-weight: 900;
+  font-style: italic;
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  font-family: "ProLisa", ui-sans-serif, system-ui, -apple-system, sans-serif;
   background: hsl(210, 9%, 7%);
   color: hsl(210, 16%, 94%);
   --editor-bg: hsl(210, 13%, 5%);
@@ -279,6 +439,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   display: grid;
   min-height: 0;
   overflow: hidden;
+  background: var(--editor-bg);
 }
 
 .run-dock {
@@ -618,18 +779,200 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   margin: 1rem 0 0;
 }
 
+.tree-empty code {
+  color: hsl(210, 100%, 82%);
+}
+
+.explorer-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid hsl(210, 12%, 26%);
+  border-radius: 12px;
+  background: linear-gradient(180deg, hsl(210, 11%, 12%) 0%, hsl(210, 10%, 10%) 100%);
+  color: hsl(210, 16%, 88%);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.explorer-mode-toggle:hover,
+.explorer-mode-toggle:focus-visible {
+  background: linear-gradient(180deg, hsl(210, 13%, 16%) 0%, hsl(210, 11%, 12%) 100%);
+  color: hsl(210, 30%, 96%);
+}
+
+.explorer-mode-toggle--project {
+  border-color: hsl(210, 18%, 34%);
+  color: hsl(41, 78%, 82%);
+}
+
+.project-tree {
+  display: grid;
+  gap: 0.5rem;
+  min-height: 6rem;
+}
+
+.project-tree__sections {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.project-tree__section {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.project-tree__section-label {
+  margin: 0;
+  padding: 0 0.3rem;
+  color: hsl(210, 14%, 70%);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-tree__nodes {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.project-return-row,
+.project-tree-row {
+  display: grid;
+  grid-template-columns: 1rem auto auto minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+  width: 100%;
+  min-height: 2rem;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 0.3rem 0.45rem;
+  background: transparent;
+  color: hsl(210, 14%, 86%);
+  text-align: left;
+}
+
+.project-return-row {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 1.8rem;
+  padding-left: 0.8rem;
+  color: hsl(210, 20%, 82%);
+  line-height: 1.15;
+}
+
+.project-return-row:hover,
+.project-return-row:focus-visible,
+.project-tree-row:hover,
+.project-tree-row:focus-visible {
+  background: hsl(210, 17%, 15%);
+  color: hsl(210, 34%, 97%);
+}
+
+.project-tree-node--selected > .project-tree-row {
+  background: hsl(210, 19%, 17%);
+  border-color: hsl(210, 18%, 24%);
+  color: hsl(210, 34%, 97%);
+}
+
+.project-tree-row--disabled {
+  color: hsl(210, 6%, 48%);
+}
+
+.project-tree-row--disabled:hover,
+.project-tree-row--disabled:focus-visible {
+  background: hsl(210, 12%, 11%);
+  color: hsl(210, 8%, 56%);
+}
+
+.project-tree-row input[type="checkbox"] {
+  width: 0.95rem;
+  height: 0.95rem;
+  margin: 0;
+  accent-color: hsl(210, 50%, 66%);
+}
+
+.project-tree-row__disclosure,
+.project-tree-row__checkbox-spacer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1rem;
+  color: hsl(210, 8%, 58%);
+}
+
+.project-tree-row__icon {
+  width: 1rem;
+  text-align: center;
+}
+
+.project-tree-row__name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-tree-row__meta {
+  color: hsl(210, 7%, 62%);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.explorer-context-menu {
+  position: fixed;
+  z-index: 20;
+  min-width: 9rem;
+  border: 1px solid hsl(210, 14%, 24%);
+  border-radius: 12px;
+  padding: 0.35rem;
+  background: linear-gradient(180deg, hsl(210, 12%, 10%) 0%, hsl(210, 11%, 8%) 100%);
+  box-shadow: 0 10px 24px hsla(210, 30%, 2%, 0.5);
+}
+
+.explorer-context-menu__item {
+  width: 100%;
+  min-height: 2rem;
+  border: none;
+  border-radius: 9px;
+  padding: 0.4rem 0.65rem;
+  background: transparent;
+  color: hsl(210, 14%, 86%);
+  text-align: left;
+}
+
+.explorer-context-menu__item:hover,
+.explorer-context-menu__item:focus-visible {
+  background: hsl(210, 16%, 16%);
+  color: hsl(210, 34%, 97%);
+}
+
+.explorer-context-menu__item--danger {
+  color: hsl(0, 70%, 70%);
+}
+
+.explorer-context-menu__item--danger:hover,
+.explorer-context-menu__item--danger:focus-visible {
+  background: hsl(0, 20%, 18%);
+  color: hsl(0, 80%, 80%);
+}
+
+.explorer-context-menu__separator {
+  border: none;
+  border-top: 1px solid hsl(210, 14%, 20%);
+  margin: 0.25rem 0.35rem;
+}
+
 .tree-empty {
   color: hsl(210, 7%, 64%);
 }
 
 .note-editor-panel {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   margin-top: 0;
-  background: hsl(210, 9%, 7%);
+  background: var(--editor-bg);
 }
 
 .note-editor-header {
@@ -671,6 +1014,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .code-editor-host {
+  flex: 1 1 auto;
   min-height: 0;
   height: 100%;
   overflow: hidden;
@@ -681,10 +1025,23 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 
 .code-editor-host .cm-editor {
   height: 100%;
+  background: var(--editor-bg);
 }
 
 .code-editor-host .cm-scroller {
+  height: 100%;
   overflow: auto;
+  background: var(--editor-bg);
+}
+
+.code-editor-host .cm-content,
+.code-editor-host .cm-gutters,
+.code-editor-host .cm-gutter {
+  min-height: 100%;
+}
+
+.code-editor-host .cm-content {
+  padding-bottom: 30vh;
 }
 
 .prompt-composer {
@@ -961,6 +1318,13 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   max-width: 13rem;
 }
 
+.prompt-attach-button {
+  min-width: 2.4rem;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 1rem;
+}
+
 .picker-btn-label {
   flex: 1;
   min-width: 0;
@@ -1045,7 +1409,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .picker-dropdown-code {
-  font-family: monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
   font-size: 0.78rem;
   color: hsl(153, 55%, 65%);
   background: hsl(210, 11%, 16%);
@@ -1100,6 +1464,11 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .prompt-indicator {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
   min-width: 0;
   margin: 0;
   color: hsl(210, 9%, 69%);
@@ -1107,6 +1476,60 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   font-style: italic;
   user-select: text;
   overflow-wrap: anywhere;
+}
+
+.prompt-indicator__text {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.prompt-indicator__attachments {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.prompt-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  max-width: 14rem;
+  padding: 0.16rem 0.5rem;
+  border: 1px solid hsl(210, 14%, 28%);
+  border-radius: 999px;
+  background: hsl(210, 11%, 15%);
+  color: hsl(210, 16%, 86%);
+  font-size: 0.8rem;
+  font-style: normal;
+}
+
+.prompt-attachment-chip__remove {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: hsl(0, 88%, 76%);
+  font: inherit;
+  cursor: pointer;
+}
+
+.prompt-attachment-chip__remove:hover,
+.prompt-attachment-chip__remove:focus-visible {
+  color: hsl(0, 100%, 88%);
+}
+
+.prompt-attachment-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-attachment-input {
+  display: none;
 }
 
 .prompt-indicator--error {
@@ -1304,6 +1727,21 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 .permission-prompt__copy strong {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.permission-prompt__preview {
+  margin: 0.35rem 0 0;
+  max-width: min(34rem, 100%);
+  max-height: 11rem;
+  overflow: auto;
+  border: 1px solid hsla(48, 84%, 80%, 0.2);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  background: hsla(44, 32%, 6%, 0.55);
+  color: hsl(48, 84%, 87%);
+  font: inherit;
+  line-height: 1.35;
+  white-space: pre-wrap;
 }
 
 .permission-prompt__actions {
@@ -1609,7 +2047,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .tr-command {
-  font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
   font-size: 0.8rem;
   color: hsl(210, 74%, 84%);
   overflow: hidden;
@@ -1661,7 +2099,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   padding: 0.1rem 0.35rem;
   border-radius: 4px;
   font-size: 0.72rem;
-  font-family: ui-monospace, monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
   cursor: pointer;
 }
 
@@ -1696,7 +2134,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .tr-bash-command {
-  font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
   font-size: 0.82rem;
   color: hsl(210, 74%, 84%);
   white-space: pre-wrap;
@@ -1732,7 +2170,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .tr-exit-code {
-  font-family: ui-monospace, monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
   font-size: 0.78rem;
   color: hsl(210, 7%, 64%);
 }
@@ -1771,7 +2209,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   font-size: 0.75rem;
   color: hsl(210, 10%, 39%);
   text-align: right;
-  font-family: ui-monospace, monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
 }
 
 .tr-search-domain {
@@ -1834,7 +2272,7 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace;
+  font-family: "MonoLisa", ui-monospace, monospace;
 }
 
 .tr-empty {
@@ -1991,11 +2429,35 @@ background: linear-gradient(0deg, hsl(210, 0%, 2%) 0%, hsl(210, 0%, 5%) 20%, hsl
 }
 
 .code-editor-host .cm-editor .cm-aunic-code-block-line {
-  background-color: hsl(155, 15%, 15%);
+  background: none;
+  position: relative;
+  isolation: isolate;
+}
+
+.code-editor-host .cm-editor .cm-aunic-code-block-line::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: calc(var(--aunic-line-padding-left, 1rem) - 0.28rem);
+  bottom: 0;
+  width: calc(var(--code-block-max-cols, var(--code-block-max-len, 20)) * 1ch + 0.56rem);
+  background: hsla(155, 15%, 15%, 0.7);
+  z-index: -1;
+  pointer-events: none;
+}
+
+.code-editor-host .cm-editor .cm-aunic-code-block-line--start::before {
+  border-top-left-radius: 6px;
+  border-top-right-radius: 6px;
+}
+
+.code-editor-host .cm-editor .cm-aunic-code-block-line--end::before {
+  border-bottom-left-radius: 6px;
+  border-bottom-right-radius: 6px;
 }
 
 .code-editor-host .cm-editor .cm-aunic-inline-code {
-  background: hsl(155, 15%, 15%);
+  background: var(--aunic-inline-code-bg, hsla(155, 15%, 15%, 0.7));
   color: hsl(155, 50%, 60%) !important;
 }
 

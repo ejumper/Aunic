@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from aunic.domain import ToolSpec
-from aunic.map.builder import MAP_PATH
+from aunic.map.builder import ensure_map_ready
+from aunic.map.runtime import resolve_map_location
 from aunic.tools.base import ToolDefinition, ToolExecutionResult
 from aunic.tools.runtime import RunToolContext, failure_from_payload, failure_payload
 
@@ -21,12 +23,11 @@ def build_read_map_tool_registry() -> tuple[ToolDefinition[Any], ...]:
             spec=ToolSpec(
                 name="read_map",
                 description=(
-                    "Read the user's pre-built index of every Aunic note on this system "
-                    "(~/.aunic/map.md). Each entry is a path + short summary. "
+                    "Read the canonical note map for the current workspace/context. "
+                    "Each entry is a path + short summary. "
                     "Reach for this when you do not yet know a specific query or phrase to "
                     "search for, and want to browse the user's notes by topic. "
-                    "Pass scope=<path> to get only the subtree relevant to the current task. "
-                    "If the index is missing, tell the user to run /map."
+                    "Pass scope=<path> to get only the subtree relevant to the current task."
                 ),
                 input_schema={
                     "type": "object",
@@ -70,26 +71,54 @@ async def execute_read_map(
 ) -> ToolExecutionResult:
     from aunic.map.render import parse_map, render_map
 
-    if not MAP_PATH.exists():
-        payload = failure_payload(
-            category="resource_error",
-            reason="map_not_built",
-            message=(
-                "The note map (~/.aunic/map.md) has not been built yet. "
-                "Ask the user to run /map to generate it."
-            ),
-        )
-        return ToolExecutionResult(
-            tool_name="read_map",
-            status="tool_error",
-            in_memory_content=payload,
-            transcript_content=payload,
-            tool_failure=failure_from_payload(payload, tool_name="read_map"),
-        )
-
     # Read the map
+    scope_resolved: Path | None = None
     try:
-        map_text = MAP_PATH.read_text(encoding="utf-8")
+        if args.scope is not None:
+            raw = Path(args.scope).expanduser()
+            if not raw.is_absolute():
+                raw = runtime.session_state.cwd / raw
+            scope_resolved = raw.resolve()
+            if not scope_resolved.exists():
+                payload = failure_payload(
+                    category="validation_error",
+                    reason="scope_not_found",
+                    message=f"scope path does not exist: {scope_resolved}",
+                    scope=args.scope,
+                )
+                return ToolExecutionResult(
+                    tool_name="read_map",
+                    status="tool_error",
+                    in_memory_content=payload,
+                    transcript_content=payload,
+                    tool_failure=failure_from_payload(payload, tool_name="read_map"),
+                )
+            if not scope_resolved.is_dir():
+                payload = failure_payload(
+                    category="validation_error",
+                    reason="scope_not_directory",
+                    message=f"scope path is not a directory: {scope_resolved}",
+                    scope=args.scope,
+                )
+                return ToolExecutionResult(
+                    tool_name="read_map",
+                    status="tool_error",
+                    in_memory_content=payload,
+                    transcript_content=payload,
+                    tool_failure=failure_from_payload(payload, tool_name="read_map"),
+                )
+
+        subject = scope_resolved or runtime.session_state.cwd
+        await asyncio.to_thread(
+            ensure_map_ready,
+            subject,
+            fallback_root=runtime.session_state.cwd,
+        )
+        location = resolve_map_location(
+            subject,
+            fallback_root=runtime.session_state.cwd,
+        )
+        map_text = location.map_path.read_text(encoding="utf-8")
     except OSError as exc:
         payload = failure_payload(
             category="resource_error",
@@ -103,42 +132,19 @@ async def execute_read_map(
             transcript_content=payload,
             tool_failure=failure_from_payload(payload, tool_name="read_map"),
         )
-
-    # Resolve scope if provided
-    scope_resolved: Path | None = None
-    if args.scope is not None:
-        raw = Path(args.scope).expanduser()
-        if not raw.is_absolute():
-            raw = runtime.session_state.cwd / raw
-        scope_resolved = raw.resolve()
-        if not scope_resolved.exists():
-            payload = failure_payload(
-                category="validation_error",
-                reason="scope_not_found",
-                message=f"scope path does not exist: {scope_resolved}",
-                scope=args.scope,
-            )
-            return ToolExecutionResult(
-                tool_name="read_map",
-                status="tool_error",
-                in_memory_content=payload,
-                transcript_content=payload,
-                tool_failure=failure_from_payload(payload, tool_name="read_map"),
-            )
-        if not scope_resolved.is_dir():
-            payload = failure_payload(
-                category="validation_error",
-                reason="scope_not_directory",
-                message=f"scope path is not a directory: {scope_resolved}",
-                scope=args.scope,
-            )
-            return ToolExecutionResult(
-                tool_name="read_map",
-                status="tool_error",
-                in_memory_content=payload,
-                transcript_content=payload,
-                tool_failure=failure_from_payload(payload, tool_name="read_map"),
-            )
+    except Exception as exc:
+        payload = failure_payload(
+            category="resource_error",
+            reason="map_read_error",
+            message=f"Could not read map file: {exc}",
+        )
+        return ToolExecutionResult(
+            tool_name="read_map",
+            status="tool_error",
+            in_memory_content=payload,
+            transcript_content=payload,
+            tool_failure=failure_from_payload(payload, tool_name="read_map"),
+        )
 
     # Parse and optionally filter
     entries = parse_map(map_text)
@@ -157,7 +163,7 @@ async def execute_read_map(
         entry_count = len(entries)
 
     result_payload = {
-        "map_path": str(MAP_PATH),
+        "map_path": str(location.map_path),
         "content": content_text,
         "entry_count": entry_count,
         "walk_root": str(walk_root),
@@ -167,7 +173,7 @@ async def execute_read_map(
 
     # Compact transcript version omits full content (the model already sees it)
     transcript_payload = {
-        "map_path": str(MAP_PATH),
+        "map_path": str(location.map_path),
         "entry_count": entry_count,
         "walk_root": str(walk_root),
         "scope_applied": str(scope_resolved) if scope_resolved is not None else None,

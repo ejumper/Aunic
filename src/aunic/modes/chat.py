@@ -12,11 +12,13 @@ from aunic.context.types import FileSnapshot, ParseWarning
 from aunic.domain import ProviderRequest, ProviderResponse, TranscriptRow, UsageLogEntry
 from aunic.loop.dispatch import next_run_log_row_number, process_generated_rows, tool_result_message
 from aunic.errors import ChatModeError, ProviderError, StructuredOutputError
+from aunic.image_inputs import prepare_image_inputs_from_paths
 from aunic.loop.types import LoopEvent, ToolFailure
 from aunic.mcp.tools import build_mcp_tool_registry, merge_tool_registries
 from aunic.modes.types import ChatModeMetrics, ChatModeRunRequest, ChatModeRunResult
 from aunic.progress import ProgressEvent, emit_progress, progress_from_loop_event
 from aunic.research import FetchService, ResearchState, SearchService, find_invalid_citation_urls
+from aunic.tasks import get_active_task_label
 from aunic.tools import RunToolContext, ToolSessionState, build_chat_tool_registry
 from aunic.tools.memory_manifest import build_memory_manifest
 from aunic.tools.base import ToolExecutionResult
@@ -162,6 +164,10 @@ class ChatModeRunner:
             )
 
             context_result = await self._build_context(request)
+            persistent_images = await prepare_image_inputs_from_paths(
+                request.included_image_files,
+                persistent=True,
+            )
             research_state = ResearchState()
             runtime = await RunToolContext.create(
                 file_manager=self._file_manager,
@@ -223,6 +229,8 @@ class ChatModeRunner:
                     assistant_message_patches=list(state.assistant_message_patches),
                     note_snapshot=context_result.note_snapshot_text or runtime.note_snapshot_text() or None,
                     user_prompt=current_user_prompt_text or None,
+                    persistent_images=list(persistent_images),
+                    prompt_images=list(request.prompt_images) if state.counted_turns == 0 else [],
                     tools=[] if state.force_final_response else [definition.spec for definition in tool_registry],
                     system_prompt=_build_chat_system_prompt(
                         work_mode=request.work_mode,
@@ -238,15 +246,23 @@ class ChatModeRunner:
                         "work_mode": request.work_mode,
                     },
                 )
+                chat_details: dict[str, object] = {
+                    "messages": len(provider_request.messages),
+                    "tools": len(provider_request.tools),
+                    "final_response_only": state.force_final_response,
+                }
+                chat_task_label: str | None
+                try:
+                    chat_task_label = get_active_task_label(runtime.active_file)
+                except Exception:
+                    chat_task_label = None
+                if chat_task_label:
+                    chat_details["active_task_label"] = chat_task_label
                 state.events.append(
                     loop_event := LoopEvent(
                         kind="provider_request",
                         message="Sent chat-mode turn to provider.",
-                        details={
-                            "messages": len(provider_request.messages),
-                            "tools": len(provider_request.tools),
-                            "final_response_only": state.force_final_response,
-                        },
+                        details=chat_details,
                     )
                 )
                 await emit_progress(

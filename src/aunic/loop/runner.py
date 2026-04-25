@@ -24,6 +24,7 @@ from aunic.loop.types import (
 from aunic.mcp.tools import build_mcp_tool_registry, merge_tool_registries
 from aunic.progress import ProgressEvent, emit_progress, progress_from_loop_event
 from aunic.research import FetchService, ResearchState, SearchService
+from aunic.tasks import get_active_task_label
 from aunic.tools import (
     RunToolContext,
     ToolDefinition,
@@ -235,6 +236,8 @@ class ToolLoop:
                 assistant_message_patches=list(assistant_message_patches),
                 note_snapshot=runtime.note_snapshot_text() or active_prompt_run.note_snapshot_text or None,
                 user_prompt=current_user_prompt_text or None,
+                persistent_images=list(request.persistent_images),
+                prompt_images=list(request.prompt_images) if current_loop_turns == 0 else [],
                 tools=[definition.spec for definition in registry],
                 system_prompt=_build_system_prompt(
                     request.system_prompt,
@@ -255,11 +258,18 @@ class ToolLoop:
                     "active_plan_path": str(runtime.active_plan_path) if runtime.active_plan_path else None,
                 },
             )
+            details: dict[str, Any] = {
+                "messages": len(provider_request.messages),
+                "tools": len(provider_request.tools),
+            }
+            active_task_label = _safe_active_task_label(runtime.active_file)
+            if active_task_label:
+                details["active_task_label"] = active_task_label
             await append_loop_event(
                 LoopEvent(
                     kind="provider_request",
                     message="Sent tool-loop turn to provider.",
-                    details={"messages": len(provider_request.messages), "tools": len(provider_request.tools)},
+                    details=details,
                 )
             )
 
@@ -791,6 +801,15 @@ def _usage_entry_from_response(
         finish_reason=response.finish_reason,
         metadata=dict(response.provider_metadata),
     )
+
+
+def _safe_active_task_label(active_file: Path | None) -> str | None:
+    if active_file is None:
+        return None
+    try:
+        return get_active_task_label(active_file)
+    except Exception:
+        return None
 
 
 def _provider_response_event(

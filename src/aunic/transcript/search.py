@@ -43,11 +43,12 @@ class TranscriptSearchService:
         query: str | None = None,
         tool: str | None = None,
         scope: Path | None = None,
+        fallback_root: Path | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> TranscriptSearchResult:
-        """Search transcript rows across all Aunic notes under scope (default: home)."""
-        notes = resolve_note_set(scope)
+        """Search transcript rows across Aunic notes under scope or the current context."""
+        notes = resolve_note_set(scope, fallback_root=fallback_root)
         scanned = len(notes)
 
         all_hits: list[TranscriptSearchHit] = []

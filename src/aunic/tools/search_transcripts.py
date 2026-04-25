@@ -27,7 +27,8 @@ def build_search_transcripts_tool_registry() -> tuple[ToolDefinition[Any], ...]:
             spec=ToolSpec(
                 name="search_transcripts",
                 description=(
-                    "Search past tool calls and results across every Aunic note on this system. "
+                    "Search past tool calls and results across Aunic notes in the current "
+                    "workspace/context by default. "
                     "Returns tool_call/tool_result pairs with absolute paths and row numbers. "
                     "Filter by tool= (exact tool name, e.g. 'bash', 'web_search'), "
                     "query= (substring match over args and results JSON), "
@@ -59,7 +60,7 @@ def build_search_transcripts_tool_registry() -> tuple[ToolDefinition[Any], ...]:
                             "type": "string",
                             "description": (
                                 "Absolute path to restrict the walk to a subtree. "
-                                "Defaults to the user home directory."
+                                "Defaults to the current workspace/context."
                             ),
                         },
                         "limit": {
@@ -167,6 +168,7 @@ async def execute_search_transcripts(
         query=args.query,
         tool=args.tool,
         scope=scope_path,
+        fallback_root=runtime.session_state.cwd,
         limit=args.limit,
         offset=args.offset,
     )

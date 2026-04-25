@@ -1,29 +1,19 @@
-import { useConnectionState } from "../ws/context";
-
-const labels: Record<string, string> = {
-  idle: "Idle",
-  connecting: "Connecting",
-  open: "Connected",
-  reconnecting: "Reconnecting",
-  closed: "Closed",
-};
+import { useNoteEditorStore } from "../state/noteEditor";
 
 export function ConnectionBadge() {
-  const { state, lastConnectedAt } = useConnectionState();
-  const label = labels[state] ?? state;
-  const lastConnectedLabel = lastConnectedAt
-    ? `Last connected ${lastConnectedAt.toLocaleTimeString()}`
-    : "Waiting for first connection.";
-  const healthy = state === "open";
+  const dirty = useNoteEditorStore((store) => store.dirty);
+  const path = useNoteEditorStore((store) => store.path);
+
+  const label = !path ? "No file open" : dirty ? "Unsaved changes" : "File saved";
 
   return (
     <div
       className={`connection-indicator ${
-        healthy ? "connection-indicator--connected" : "connection-indicator--disconnected"
+        dirty ? "connection-indicator--disconnected" : "connection-indicator--connected"
       }`}
       role="status"
-      aria-label={`Browser WebSocket ${label}. ${lastConnectedLabel}`}
-      title={lastConnectedLabel}
+      aria-label={label}
+      title={label}
     />
   );
 }

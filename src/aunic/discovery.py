@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import os
-import time
 from collections import OrderedDict
 from pathlib import Path
 
+from aunic.map.runtime import is_map_globally_stale, resolve_map_location
 from aunic.transcript.parser import find_transcript_section
-
-_MAP_STALENESS_SECONDS = 120 * 3600  # 120 hours
 
 DEFAULT_SKIP_DIRS: frozenset[str] = frozenset({
     ".git",
@@ -105,31 +103,28 @@ def walk_aunic_notes(root: Path | None = None) -> list[Path]:
     return notes
 
 
-def resolve_note_set(scope: Path | None) -> list[Path]:
-    """Return the list of Aunic notes for scope, using the cached map when fresh.
+def resolve_note_set(scope: Path | None, *, fallback_root: Path | None = None) -> list[Path]:
+    """Return the list of Aunic notes for scope, using the canonical map when fresh.
 
-    If ~/.aunic/map.md is missing or older than _MAP_STALENESS_SECONDS, the map
-    is rebuilt before paths are read from it. Falls back to walk_aunic_notes if
-    the map is still unreadable after the rebuild attempt (e.g. read-only filesystem).
+    If the canonical map is missing or globally stale, it is rebuilt before
+    paths are read from it. Falls back to walk_aunic_notes if the map is still
+    unreadable after the rebuild attempt (e.g. read-only filesystem).
     """
-    map_path = Path.home() / ".aunic" / "map.md"
+    subject = scope or fallback_root or Path.home()
+    resolved_fallback = fallback_root or subject
+    location = resolve_map_location(subject, fallback_root=resolved_fallback)
 
-    try:
-        stat = map_path.stat()
-        map_is_fresh = (time.time() - stat.st_mtime) < _MAP_STALENESS_SECONDS
-    except OSError:
-        map_is_fresh = False
-
-    if not map_is_fresh:
+    if is_map_globally_stale(location.map_path):
         try:
-            from aunic.map.builder import build_map
-            build_map(scope)
+            from aunic.map.builder import ensure_map_ready
+
+            ensure_map_ready(subject, fallback_root=resolved_fallback)
         except Exception:
             pass  # best-effort; fall through to read or walk
 
     try:
         from aunic.map.render import parse_map
-        entries = parse_map(map_path.read_text(encoding="utf-8"))
+        entries = parse_map(location.map_path.read_text(encoding="utf-8"))
         paths = [p for p in entries if p.exists()]
         if scope is not None:
             scope_resolved = scope.resolve()

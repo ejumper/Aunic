@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getLastOpenFileStorageKey } from "./browserSession";
 import { AppToolbar } from "./components/AppToolbar";
 import { ConnectionDebug } from "./components/ConnectionDebug";
 import { FileExplorer } from "./components/FileExplorer";
@@ -8,8 +9,9 @@ import { NoteEditor } from "./components/editor/NoteEditor";
 import { PromptComposer } from "./components/prompt/PromptComposer";
 import { TranscriptPane } from "./components/transcript/TranscriptPane";
 import { useExplorerStore } from "./state/explorer";
+import { useSessionStore } from "./state/session";
 import { useTranscriptStore } from "./state/transcript";
-import { useConnectionState, WsProvider } from "./ws/context";
+import { useConnectionState, useWs, WsProvider } from "./ws/context";
 import { EditorView } from "@codemirror/view";
 import { noteEditorRef } from "./noteEditorRef";
 import { promptEditorRef } from "./promptEditorRef";
@@ -28,10 +30,13 @@ export function App() {
 function AppContent({ showDebug }: { showDebug: boolean }) {
   const transcriptMaximized = useTranscriptStore((store) => store.maximized);
   const openFile = useExplorerStore((store) => store.open);
+  const expandToFile = useExplorerStore((store) => store.expandToFile);
+  const session = useSessionStore((store) => store.session);
+  const { client } = useWs();
   const { state: connectionState } = useConnectionState();
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [noteKeyboardOpen, setNoteKeyboardOpen] = useState(false);
-  const hasRestoredRef = useRef(false);
+  const restoredInstanceIdRef = useRef<string | null>(null);
 
   function handleExplorerFileOpen() {
     if (
@@ -43,13 +48,17 @@ function AppContent({ showDebug }: { showDebug: boolean }) {
   }
 
   useEffect(() => {
-    if (connectionState !== "open" || hasRestoredRef.current) return;
-    hasRestoredRef.current = true;
-    const saved = localStorage.getItem("aunic:lastOpenFile");
+    const instanceId = session?.instance_id;
+    if (connectionState !== "open" || !instanceId || restoredInstanceIdRef.current === instanceId) {
+      return;
+    }
+    restoredInstanceIdRef.current = instanceId;
+    const saved = window.sessionStorage.getItem(getLastOpenFileStorageKey(instanceId));
     if (saved) {
       openFile(saved);
+      void expandToFile(client, saved);
     }
-  }, [connectionState, openFile]);
+  }, [client, connectionState, expandToFile, openFile, session?.instance_id]);
 
   useEffect(() => {
     const viewport = window.visualViewport;

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 Role = Literal["system", "user", "assistant", "tool"]
 WorkMode = Literal["off", "read", "work"]
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 MessageType = Literal["message", "tool_call", "tool_result", "tool_error"]
+ImageTransport = Literal["claude_sdk_multimodal", "openai_chat_vision", "unsupported"]
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,19 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
+class ProviderImageInput:
+    name: str
+    media_type: str
+    data_base64: str
+    source_path: Path | None = None
+    width: int | None = None
+    height: int | None = None
+    size_bytes: int | None = None
+    persistent: bool = False
+    sha256: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -110,6 +125,8 @@ class ProviderRequest:
     assistant_message_patches: list[dict[str, Any]] = field(default_factory=list)
     note_snapshot: str | None = None
     user_prompt: str | None = None
+    persistent_images: list[ProviderImageInput] = field(default_factory=list)
+    prompt_images: list[ProviderImageInput] = field(default_factory=list)
     tools: list[ToolSpec] = field(default_factory=list)
     system_prompt: str | None = None
     model: str | None = None

@@ -48,6 +48,7 @@ class FakeWebSocket {
 }
 
 const sessionPayload: SessionStatePayload = {
+  instance_id: "instance-1",
   run_active: false,
   run_id: null,
   workspace_root: "/home/ejumps",
@@ -115,7 +116,7 @@ describe("WsClient", () => {
     client.start();
     const socket = openLatestSocket();
 
-    const promise = client.request("hello", {});
+    const promise = client.request("hello", { instance_id: "instance-1", page_id: "page-1" });
     const sent = socket.sent[0];
     socket.receive({ id: sent.id, type: "session_state", payload: sessionPayload });
 
@@ -146,7 +147,7 @@ describe("WsClient", () => {
     client.start();
     openLatestSocket();
 
-    const promise = client.request("hello", {});
+    const promise = client.request("hello", { instance_id: "instance-1", page_id: "page-1" });
     vi.advanceTimersByTime(10);
 
     await expect(promise).rejects.toMatchObject({ reason: "request_timeout" });
@@ -155,7 +156,9 @@ describe("WsClient", () => {
   it("rejects requests while not connected", async () => {
     const client = makeClient({ autoHelloOnOpen: false });
 
-    await expect(client.request("hello", {})).rejects.toMatchObject({
+    await expect(
+      client.request("hello", { instance_id: "instance-1", page_id: "page-1" }),
+    ).rejects.toMatchObject({
       reason: "not_connected",
     });
   });
@@ -167,7 +170,7 @@ describe("WsClient", () => {
     client.start();
     const socket = openLatestSocket();
 
-    const promise = client.request("hello", {});
+    const promise = client.request("hello", { instance_id: "instance-1", page_id: "page-1" });
     const sent = socket.sent[0];
     socket.receive({ id: sent.id, type: "session_state", payload: sessionPayload });
     await promise;
@@ -179,6 +182,7 @@ describe("WsClient", () => {
     const states: string[] = [];
     const client = makeClient({
       autoHelloOnOpen: true,
+      helloPayload: { instance_id: "instance-1", page_id: "page-1" },
       reconnect: { initialDelayMs: 25, maxDelayMs: 25, factor: 1, jitter: 0 },
       onStateChange: (state) => states.push(state),
     });
@@ -208,7 +212,7 @@ describe("WsClient", () => {
     client.start();
     openLatestSocket();
 
-    const promise = client.request("hello", {});
+    const promise = client.request("hello", { instance_id: "instance-1", page_id: "page-1" });
     client.stop();
 
     await expect(promise).rejects.toMatchObject({ reason: "client_closed" });
@@ -222,6 +226,7 @@ function makeClient(options: Partial<ConstructorParameters<typeof WsClient>[0]> 
     webSocketCtor: FakeWebSocket,
     requestTimeoutMs: 1_000,
     reconnect: { jitter: 0 },
+    helloPayload: { instance_id: "instance-1", page_id: "page-1" },
     ...options,
   });
 }

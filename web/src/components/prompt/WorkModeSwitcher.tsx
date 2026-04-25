@@ -6,7 +6,7 @@ interface WorkModeSwitcherProps {
   onChange: (mode: WorkMode) => void;
 }
 
-const WORK_MODES: WorkMode[] = ["off", "read", "work"];
+const WORK_MODES: WorkMode[] = ["off", "read", "work", "plan"];
 
 export function WorkModeSwitcher({
   workMode,
@@ -45,6 +45,9 @@ function labelForWorkMode(mode: WorkMode): string {
   if (mode === "work") {
     return "Work";
   }
+  if (mode === "plan") {
+    return "Plan";
+  }
   return titleCase(String(mode));
 }
 
@@ -62,6 +65,9 @@ function iconForWorkMode(mode: WorkMode): string {
   }
   if (mode === "work") {
     return "/icons/work.svg";
+  }
+  if (mode === "plan") {
+    return "/icons/note.svg";
   }
   return "/icons/off.svg";
 }

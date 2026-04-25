@@ -1134,6 +1134,37 @@ async def test_controller_existing_folded_search_results_stay_folded_on_reload(t
 
 
 @pytest.mark.asyncio
+async def test_controller_load_active_file_ensures_map_ready(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    note = tmp_path / "map-note.md"
+    note.write_text("# Body\n", encoding="utf-8")
+    manager = _FakeWatchingFileManager(note, "# Body\n", "# Body\n")
+    controller = TuiController(
+        active_file=note,
+        cwd=tmp_path,
+        file_manager=manager,
+        note_runner=_FakeNoteRunner(note),
+        chat_runner=_FakeChatRunner(),
+    )
+    controller.attach_buffers(editor_buffer=Buffer(), prompt_buffer=Buffer())
+    calls: list[tuple[Path, Path | None]] = []
+
+    def fake_ensure(note_path: Path, *, fallback_root: Path | None = None):
+        calls.append((note_path, fallback_root))
+        return None
+
+    monkeypatch.setattr("aunic.map.builder.ensure_map_ready", fake_ensure)
+    monkeypatch.setattr(
+        "aunic.map.builder.refresh_map_entry_if_stale",
+        lambda note_path, *, fallback_root=None: None,
+    )
+
+    await controller.initialize()
+    await controller._load_active_file(reset_dirty=True)
+
+    assert calls[-1] == (note.resolve(), tmp_path.resolve())
+
+
+@pytest.mark.asyncio
 async def test_controller_splits_note_content_from_transcript_and_filters_rows(tmp_path: Path) -> None:
     note = tmp_path / "transcript.md"
     note.write_text(

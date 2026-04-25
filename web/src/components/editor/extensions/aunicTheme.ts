@@ -3,13 +3,15 @@ import { EditorView } from "@codemirror/view";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
 
+const monospaceFont = 'var(--aunic-monospace-font, "MonoLisa", ui-monospace, monospace)';
+
 const syntax = HighlightStyle.define([
   { tag: tags.heading, color: "#f4faf6", fontWeight: "700" },
   { tag: tags.strong, fontWeight: "700" },
-  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.emphasis, fontStyle: "italic"},
   { tag: tags.link, color: "#8bc7ff" },
   { tag: tags.url, color: "#b3e0c9" },
-  { tag: tags.monospace, color: "#f6d58b" },
+  { tag: tags.monospace, color: "hsl(155, 50%, 60%)", fontFamily: monospaceFont },
   { tag: tags.quote, color: "#b9c8c0" },
   { tag: tags.processingInstruction, color: "#8ab4a0" },
 ]);
@@ -25,10 +27,13 @@ export function aunicTheme(): Extension {
           fontSize: "0.95rem",
           "--aunic-line-padding-left": "1rem",
           "--aunic-line-padding-right": "1rem",
+          "--aunic-monospace-font": '"MonoLisa", ui-monospace, monospace',
+          "--aunic-tab-width": "1.5rem",
+          "--aunic-inline-code-bg": "hsla(155, 15%, 15%, 0.7)",
+          "--aunic-inline-code-pad-x": "0.28rem",
         },
         ".cm-scroller": {
-          fontFamily:
-            "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", monospace",
+          fontFamily: '"ProLisa", ui-sans-serif, system-ui, sans-serif',
           lineHeight: "1.6",
         },
         ".cm-content": {
@@ -38,6 +43,7 @@ export function aunicTheme(): Extension {
         },
         ".cm-line": {
           paddingRight: "var(--aunic-line-padding-right)",
+          tabSize: "var(--aunic-tab-width)",
         },
         ".cm-gutters": {
           borderRight: "1px solid var(--editor-border)",
@@ -62,8 +68,8 @@ export function aunicTheme(): Extension {
         "&.cm-focused": {
           outline: "none",
         },
-        ".cm-aunic-hidden-markup": {
-          display: "none",
+        ".cm-aunic-hidden-fence": {
+          visibility: "hidden",
         },
         ".cm-aunic-heading-1": {
           fontSize: "1.55em",
@@ -113,20 +119,26 @@ export function aunicTheme(): Extension {
         },
         ".cm-aunic-inline-code": {
           borderRadius: "6px",
-          padding: "0.08rem 0.28rem",
-          backgroundColor: "hsl(210, 13%, 18%)",
-          color: "#f6d58b",
+          padding: "0.08rem var(--aunic-inline-code-pad-x)",
+          marginInline: "calc(-1 * var(--aunic-inline-code-pad-x))",
+          backgroundColor: "var(--aunic-inline-code-bg)",
+          boxDecorationBreak: "clone",
+          WebkitBoxDecorationBreak: "clone",
+          color: "hsl(155, 50%, 60%)",
+          fontFamily: monospaceFont,
         },
         ".cm-aunic-code-block-line": {
-          backgroundColor: "hsl(210, 13%, 13%)",
+          position: "relative",
+          isolation: "isolate",
+          fontFamily: monospaceFont,
         },
-        ".cm-aunic-code-block-line--start": {
-          borderTopLeftRadius: "6px",
-          borderTopRightRadius: "6px",
-        },
-        ".cm-aunic-code-block-line--end": {
-          borderBottomLeftRadius: "6px",
-          borderBottomRightRadius: "6px",
+        ".cm-aunic-tab-measure": {
+          position: "absolute",
+          visibility: "hidden",
+          pointerEvents: "none",
+          whiteSpace: "pre",
+          contain: "layout style paint",
+          fontFamily: monospaceFont,
         },
         ".cm-searchMatch": {
           backgroundColor: "hsla(49, 95%, 64%, 0.2)",
@@ -141,13 +153,14 @@ export function aunicTheme(): Extension {
           cursor: "text",
           lineHeight: "normal",
           maxWidth: "100%",
-          overflowX: "hidden",
+          overflowX: "auto",
         },
         ".cm-aunic-md-table": {
           borderCollapse: "collapse",
           fontSize: "0.9em",
-          tableLayout: "fixed",
-          width: "100%",
+          tableLayout: "auto",
+          width: "auto",
+          maxWidth: "100%",
         },
         ".cm-aunic-md-table th, .cm-aunic-md-table td": {
           border: "1px solid var(--editor-border)",

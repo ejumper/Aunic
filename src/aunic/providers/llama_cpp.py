@@ -131,15 +131,24 @@ class OpenAICompatibleProvider(LLMProvider):
         ready = await self.ensure_ready()
         if not ready.ok:
             raise ServiceUnavailableError(ready.message)
+        has_images = bool(request.persistent_images or request.prompt_images)
+        if has_images and (
+            not profile.supports_images or profile.image_transport != "openai_chat_vision"
+        ):
+            raise ConfigurationError(
+                f"{profile.display_label} does not support image inputs."
+            )
 
         model = request.model or profile.model
         reasoning_replay_enabled = _reasoning_replay_enabled(profile, model)
-        if request.transcript_messages is not None:
-            compacted_rows = prepare_transcript_for_model(request.transcript_messages)
+        if request.transcript_messages is not None or has_images:
+            compacted_rows = prepare_transcript_for_model(request.transcript_messages or [])
             translated_messages = translate_for_openai(
                 group_assistant_rows(compacted_rows),
                 request.note_snapshot or "",
                 request.user_prompt or "",
+                request.persistent_images,
+                request.prompt_images,
             )
             if reasoning_replay_enabled and request.assistant_message_patches:
                 translated_messages = _apply_openai_assistant_patches(

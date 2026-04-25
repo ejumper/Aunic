@@ -63,23 +63,23 @@ def test_parse_empty_scope_becomes_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# execute_read_map — map not built
+# execute_read_map — map auto-build
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_execute_missing_map_returns_error(
+async def test_execute_missing_map_builds_canonical_map(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("aunic.map.builder.MAP_PATH", tmp_path / ".aunic" / "map.md")
-    monkeypatch.setattr("aunic.tools.read_map.MAP_PATH", tmp_path / ".aunic" / "map.md")
+    _aunic_note(tmp_path, "note.md", "hello world")
 
     runtime = _FakeRuntime(cwd=tmp_path)
     args = ReadMapArgs(scope=None)
     result = await execute_read_map(runtime, args)  # type: ignore[arg-type]
 
-    assert result.status == "tool_error"
-    assert result.in_memory_content["reason"] == "map_not_built"
+    assert result.status == "completed"
+    assert result.in_memory_content["entry_count"] == 1
+    assert result.in_memory_content["map_path"] == str((tmp_path / ".aunic" / "map.md").resolve())
 
 
 # ---------------------------------------------------------------------------
@@ -89,10 +89,6 @@ async def test_execute_missing_map_returns_error(
 
 @pytest.mark.asyncio
 async def test_execute_returns_full_map(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    map_path = tmp_path / ".aunic" / "map.md"
-    monkeypatch.setattr("aunic.map.builder.MAP_PATH", map_path)
-    monkeypatch.setattr("aunic.tools.read_map.MAP_PATH", map_path)
-
     _aunic_note(tmp_path, "bgp.md", "BGP notes content")
     build_map(tmp_path)
 
@@ -114,10 +110,6 @@ async def test_execute_returns_full_map(tmp_path: Path, monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_execute_scope_filters_entries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    map_path = tmp_path / ".aunic" / "map.md"
-    monkeypatch.setattr("aunic.map.builder.MAP_PATH", map_path)
-    monkeypatch.setattr("aunic.tools.read_map.MAP_PATH", map_path)
-
     sub_a = tmp_path / "work"
     sub_a.mkdir()
     (sub_a / ".aunic").mkdir()
@@ -145,10 +137,6 @@ async def test_execute_scope_filters_entries(tmp_path: Path, monkeypatch: pytest
 async def test_execute_scope_not_found_returns_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    map_path = tmp_path / ".aunic" / "map.md"
-    monkeypatch.setattr("aunic.map.builder.MAP_PATH", map_path)
-    monkeypatch.setattr("aunic.tools.read_map.MAP_PATH", map_path)
-
     _aunic_note(tmp_path, "note.md", "content")
     build_map(tmp_path)
 
@@ -164,10 +152,6 @@ async def test_execute_scope_not_found_returns_error(
 async def test_execute_scope_not_directory_returns_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    map_path = tmp_path / ".aunic" / "map.md"
-    monkeypatch.setattr("aunic.map.builder.MAP_PATH", map_path)
-    monkeypatch.setattr("aunic.tools.read_map.MAP_PATH", map_path)
-
     note = _aunic_note(tmp_path, "note.md", "content")
     build_map(tmp_path)
 

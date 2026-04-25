@@ -10,6 +10,7 @@ describe("useSessionStore", () => {
   it("hydrates run and permission state from session_state", () => {
     useSessionStore.getState().setSession({
       ...sessionPayload(),
+      instance_id: "instance-1",
       run_active: true,
       run_id: "run-1",
       pending_permission: {
@@ -50,6 +51,74 @@ describe("useSessionStore", () => {
     expect(useSessionStore.getState().indicatorMessage?.text).toBe("First");
   });
 
+  it("formats provider requests like the TUI indicator", () => {
+    useSessionStore.getState().applyProgressEvent(progress("loop_event", "Sent tool-loop turn to provider.", {
+      loop_kind: "provider_request",
+    }));
+
+    expect(useSessionStore.getState().indicatorMessage).toMatchObject({
+      text: "Pontificating...",
+      kind: "status",
+    });
+  });
+
+  it("shows the active task label on provider_request when provided", () => {
+    useSessionStore.getState().applyProgressEvent(
+      progress("loop_event", "Sent tool-loop turn to provider.", {
+        loop_kind: "provider_request",
+        active_task_label: "Running tests",
+      }),
+    );
+
+    expect(useSessionStore.getState().indicatorMessage).toMatchObject({
+      text: "Running tests...",
+      kind: "status",
+    });
+  });
+
+  it("uses task tool verbs for task_update calls", () => {
+    useSessionStore.getState().applyProgressEvent(
+      progress("loop_event", "Tool loop provider response: usage.", {
+        loop_kind: "provider_response",
+        tool_calls: ["task_update"],
+      }),
+    );
+
+    expect(useSessionStore.getState().indicatorMessage).toMatchObject({
+      text: "Updating task...",
+      kind: "status",
+    });
+  });
+
+  it("formats provider tool calls with tool verbs", () => {
+    useSessionStore.getState().applyProgressEvent(
+      progress("loop_event", "Tool loop provider response: usage.", {
+        loop_kind: "provider_response",
+        tool_calls: ["web_fetch"],
+      }),
+    );
+
+    expect(useSessionStore.getState().indicatorMessage).toMatchObject({
+      text: "Fetching...",
+      kind: "status",
+    });
+  });
+
+  it("formats failed tool results as indicator errors", () => {
+    useSessionStore.getState().applyProgressEvent(
+      progress("loop_event", "bash finished with status tool_error.", {
+        loop_kind: "tool_result",
+        tool_name: "bash",
+        status: "tool_error",
+      }),
+    );
+
+    expect(useSessionStore.getState().indicatorMessage).toMatchObject({
+      text: "bash failed.",
+      kind: "error",
+    });
+  });
+
   it("sets indicator messages directly for UI-originated errors", () => {
     useSessionStore.getState().setIndicatorMessage("Nope", "error");
 
@@ -60,17 +129,22 @@ describe("useSessionStore", () => {
   });
 });
 
-function progress(kind: string, message: string): ProgressEventPayload {
+function progress(
+  kind: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ProgressEventPayload {
   return {
     kind,
     message,
     path: null,
-    details: {},
+    details,
   };
 }
 
 function sessionPayload(): SessionStatePayload {
   return {
+    instance_id: "instance-1",
     run_active: false,
     run_id: null,
     workspace_root: "/home/ejumps",

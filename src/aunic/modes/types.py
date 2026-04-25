@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any
 from typing import Literal
 
 from aunic.context.types import FileSnapshot, ParseWarning, PromptMode, PromptRun
-from aunic.domain import ReasoningEffort, UsageLog, WorkMode
+from aunic.domain import ProviderImageInput, ReasoningEffort, UsageLog, WorkMode
 from aunic.loop.types import LoopEvent, LoopRunResult, LoopStopReason, ToolFailure
 from aunic.progress import ProgressSink
 from aunic.research.types import ResearchSummary
@@ -20,6 +20,8 @@ class NoteModeRunRequest:
     active_file: Path
     provider: "LLMProvider"
     included_files: tuple[Path, ...] = ()
+    included_image_files: tuple[Path, ...] = ()
+    prompt_images: tuple[ProviderImageInput, ...] = ()
     active_plan_id: str | None = None
     active_plan_path: Path | None = None
     planning_status: str = "none"
@@ -62,6 +64,8 @@ class ChatModeRunRequest:
     provider: "LLMProvider"
     user_prompt: str
     included_files: tuple[Path, ...] = ()
+    included_image_files: tuple[Path, ...] = ()
+    prompt_images: tuple[ProviderImageInput, ...] = ()
     active_plan_id: str | None = None
     active_plan_path: Path | None = None
     planning_status: str = "none"

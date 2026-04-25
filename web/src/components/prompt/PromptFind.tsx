@@ -22,6 +22,7 @@ export function PromptFind() {
   const matchCount = useFindStore((store) => store.matchCount);
   const currentMatchIndex = useFindStore((store) => store.currentMatchIndex);
   const findInputRef = useRef<HTMLInputElement | null>(null);
+  const lastButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     if (!active) {
@@ -52,7 +53,7 @@ export function PromptFind() {
             type="text"
             value={findText}
             onChange={(event) => setBrowserFindText(event.target.value)}
-            onKeyDown={handleFindInputKeyDown}
+            onKeyDown={(event) => handleFindInputKeyDown(event, lastButtonRef.current)}
           />
         </label>
 
@@ -119,9 +120,16 @@ export function PromptFind() {
         </div>
 
         <button
+          ref={lastButtonRef}
           type="button"
           className="mode-pill"
           onClick={() => setBrowserFindReplaceMode(!replaceMode)}
+          onKeyDown={(event) => {
+            if (event.key === "Tab" && !event.shiftKey) {
+              event.preventDefault();
+              findInputRef.current?.focus();
+            }
+          }}
         >
           {replaceMode ? "Find" : "Replace"}
         </button>
@@ -130,7 +138,15 @@ export function PromptFind() {
   );
 }
 
-function handleFindInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
+function handleFindInputKeyDown(
+  event: ReactKeyboardEvent<HTMLInputElement>,
+  lastButton: HTMLButtonElement | null,
+): void {
+  if (event.key === "Tab" && event.shiftKey) {
+    event.preventDefault();
+    lastButton?.focus();
+    return;
+  }
   if (event.key === "Enter") {
     event.preventDefault();
     findNextBrowserMatch();

@@ -5,6 +5,7 @@ export const SLASH_COMMANDS = [
   "/work",
   "/read",
   "/off",
+  "/plan",
   "/model",
   "/find",
   "/replace",
