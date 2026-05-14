@@ -1,0 +1,12 @@
+# Compiled binaries
+aunic
+*.exe
+*.test
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Test scratch files
+test*.md
+test*.txt
