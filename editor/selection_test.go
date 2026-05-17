@@ -181,7 +181,7 @@ func TestSelectionOverlayRenders(t *testing.T) {
 
 	view := m.View()
 	// Selection background ANSI code should appear.
-	if !strings.Contains(view, "\x1b[104m") {
+	if !strings.Contains(view, "\x1b[103m") {
 		t.Errorf("expected selection background ANSI in view, got: %q", view)
 	}
 	// And the close code.
@@ -199,7 +199,7 @@ func TestApplySelectionBackgroundANSIAware(t *testing.T) {
 	if stripped != "abcd" {
 		t.Errorf("text corruption: %q -> %q", line, stripped)
 	}
-	if !strings.Contains(got, "\x1b[104m") {
+	if !strings.Contains(got, "\x1b[103m") {
 		t.Errorf("expected selection background, got %q", got)
 	}
 }

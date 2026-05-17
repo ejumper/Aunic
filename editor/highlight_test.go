@@ -13,9 +13,9 @@ func TestHighlightLineFastPaths(t *testing.T) {
 		empty  bool
 	}{
 		{"empty", "", "", true},
-		{"h1", "# Hello World", "\x1b[1m\x1b[97m", false},
-		{"h2", "## Subheading", "\x1b[1m\x1b[4m", false},
-		{"h3", "### Three", "\x1b[1m\x1b[4m", false},
+		{"h1", "# Hello World", "\x1b[1;34;4m", false},
+		{"h2", "## Subheading", "\x1b[1;34;4m", false},
+		{"h3", "### Three", "\x1b[1;34;4m", false},
 		{"blockquote", "> a quote", "\x1b[90m", false},
 		{"horizontal rule ---", "---", "\x1b[36m", false},
 		{"horizontal rule ***", "***", "\x1b[36m", false},
@@ -26,7 +26,7 @@ func TestHighlightLineFastPaths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := highlightLine(tt.input)
+			result := HighlightLine(tt.input)
 			if tt.empty {
 				if result != "" {
 					t.Errorf("expected empty output, got %q", result)
@@ -75,7 +75,7 @@ func TestHighlightLineInlineTokens(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := highlightLine(tt.input)
+			result := HighlightLine(tt.input)
 			if !strings.Contains(result, tt.contains) {
 				t.Errorf("highlightLine(%q)\n  got  %q\n  want to contain %q", tt.input, result, tt.contains)
 			}
@@ -97,7 +97,7 @@ func TestHighlightLineInlineTokensNoFalsePositives(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := highlightLine(tt.input)
+			result := HighlightLine(tt.input)
 			stripped := stripANSI(result)
 			if stripped != tt.input {
 				t.Errorf("input was modified by highlight: %q -> %q", tt.input, stripped)
@@ -151,7 +151,7 @@ func TestCodeSpanPrecedence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := highlightLine(tt.input)
+			result := HighlightLine(tt.input)
 			hasCode := strings.Contains(result, "\x1b[34m")
 			if hasCode != tt.wantCode {
 				t.Errorf("%s: code styling present=%v, want %v\n  result: %q", tt.description, hasCode, tt.wantCode, result)
@@ -172,7 +172,7 @@ func TestCodeSpanPrecedence(t *testing.T) {
 
 func TestHighlightLinePlainTextNoCorruption(t *testing.T) {
 	input := "plain text without formatting"
-	result := highlightLine(input)
+	result := HighlightLine(input)
 
 	stripped := stripANSI(result)
 	if stripped != input {

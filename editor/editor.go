@@ -1,8 +1,6 @@
 package editor
 
 import (
-	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -43,6 +41,15 @@ type Model struct {
 	// events from the stack so the replay itself doesn't get re-recorded.
 	hist            history
 	applyingHistory bool
+
+	// focused controls whether the cursor is rendered. True by default.
+	focused bool
+
+	// Search state. searchCurrent is -1 when there are no matches.
+	searchQuery         string
+	searchCaseSensitive bool
+	searchMatches       []searchMatch
+	searchCurrent       int
 }
 
 // New creates an editor model with the given file content and path.
@@ -77,16 +84,18 @@ func New(filepath, content string) Model {
 	ta.SetWidth(cw)
 
 	m := Model{
-		textarea:   ta,
-		viewport:   viewport.New(80, 24),
-		filepath:   filepath,
-		gutterW:    gw,
-		contentW:   cw,
-		width:      80,
-		height:     24,
-		prevValue:  ta.Value(),
-		hlCache:    make(map[string]string),
-		isMarkdown: strings.HasSuffix(strings.ToLower(filepath), ".md"),
+		textarea:      ta,
+		viewport:      viewport.New(80, 24),
+		filepath:      filepath,
+		gutterW:       gw,
+		contentW:      cw,
+		width:         80,
+		height:        24,
+		prevValue:     ta.Value(),
+		hlCache:       make(map[string]string),
+		isMarkdown:    strings.HasSuffix(strings.ToLower(filepath), ".md"),
+		focused:       true,
+		searchCurrent: -1,
 	}
 	m.updateContent()
 	return m
@@ -95,8 +104,65 @@ func New(filepath, content string) Model {
 // Value returns the current buffer content.
 func (m Model) Value() string { return m.textarea.Value() }
 
+// SetFocused controls whether the cursor is rendered in View.
+func (m *Model) SetFocused(v bool) { m.focused = v }
+
 // HasActiveSelection reports whether a text selection is currently active.
 func (m Model) HasActiveSelection() bool { return m.selection.active }
+
+// SelectionRows returns the inclusive logical-line range of the active
+// selection. If no selection is active, hasSelection is false.
+func (m Model) SelectionRows() (startRow, endRow int, hasSelection bool) {
+	if !m.selection.active {
+		return 0, 0, false
+	}
+	head := m.currentCursorPos()
+	start, end := m.selection.ordered(head)
+	return start.row, end.row, true
+}
+
+// GutterWidth returns the current gutter width in characters.
+func (m Model) GutterWidth() int { return m.gutterW }
+
+// IsAtLastVisualLine reports whether the cursor is on the last visual row of
+// the last logical line. Used by app.go to decide whether a down-arrow at the
+// editor's edge should hand focus to the transcript bar.
+func (m Model) IsAtLastVisualLine() bool {
+	if m.textarea.Line() < m.textarea.LineCount()-1 {
+		return false
+	}
+	li := m.textarea.LineInfo()
+	return li.RowOffset >= li.Height-1
+}
+
+// IndicatorMsg carries a status string to the agent pane's indicator area.
+type IndicatorMsg string
+
+func indicatorCmd(msg string) tea.Cmd {
+	return func() tea.Msg { return IndicatorMsg(msg) }
+}
+
+// bucketDescription summarizes a group of edit events as "typing", "deletion",
+// or "edit" based on what the events contain.
+func bucketDescription(group []editEvent) string {
+	var hasIns, hasDel bool
+	for _, ev := range group {
+		if len(ev.inserted) > 0 {
+			hasIns = true
+		}
+		if len(ev.removed) > 0 {
+			hasDel = true
+		}
+	}
+	switch {
+	case hasIns && !hasDel:
+		return "typing"
+	case hasDel && !hasIns:
+		return "deletion"
+	default:
+		return "edit"
+	}
+}
 
 func (m Model) Init() tea.Cmd {
 	return m.textarea.Focus()
@@ -158,11 +224,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case keyStr == "ctrl+c":
 		if m.selection.active {
 			m.copySelection()
+			cmds = append(cmds, indicatorCmd("Copied to clipboard"))
 		}
 	case keyStr == "ctrl+x":
 		if m.selection.active {
 			m.cutSelection()
+			cmds = append(cmds, indicatorCmd("Cut to clipboard"))
 		}
+	case keyStr == "ctrl+v":
+		m.deleteSelectionIfActive()
+		text, _ := clipboard.ReadAll()
+		m.textarea.InsertString(text)
+		cmds = append(cmds, indicatorCmd("Pasted from clipboard"))
 	case keyStr == "ctrl+a":
 		lines := strings.Split(m.textarea.Value(), "\n")
 		m.selection.anchor = position{row: 0, col: 0}
@@ -173,15 +246,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selection.active {
 			m.selection.active = false
 		}
-	case keyStr == "ctrl+s":
-		_ = m.save()
-		return m, nil
 	case keyStr == "tab":
+		if m.selection.active && m.selectionSpansMultipleLines() {
+			m.indentSelection()
+		} else {
+			m.deleteSelectionIfActive()
+			m.textarea.InsertString("\t")
+		}
+	case keyStr == "shift+enter" || keyStr == "alt+enter":
 		m.deleteSelectionIfActive()
-		m.textarea.InsertString("\t")
+		m.textarea.InsertString("\n")
 	case keyStr == "shift+tab":
-		m.selection.active = false
-		m.unindent()
+		if m.selection.active && m.selectionSpansMultipleLines() {
+			m.unindentSelection()
+		} else {
+			m.selection.active = false
+			m.unindent()
+		}
 	case keyStr == "alt+up":
 		m.selection.active = false
 		m.moveLine(-1)
@@ -202,21 +283,34 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.moveVisualEnd()
 	case keyStr == "pgdown":
 		m.selection.active = false
-		m.movePage(1)
+		m.scrollWithCursor(1)
 	case keyStr == "pgup":
 		m.selection.active = false
-		m.movePage(-1)
+		m.scrollWithCursor(-1)
+	case keyStr == "alt+pgdown":
+		m.selection.active = false
+		m.movePagePreserve(1)
+	case keyStr == "alt+pgup":
+		m.selection.active = false
+		m.movePagePreserve(-1)
 	case keyStr == "ctrl+z":
 		m.selection.active = false
-		m.undo()
+		cmds = append(cmds, indicatorCmd(m.undo()))
 	case keyStr == "ctrl+y", keyStr == "ctrl+shift+z":
 		m.selection.active = false
-		m.redo()
+		cmds = append(cmds, indicatorCmd(m.redo()))
 	default:
 		if isNavigationKey(keyStr) {
 			m.selection.active = false
 		} else {
+			hadSel := m.selection.active
 			m.deleteSelectionIfActive()
+			// Backspace/delete with an active selection: the selection deletion
+			// is the complete action. Don't also send the key to the textarea,
+			// which would delete another character from the now-empty line.
+			if hadSel && isDeleteKey(keyStr) {
+				break
+			}
 		}
 		var taCmd tea.Cmd
 		m.textarea, taCmd = m.textarea.Update(msg)
@@ -305,14 +399,35 @@ func (m Model) View() string {
 	}
 	lines := strings.Split(out, "\n")
 
-	// Selection overlay first, then cursor, so the cursor reverse-video lands
-	// on top of any selection background at the head cell.
+	// The viewport renders via lipgloss Width+Height, which pads short content
+	// with space-filled lines (not empty strings). Every real content row from
+	// buildView contains "│"; space-only padding rows do not. Replace those
+
+ 	gutterPad := strings.Repeat(" ", m.gutterW-1) + "\x1b[90m│\x1b[0m"
+ 	for i, line := range lines {
+ 		if !strings.Contains(line, "│") {
+			lines[i] = gutterPad
+		}
+	}
+	// Trim any trailing-newline artifact from buildView, then pad if needed.
+	if len(lines) > m.viewport.Height {
+		lines = lines[:m.viewport.Height]
+	}
+	for len(lines) < m.viewport.Height {
+		lines = append(lines, gutterPad)
+	}
+
+	// Overlay order: brackets → search → selection → cursor (each wins over previous).
+	m.applyBracketOverlay(lines)
+	m.applySearchOverlay(lines)
 	m.applySelectionOverlay(lines)
 
-	absRow, contentCol := m.cursorAbsolutePos()
-	visibleRow := absRow - m.viewport.YOffset
-	if visibleRow >= 0 && visibleRow < m.viewport.Height && visibleRow < len(lines) {
-		lines[visibleRow] = injectCursor(lines[visibleRow], m.gutterW+contentCol)
+	if m.focused {
+		absRow, contentCol := m.cursorAbsolutePos()
+		visibleRow := absRow - m.viewport.YOffset
+		if visibleRow >= 0 && visibleRow < m.viewport.Height && visibleRow < len(lines) {
+			lines[visibleRow] = injectCursor(lines[visibleRow], m.gutterW+contentCol)
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -394,6 +509,63 @@ func (m *Model) unindent() {
 	m.textarea.SetCursor(newCol)
 }
 
+func (m *Model) selectionSpansMultipleLines() bool {
+	head := position{row: m.textarea.Line(), col: m.cursorCol()}
+	start, end := m.selection.ordered(head)
+	return start.row != end.row
+}
+
+func (m *Model) indentSelection() {
+	head := position{row: m.textarea.Line(), col: m.cursorCol()}
+	start, end := m.selection.ordered(head)
+
+	lines := strings.Split(m.textarea.Value(), "\n")
+	for i := start.row; i <= end.row && i < len(lines); i++ {
+		lines[i] = "\t" + lines[i]
+	}
+	m.textarea.SetValue(strings.Join(lines, "\n"))
+
+	m.moveCursorTo(head.row, head.col+1)
+	m.selection.anchor = position{row: m.selection.anchor.row, col: m.selection.anchor.col + 1}
+	m.selection.active = true
+}
+
+func (m *Model) unindentSelection() {
+	head := position{row: m.textarea.Line(), col: m.cursorCol()}
+	start, end := m.selection.ordered(head)
+
+	lines := strings.Split(m.textarea.Value(), "\n")
+	removed := make([]int, len(lines))
+	for i := start.row; i <= end.row && i < len(lines); i++ {
+		switch {
+		case strings.HasPrefix(lines[i], "\t"):
+			lines[i] = lines[i][1:]
+			removed[i] = 1
+		case strings.HasPrefix(lines[i], "    "):
+			lines[i] = lines[i][4:]
+			removed[i] = 4
+		case strings.HasPrefix(lines[i], "  "):
+			lines[i] = lines[i][2:]
+			removed[i] = 2
+		}
+	}
+	m.textarea.SetValue(strings.Join(lines, "\n"))
+
+	headCol := head.col - removed[head.row]
+	if headCol < 0 {
+		headCol = 0
+	}
+	m.moveCursorTo(head.row, headCol)
+
+	anchorRow := m.selection.anchor.row
+	anchorCol := m.selection.anchor.col - removed[anchorRow]
+	if anchorCol < 0 {
+		anchorCol = 0
+	}
+	m.selection.anchor = position{row: anchorRow, col: anchorCol}
+	m.selection.active = true
+}
+
 // moveLine swaps the current logical line with the one delta rows away
 // (delta=-1 for up, delta=+1 for down), preserving the cursor column.
 func (m *Model) moveLine(delta int) {
@@ -433,21 +605,27 @@ func (m *Model) jumpToEmptyLine(delta int) {
 	}
 }
 
-func (m *Model) save() error {
-	if m.filepath == "" {
-		return fmt.Errorf("no filepath set")
+// GotoLine moves the cursor to the start of line n (1-indexed).
+// Returns true on success, false if n is out of range.
+func (m *Model) GotoLine(n int) bool {
+	if n < 1 || n > m.textarea.LineCount() {
+		return false
 	}
-	return os.WriteFile(m.filepath, []byte(m.textarea.Value()), 0644)
+	m.selection.active = false
+	m.moveCursorTo(n-1, 0)
+	m.refreshAfterChange()
+	return true
 }
 
 // undo pops the top time-bucket of events from the undo stack, applies their
 // inverses to the buffer, and restores the cursor to where it was when the
 // bucket began. The popped group is pushed onto the redo stack.
-func (m *Model) undo() {
+func (m *Model) undo() string {
 	group := m.hist.popUndoGroup()
 	if len(group) == 0 {
-		return
+		return "Nothing to undo"
 	}
+	desc := bucketDescription(group)
 	buf := m.textarea.Value()
 	for _, ev := range group {
 		buf = applyInverse(buf, ev)
@@ -461,18 +639,18 @@ func (m *Model) undo() {
 	m.applyingHistory = false
 
 	m.hist.pushRedoGroup(group)
+	return "Undo: " + desc
 }
 
 // redo replays the most recent undone group: applies events forward (oldest
 // first) and restores the cursor to where it was after the newest event.
-func (m *Model) redo() {
+func (m *Model) redo() string {
 	group := m.hist.popRedoGroup()
 	if len(group) == 0 {
-		return
+		return "Nothing to redo"
 	}
+	desc := bucketDescription(group)
 	buf := m.textarea.Value()
-	// group is in pop-order (most-recent first); apply in reverse so oldest
-	// event lands first.
 	for i := len(group) - 1; i >= 0; i-- {
 		buf = applyForward(buf, group[i])
 	}
@@ -485,6 +663,7 @@ func (m *Model) redo() {
 	m.applyingHistory = false
 
 	m.hist.pushUndoGroup(group)
+	return "Redo: " + desc
 }
 
 // --- Selection: extension, deletion, clipboard --------------------------
@@ -496,6 +675,16 @@ func isExtendKey(s string) bool {
 		"shift+home", "shift+end",
 		"ctrl+shift+left", "ctrl+shift+right",
 		"ctrl+shift+home", "ctrl+shift+end":
+		return true
+	}
+	return false
+}
+
+// isDeleteKey reports whether a key is a backward or forward deletion key.
+// Used to guard against double-deletion when a selection was just cleared.
+func isDeleteKey(s string) bool {
+	switch s {
+	case "backspace", "ctrl+h", "delete", "ctrl+d":
 		return true
 	}
 	return false
@@ -616,6 +805,13 @@ func (m *Model) moveVisualEnd() {
 		c = len(runes)
 	}
 	byteCol := len(string(runes[:c]))
+	// wrapRowBounds treats the indent as its own virtual row and returns
+	// indentLen as the "end" when the cursor is inside the indent region.
+	// Skip past the indent so we get the real end of the first content row.
+	indent, content := extractIndent(line)
+	if byteCol <= len(indent) && len(content) > 0 {
+		byteCol = len(indent) + 1
+	}
 	_, end := wrapRowBounds(line, byteCol, m.contentW)
 	if end > 0 {
 		// If placing the cursor at the exclusive end crosses a visual
@@ -632,6 +828,36 @@ func (m *Model) moveVisualEnd() {
 }
 
 func (m *Model) movePage(offset int) {
+	total := m.viewport.TotalLineCount()
+	h := m.viewport.Height
+	if total <= h {
+		return
+	}
+
+	cursorRow, cursorCol := m.cursorAbsolutePos()
+	cursorViewRow := cursorRow - m.viewport.YOffset
+
+	delta := offset // +1 or -1
+	m.viewport.YOffset += delta
+	if m.viewport.YOffset < 0 {
+		m.viewport.YOffset = 0
+	}
+	maxOff := total - h
+	if m.viewport.YOffset > maxOff {
+		m.viewport.YOffset = maxOff
+	}
+
+	targetVisualRow := cursorViewRow + delta
+	if targetVisualRow < 0 {
+		targetVisualRow = 0
+	}
+	if targetVisualRow >= h {
+		targetVisualRow = h - 1
+	}
+	m.setCursorAtVisual(m.viewport.YOffset+targetVisualRow, cursorCol)
+}
+
+func (m *Model) movePagePreserve(offset int) {
 	totalVisual := m.viewport.TotalLineCount()
 	pageSize := m.viewport.Height
 	if pageSize <= 0 || totalVisual <= pageSize {
@@ -663,16 +889,49 @@ func (m *Model) movePage(offset int) {
 	m.moveCursorTo(targetRow, targetCol)
 }
 
-func (m *Model) scrollViewport(keyType tea.KeyType) {
+// scrollWithCursor scrolls the viewport by delta visual lines while keeping
+// the cursor at the same screen row. The cursor's logical position tracks
+// the scroll exactly — if the scroll is clamped at document boundaries, the
+// cursor moves only as far as the viewport actually moved.
+func (m *Model) scrollWithCursor(delta int) {
 	total := m.viewport.TotalLineCount()
 	h := m.viewport.Height
 	if total <= h {
 		return
 	}
 
-	delta := 1
-	if keyType == tea.KeyCtrlUp {
-		delta = -1
+	cursorAbsRow, cursorContentCol := m.cursorAbsolutePos()
+
+	newYOffset := m.viewport.YOffset + delta
+	maxOffset := total - h
+	if newYOffset < 0 {
+		newYOffset = 0
+	}
+	if newYOffset > maxOffset {
+		newYOffset = maxOffset
+	}
+
+	actualDelta := newYOffset - m.viewport.YOffset
+	if actualDelta == 0 {
+		return
+	}
+	m.viewport.YOffset = newYOffset
+
+	targetAbsRow := cursorAbsRow + actualDelta
+	if targetAbsRow < 0 {
+		targetAbsRow = 0
+	}
+	if targetAbsRow >= total {
+		targetAbsRow = total - 1
+	}
+	m.setCursorAtVisual(targetAbsRow, cursorContentCol)
+}
+
+func (m *Model) scrollViewportLine(delta int) {
+	total := m.viewport.TotalLineCount()
+	h := m.viewport.Height
+	if total <= h {
+		return
 	}
 
 	m.viewport.YOffset += delta
@@ -690,6 +949,14 @@ func (m *Model) scrollViewport(keyType tea.KeyType) {
 	} else if cursorRow >= m.viewport.YOffset+h {
 		m.setCursorAtVisual(m.viewport.YOffset+h-1, cursorCol)
 	}
+}
+
+func (m *Model) scrollViewport(keyType tea.KeyType) {
+	delta := 1
+	if keyType == tea.KeyCtrlUp {
+		delta = -1
+	}
+	m.scrollViewportLine(delta)
 }
 
 func (m *Model) setCursorAtVisual(visualRow, contentCol int) {
@@ -723,6 +990,15 @@ func (m *Model) deleteSelectionIfActive() {
 		start.col = len(startRunes)
 	}
 	if end.col > len(endRunes) {
+		end.col = len(endRunes)
+	}
+
+	// When a cross-line selection ends at col 0, the newline before that
+	// position is not part of the selected content — selecting a full line
+	// should clear it, not delete it. Adjust end to the EOL of the prior row.
+	if end.row > start.row && end.col == 0 {
+		end.row--
+		endRunes = []rune(lines[end.row])
 		end.col = len(endRunes)
 	}
 

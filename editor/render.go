@@ -15,7 +15,7 @@ func gutterWidth(lineCount int) int {
 		digits++
 		lineCount /= 10
 	}
-	return digits + 1 // +1 for "│" separator
+	return digits + 1
 }
 
 func extractIndent(line string) (indent, content string) {
@@ -63,16 +63,14 @@ func ansiVisualWidth(s string) int {
 	return w
 }
 
-// fillH1Content applies an ANSI 4 background to the content portion of an h1
-// row, padding to contentW cells. It re-applies the background after any
-// internal full-reset escape so the blue persists through styled tokens.
-func fillH1Content(wl string, contentW int) string {
-	wl = strings.ReplaceAll(wl, "\x1b[0m", "\x1b[0m\x1b[44m")
+// fillH1Underline pads the h1 content with ANSI 4 underlined spaces to fill
+// the content width.
+func fillH1Underline(wl string, contentW int) string {
 	pad := contentW - ansiVisualWidth(wl)
 	if pad < 0 {
 		pad = 0
 	}
-	return "\x1b[44m" + wl + strings.Repeat(" ", pad) + "\x1b[0m"
+	return wl + "\x1b[34;4m" + strings.Repeat(" ", pad) + "\x1b[0m"
 }
 
 // countLines returns the number of visible rows that a wrapped block occupies.
@@ -100,6 +98,7 @@ func wordWrap(s string, width int) string {
 	lastSpace := -1
 	lineW := 0
 	inEsc := false
+	inMeta := false // inside link-URL metadata: \x03 ... \x04 — zero-width.
 
 	runeW := func(r rune) int {
 		if r == '\t' {
@@ -119,6 +118,16 @@ func wordWrap(s string, width int) string {
 			}
 			continue
 		}
+		if r == '\x03' {
+			inMeta = true
+			continue
+		}
+		if inMeta {
+			if r == '\x04' {
+				inMeta = false
+			}
+			continue
+		}
 
 		w := runeW(r)
 
@@ -133,6 +142,7 @@ func wordWrap(s string, width int) string {
 			lastSpace = -1
 			lineW = 0
 			esc := false
+			meta := false
 			for j := lineStart; j < i; j++ {
 				rj := runes[j]
 				if rj == '\x1b' {
@@ -142,6 +152,16 @@ func wordWrap(s string, width int) string {
 				if esc {
 					if (rj >= 'A' && rj <= 'Z') || (rj >= 'a' && rj <= 'z') {
 						esc = false
+					}
+					continue
+				}
+				if rj == '\x03' {
+					meta = true
+					continue
+				}
+				if meta {
+					if rj == '\x04' {
+						meta = false
 					}
 					continue
 				}
@@ -438,7 +458,7 @@ func (m Model) visualToBuffer(visualRow, visualCol int) (row, col int) {
 // counting toward visual width.
 func applySelectionBackground(line string, fromCol, toCol int) string {
 	const (
-		selOpen  = "\x1b[104m" // bright-blue background (ANSI 12)
+		selOpen  = "\x1b[103m" // bright-yellow background (ANSI 11)
 		selClose = "\x1b[49m"  // background reset
 	)
 	var b strings.Builder
@@ -517,6 +537,162 @@ func (m Model) applySelectionOverlay(lines []string) {
 			toCol = -1
 		}
 		lines[visibleR] = applySelectionBackground(lines[visibleR], fromCol, toCol)
+	}
+}
+
+// applyBracketOverlay underlines the bracket under (or just left of) the cursor
+// and its matching counterpart. Skipped when a selection is active.
+func (m Model) applyBracketOverlay(lines []string) {
+	if m.selection.active {
+		return
+	}
+	docLines := strings.Split(m.textarea.Value(), "\n")
+	bm, found := findBracketPair(docLines, m.textarea.Line(), m.cursorCol())
+	if !found {
+		return
+	}
+
+	for _, pos := range [2][2]int{{bm.aRow, bm.aCol}, {bm.bRow, bm.bCol}} {
+		visRow, contentCol := m.bufferPosToVisual(pos[0], pos[1])
+		visibleR := visRow - m.viewport.YOffset
+		if visibleR < 0 || visibleR >= len(lines) {
+			continue
+		}
+		lines[visibleR] = applyBracketUnderline(lines[visibleR], m.gutterW+contentCol)
+	}
+}
+
+// applyBracketUnderline underlines the single character at visualCol in an
+// already-ANSI-decorated line. Same traversal pattern as injectCursor.
+func applyBracketUnderline(s string, visualCol int) string {
+	var out strings.Builder
+	vis := 0
+	inEscape := false
+	done := false
+
+	for _, r := range s {
+		if done {
+			out.WriteRune(r)
+			continue
+		}
+		if r == '\x1b' {
+			inEscape = true
+			out.WriteRune(r)
+			continue
+		}
+		if inEscape {
+			out.WriteRune(r)
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		var cw int
+		if r == '\t' {
+			cw = tabWidth
+		} else {
+			cw = runewidth.RuneWidth(r)
+		}
+
+		if vis == visualCol || (vis < visualCol && vis+cw > visualCol) {
+			out.WriteString("\x1b[4m")
+			out.WriteRune(r)
+			out.WriteString("\x1b[24m")
+			vis += cw
+			done = true
+			continue
+		}
+
+		out.WriteRune(r)
+		vis += cw
+	}
+	return out.String()
+}
+
+// applySearchBackground is the search-match equivalent of applySelectionBackground.
+// isCurrent selects orange (current match) vs yellow (other matches).
+func applySearchBackground(line string, fromCol, toCol int, isCurrent bool) string {
+	var open string
+	if isCurrent {
+		open = "\x1b[48;5;214m\x1b[30m" // orange bg, black fg
+	} else {
+		open = "\x1b[48;5;226m\x1b[30m" // yellow bg, black fg
+	}
+	const close = "\x1b[49m\x1b[39m"
+
+	var b strings.Builder
+	vis := 0
+	inEscape := false
+	inHL := false
+
+	for _, r := range line {
+		if r == '\x1b' {
+			b.WriteRune(r)
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			b.WriteRune(r)
+			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		shouldBeHL := vis >= fromCol && (toCol < 0 || vis < toCol)
+		if shouldBeHL && !inHL {
+			b.WriteString(open)
+			inHL = true
+		} else if !shouldBeHL && inHL {
+			b.WriteString(close)
+			inHL = false
+		}
+
+		b.WriteRune(r)
+		cw := runewidth.RuneWidth(r)
+		if r == '\t' {
+			cw = tabWidth
+		}
+		vis += cw
+	}
+
+	if inHL {
+		b.WriteString(close)
+	}
+	return b.String()
+}
+
+// applySearchOverlay paints search-match highlights onto the visible lines in
+// place. The current match gets an orange background; all others get yellow.
+func (m Model) applySearchOverlay(lines []string) {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	for i, match := range m.searchMatches {
+		startVisRow, startVisCol := m.bufferPosToVisual(match.start.row, match.start.col)
+		endVisRow, endVisCol := m.bufferPosToVisual(match.end.row, match.end.col)
+		isCurrent := i == m.searchCurrent
+
+		for r := startVisRow; r <= endVisRow; r++ {
+			visibleR := r - m.viewport.YOffset
+			if visibleR < 0 || visibleR >= len(lines) {
+				continue
+			}
+
+			var fromCol, toCol int
+			if r == startVisRow {
+				fromCol = m.gutterW + startVisCol
+			} else {
+				fromCol = m.gutterW
+			}
+			if r == endVisRow {
+				toCol = m.gutterW + endVisCol
+			} else {
+				toCol = -1
+			}
+			lines[visibleR] = applySearchBackground(lines[visibleR], fromCol, toCol, isCurrent)
+		}
 	}
 }
 
@@ -689,20 +865,17 @@ func buildView(lines []string, contentWidth, gutterW, cursorLine int, hlCache ma
 			} else {
 				b.WriteString(strings.Repeat(" ", gutterW-1))
 			}
-			// \x1b[0m resets everything, keeping the gutter clean. For
-			// continuation rows we re-open any attributes that were active at
-			// the end of the previous visual row right after the separator.
 			b.WriteString("\x1b[90m│\x1b[0m")
 			if j > 0 {
 				b.WriteString(rowState.emit())
 			}
 
-			var written string
-			if h1 {
-				written = fillH1Content(wl, contentWidth)
-			} else {
-				written = wl
-			}
+		var written string
+		if h1 {
+			written = fillH1Underline(wl, contentWidth)
+		} else {
+			written = wl
+		}
 			b.WriteString(written)
 			rowState = walkAnsiState(written, rowState)
 			b.WriteByte('\n')

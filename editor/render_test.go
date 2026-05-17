@@ -71,13 +71,13 @@ func TestGutterWidth(t *testing.T) {
 		lineCount int
 		want      int
 	}{
-		{1, 2},    // 1 digit + separator
-		{9, 2},    // 1 digit + separator
-		{10, 3},   // 2 digits + separator
-		{99, 3},   // 2 digits + separator
-		{100, 4},  // 3 digits + separator
-		{999, 4},  // 3 digits + separator
-		{1000, 5}, // 4 digits + separator
+		{1, 2},
+		{9, 2},
+		{10, 3},
+		{99, 3},
+		{100, 4},
+		{999, 4},
+		{1000, 5},
 	}
 
 	for _, tt := range tests {

@@ -22,7 +22,11 @@ func isH1(s string) bool {
 	return strings.HasPrefix(s, "# ")
 }
 
-func isH2toH6(s string) bool {
+func isH2(s string) bool {
+	return strings.HasPrefix(s, "## ") && !strings.HasPrefix(s, "###")
+}
+
+func isH3toH6(s string) bool {
 	if !strings.HasPrefix(s, "##") {
 		return false
 	}
@@ -71,7 +75,7 @@ type inlineRule struct {
 }
 
 // inlineRules are scanned for every line that doesn't hit a block-level
-// fast-path in highlightLine. Order matters as a tiebreaker when two rules
+// fast-path in HighlightLine. Order matters as a tiebreaker when two rules
 // match at the same start position: strong precedes italic so `**` is read
 // as bold, not as two adjacent `*` italic markers.
 //
@@ -200,18 +204,15 @@ func styleInline(content string) string {
 	return b.String()
 }
 
-// highlightLine applies markdown syntax highlighting to content (indent
+// HighlightLine applies markdown syntax highlighting to content (indent
 // already stripped). Returns ANSI 0-15 escape codes that respect the user's
-// terminal color scheme. The h1 full-line background is NOT applied here —
-// buildView handles that since it requires contentW.
-func highlightLine(content string) string {
+// terminal color scheme.
+func HighlightLine(content string) string {
 	switch {
 	case content == "":
 		return ""
-	case isH1(content):
-		return "\x1b[1m\x1b[97m" + content + "\x1b[0m"
-	case isH2toH6(content):
-		return "\x1b[1m\x1b[4m" + content + "\x1b[0m"
+	case isH1(content), isH2(content), isH3toH6(content):
+		return "\x1b[1;34;4m" + content + "\x1b[0m"
 	case isHorizontalRule(content):
 		return "\x1b[36m" + content + "\x1b[0m"
 	case isCheckedList(content):
@@ -231,7 +232,7 @@ func cachedHighlight(content string, cache map[string]string) string {
 	if hl, ok := cache[content]; ok {
 		return hl
 	}
-	hl := highlightLine(content)
+	hl := HighlightLine(content)
 	if cache != nil {
 		cache[content] = hl
 	}
@@ -240,7 +241,7 @@ func cachedHighlight(content string, cache map[string]string) string {
 
 // chromaStyle is the Chroma style used for code block syntax highlighting.
 // monokai works well in terminals and maps cleanly to the 16-color palette.
-var chromaStyle = styles.Get("monokai")
+var chromaStyle = styles.Get("friendly")
 
 // highlightCodeBlock runs Chroma syntax highlighting on a multi-line code body
 // using the terminal16 formatter. Returns the output split into per-line
