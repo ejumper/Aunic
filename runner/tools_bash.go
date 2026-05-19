@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -134,11 +135,14 @@ func (bashTool) Execute(ctx context.Context, rc *RunContext, argsJSON string) Re
 	bgMgr := shell.GetBackgroundShellManager()
 	bgMgr.Cleanup()
 
+	slog.Info("bash_execute", "command", descOrCmd(args.Description, args.Command), "working_dir", workDir, "background", args.RunInBackground)
+
 	// Immediate background execution
 	if args.RunInBackground {
 		startTime := time.Now()
 		bs, err := bgMgr.Start(context.Background(), workDir, bashBlockFuncs(), args.Command, args.Description)
 		if err != nil {
+			slog.Error("bash_error", "error", err.Error())
 			return errorResult("start_failed", err.Error())
 		}
 
@@ -155,6 +159,7 @@ func (bashTool) Execute(ctx context.Context, rc *RunContext, argsJSON string) Re
 		if done {
 			bgMgr.Remove(bs.ID)
 			output := formatBashOutput(stdout, stderr, execErr)
+			slog.Info("bash_result", "exit_code", shell.ExitCode(execErr), "duration", time.Since(startTime), "background", false)
 			b, _ := json.Marshal(bashResult(output, args.Description, bs.WorkingDir, startTime, false, ""))
 			if output == "" {
 				output = bashNoOutput
@@ -162,6 +167,7 @@ func (bashTool) Execute(ctx context.Context, rc *RunContext, argsJSON string) Re
 			return Result{JSON: string(b), Summary: descOrCmd(args.Description, args.Command)}
 		}
 
+		slog.Info("bash_result", "shell_id", bs.ID, "background", true)
 		b, _ := json.Marshal(bashResult("", args.Description, bs.WorkingDir, startTime, true, bs.ID))
 		return Result{
 			JSON:    string(b),
@@ -173,6 +179,7 @@ func (bashTool) Execute(ctx context.Context, rc *RunContext, argsJSON string) Re
 	startTime := time.Now()
 	bs, err := bgMgr.Start(context.Background(), workDir, bashBlockFuncs(), args.Command, args.Description)
 	if err != nil {
+		slog.Error("bash_error", "error", err.Error())
 		return errorResult("start_failed", err.Error())
 	}
 
@@ -215,12 +222,14 @@ loop:
 		if shell.ExitCode(execErr) == 0 && !shell.IsInterrupt(execErr) && execErr != nil {
 			return errorResult("exec_failed", fmt.Sprintf("command error: %v", execErr))
 		}
+		slog.Info("bash_result", "exit_code", shell.ExitCode(execErr), "duration", time.Since(startTime), "background", false)
 		output += fmt.Sprintf("\n\n<cwd>%s</cwd>", workDir)
 		b, _ := json.Marshal(bashResult(output, args.Description, bs.WorkingDir, startTime, false, ""))
 		return Result{JSON: string(b), Summary: descOrCmd(args.Description, args.Command)}
 	}
 
 	// Timed out — keep as background job
+	slog.Info("bash_result", "shell_id", bs.ID, "background", true, "duration", time.Since(startTime))
 	b, _ := json.Marshal(bashResult("", args.Description, bs.WorkingDir, startTime, true, bs.ID))
 	return Result{
 		JSON:    string(b),

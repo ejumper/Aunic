@@ -1,10 +1,25 @@
-Reads a file from the local filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+Read a file from the filesystem with line numbers. Does not end the run.
 
-Usage:
-- The file_path parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
-- Results are returned using cat -n format, with line numbers starting at 1
-- This tool can only read files, not directories. To read a directory, use the Bash tool.
-- If you read a file that exists but has empty contents you will receive a message indicating the file is empty.
+<parameters>
+- file_path: Absolute path to the file to read. Required.
+- offset: Line number to start reading from (1-based). Defaults to 1 (start of file). Optional.
+- limit: Maximum number of lines to read. Defaults to 2000. Optional.
+</parameters>
+
+<features>
+- Returns content in cat -n format with 1-based line numbers: "     1\tline content"
+- Reports total_lines so you know how much was skipped if truncated.
+- Use offset + limit to read a specific section of a large file.
+</features>
+
+<limitations>
+- Default limit: 2000 lines. Set limit explicitly if you need more.
+- Cannot read directories — use Bash for directory listings.
+- Reading device paths (/dev/zero, /dev/random, /dev/urandom, etc.) is blocked.
+</limitations>
+
+<tips>
+- Read the file before using Edit — you need the exact content to construct old_string.
+- For large files: use Grep first to find the relevant line range, then Read with offset + limit.
+- Use total_lines from the result to determine whether important content was cut off.
+</tips>

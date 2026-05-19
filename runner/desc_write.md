@@ -1,8 +1,22 @@
-Writes a file to the local filesystem.
+Write content to a file, creating or overwriting it. Does not end the run.
 
-Usage:
-- This tool will overwrite the existing file if there is one at the provided path.
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
-- Prefer the Edit tool for modifying existing files — it only sends the diff. Only use this tool to create new files or for complete rewrites.
-- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.
-- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
+<parameters>
+- file_path: Absolute path to the file to write. Required.
+- content: The full content to write to the file. Required.
+</parameters>
+
+<features>
+- Creates parent directories automatically if they do not exist.
+- Overwrites the file completely if it already exists — no confirmation.
+</features>
+
+<when_to_use>
+Prefer Edit for targeted changes to an existing file. Use Write when:
+- Creating a new file.
+- Completely rewriting a file from scratch.
+- Making many scattered changes where multiple Edit calls would be unwieldy.
+</when_to_use>
+
+<warnings>
+Read the file first if it already exists. Write replaces the entire contents — any section you omit is lost.
+</warnings>

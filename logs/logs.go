@@ -41,8 +41,13 @@ func Close() {
 	}
 }
 
-// DefaultPath returns ~/.local/share/aunic/aunic.log.
+// DefaultPath returns <cwd>/aunic-logging/tech-logs/aunic.log.
+// Falls back to ~/.local/share/aunic/aunic.log if the working directory
+// cannot be determined.
 func DefaultPath() string {
+	if dir, err := os.Getwd(); err == nil {
+		return filepath.Join(dir, "aunic-logging", "tech-logs", "aunic.log")
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".local", "share", "aunic", "aunic.log")
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/charmbracelet/openai-go/shared"
 
 	"github.com/ejumper/aunic/llm"
+	"github.com/ejumper/aunic/modellogs"
 	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/transcript"
 )
@@ -204,14 +206,29 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 	tools := buildToolParams(mode, opts.AgentMode, opts.WriteScopeCount, opts.NoteWriteForbidden)
 	start := time.Now()
 
+	slog.Info("run_start", "mode", mode, "agent_mode", opts.AgentMode, "prompt_len", len(opts.UserPrompt), "todos", len(opts.Todos))
 	emit(RunStartedMsg{})
+
+	session, err := modellogs.Start(rc.ActivePath)
+	if err != nil {
+		slog.Warn("modellogs_open_failed", "error", err.Error())
+	}
+	defer session.Close()
+	session.LogRunHeader(cfg.Model, mode)
+	session.LogUserPrompt(opts.UserPrompt)
 
 	for step := 0; step < maxSteps; step++ {
 		if ctx.Err() != nil {
+			slog.Info("run_finish", "reason", "cancelled")
+			session.LogRunEnd(time.Since(start), "cancelled")
 			emit(RunCancelledMsg{})
 			return
 		}
 
+		session.NextStep()
+
+		apiStart := time.Now()
+		slog.Debug("api_request", "step", step, "model", cfg.Model, "messages", len(msgs))
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    cfg.Model,
 			Messages: msgs,
@@ -219,6 +236,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 		})
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				slog.Info("run_finish", "reason", "cancelled")
+				session.LogRunEnd(time.Since(start), "cancelled")
 				emit(RunCancelledMsg{})
 				return
 			}
@@ -234,24 +253,41 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				})
 				if err != nil {
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						slog.Info("run_finish", "reason", "cancelled")
+						session.LogRunEnd(time.Since(start), "cancelled")
 						emit(RunCancelledMsg{})
 						return
 					}
+					slog.Error("api_error", "step", step, "error", err.Error(), "duration", time.Since(apiStart))
+					session.LogRunEnd(time.Since(start), "api_error: "+err.Error())
 					emit(RunErrorMsg{Message: err.Error()})
 					return
 				}
 			} else {
+				slog.Error("api_error", "step", step, "error", err.Error(), "duration", time.Since(apiStart))
+				session.LogRunEnd(time.Since(start), "api_error: "+err.Error())
 				emit(RunErrorMsg{Message: err.Error()})
 				return
 			}
 		}
 
 		if len(resp.Choices) == 0 {
+			slog.Error("api_error", "step", step, "error", "no choices returned")
+			session.LogRunEnd(time.Since(start), "api_error: no choices returned")
 			emit(RunErrorMsg{Message: "model returned no choices"})
 			return
 		}
 
 		choice := resp.Choices[0]
+		slog.Info("api_response",
+			"step", step,
+			"input_tokens", resp.Usage.PromptTokens,
+			"output_tokens", resp.Usage.CompletionTokens,
+			"stop_reason", string(choice.FinishReason),
+			"duration", time.Since(apiStart),
+		)
+		session.AddTokens(int(resp.Usage.PromptTokens), int(resp.Usage.CompletionTokens))
+		session.LogThinking(extractThinking(resp.RawJSON()))
 		msgs = append(msgs, choice.Message.ToParam())
 
 		if len(choice.Message.ToolCalls) == 0 {
@@ -259,6 +295,9 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				if todos.AllDone(liveTodos) {
 					emit(TodosClearedMsg{})
 				}
+				slog.Info("run_finish", "reason", "chat", "input_tokens", int(resp.Usage.PromptTokens), "output_tokens", int(resp.Usage.CompletionTokens), "elapsed", time.Since(start))
+				session.LogChatResponse(choice.Message.Content)
+				session.LogRunEnd(time.Since(start), "chat")
 				emit(ChatFinishedMsg{
 					Text:    choice.Message.Content,
 					InTok:   int(resp.Usage.PromptTokens),
@@ -267,6 +306,7 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				})
 				return
 			}
+			session.LogPlainText(choice.Message.Content)
 			msgs = append(msgs, openai.UserMessage(plainTextNudge(choice.Message.Content)))
 			continue
 		}
@@ -275,6 +315,7 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 			name := call.Function.Name
 			tool := Lookup(name)
 			if tool == nil {
+				slog.Warn("tool_unknown", "tool", name)
 				emit(ToolResultMsg{Name: name, Summary: "unknown tool", IsError: true})
 				msgs = append(msgs, openai.ToolMessage(
 					fmt.Sprintf(`{"error":"unknown_tool","message":"no tool named %q"}`, name),
@@ -283,6 +324,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				continue
 			}
 
+			slog.Debug("tool_call", "tool", name, "args", previewArgs(call.Function.Arguments))
+			session.LogToolCall(name, call.Function.Arguments)
 			emit(ToolDispatchedMsg{Name: name, ArgsPreview: previewArgs(call.Function.Arguments)})
 			result := tool.Execute(ctx, rc, call.Function.Arguments)
 			msgs = append(msgs, openai.ToolMessage(result.JSON, call.ID))
@@ -293,6 +336,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				CallJSON:   call.Function.Arguments,
 				ResultJSON: result.JSON,
 			})
+			session.LogToolResult(name, result.Summary, result.IsError)
+			slog.Info("tool_result", "tool", name, "ok", !result.IsError, "summary", result.Summary)
 
 			// If a tool mutated the active todo list, update our local copy
 			// and re-render the user message so the next API call shows the
@@ -306,6 +351,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				if todos.AllDone(liveTodos) {
 					emit(TodosClearedMsg{})
 				}
+				slog.Info("run_finish", "reason", shortName(name), "input_tokens", int(resp.Usage.PromptTokens), "output_tokens", int(resp.Usage.CompletionTokens), "elapsed", time.Since(start))
+				session.LogRunEnd(time.Since(start), shortName(name))
 				emit(RunFinishedMsg{
 					EndedOn: shortName(name),
 					InTok:   int(resp.Usage.PromptTokens),
@@ -317,6 +364,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 		}
 	}
 
+	slog.Error("run_error", "message", "max steps reached")
+	session.LogRunEnd(time.Since(start), "max steps reached")
 	emit(RunErrorMsg{Message: "max steps reached"})
 }
 
@@ -466,6 +515,22 @@ func buildUserMessage(text string, images [][]byte) openai.ChatCompletionMessage
 		))
 	}
 	return openai.UserMessage(parts)
+}
+
+// extractThinking parses reasoning_content from the raw API response JSON.
+// Returns an empty string when the field is absent or parsing fails.
+func extractThinking(rawJSON string) string {
+	var raw struct {
+		Choices []struct {
+			Message struct {
+				ReasoningContent string `json:"reasoning_content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if json.Unmarshal([]byte(rawJSON), &raw) == nil && len(raw.Choices) > 0 {
+		return raw.Choices[0].Message.ReasoningContent
+	}
+	return ""
 }
 
 // isVisionError reports whether an API error is likely caused by the model not
