@@ -50,6 +50,14 @@ type Model struct {
 	searchCaseSensitive bool
 	searchMatches       []searchMatch
 	searchCurrent       int
+
+	// Marker highlight overlay. Set by SetMarkerHighlight from app.go.
+	markerBg []MarkerSpan // wrapper token bytes → background+fg color
+	markerUl []MarkerSpan // body bytes → underline color
+
+	// Insert highlight overlay. Set by SetInsertHighlight after model edits;
+	// cleared on any user content change.
+	insertSpans []InsertSpan
 }
 
 // New creates an editor model with the given file content and path.
@@ -417,7 +425,9 @@ func (m Model) View() string {
 		lines = append(lines, gutterPad)
 	}
 
-	// Overlay order: brackets → search → selection → cursor (each wins over previous).
+	// Overlay order: markers → insert → brackets → search → selection → cursor (each wins over previous).
+	m.applyMarkerOverlay(lines)
+	m.applyInsertOverlay(lines)
 	m.applyBracketOverlay(lines)
 	m.applySearchOverlay(lines)
 	m.applySelectionOverlay(lines)
@@ -1063,6 +1073,24 @@ func (m Model) copySelection() {
 	if text := m.selectionText(); text != "" {
 		_ = clipboard.WriteAll(text)
 	}
+}
+
+// WrapSelection inserts open before the selection start and close after the
+// selection end, leaving the body content unchanged. Returns false (and makes
+// no change) when there is no active non-empty selection. After wrapping,
+// the selection is cleared and the cursor sits just after the close token.
+func (m *Model) WrapSelection(open, close string) bool {
+	if !m.selection.active {
+		return false
+	}
+	head := m.currentCursorPos()
+	if m.selection.isEmpty(head) {
+		return false
+	}
+	text := m.selectionText()
+	m.deleteSelectionIfActive()
+	m.textarea.InsertString(open + text + close)
+	return true
 }
 
 func (m *Model) cutSelection() {

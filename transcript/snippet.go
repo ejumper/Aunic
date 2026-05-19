@@ -15,13 +15,18 @@ const snippetMaxChars = 300
 func Snippet(markdown string) string {
 	lines := strings.Split(markdown, "\n")
 	var parts []string
+	total := 0
 	for _, ln := range lines {
 		t := strings.TrimSpace(ln)
 		if t == "" {
 			continue
 		}
+		if len(parts) > 0 {
+			total++ // joiner space
+		}
+		total += utf8.RuneCountInString(t)
 		parts = append(parts, t)
-		if joinedLen(parts) >= snippetMaxChars {
+		if total >= snippetMaxChars {
 			break
 		}
 	}
@@ -29,7 +34,7 @@ func Snippet(markdown string) string {
 	if utf8.RuneCountInString(out) <= snippetMaxChars {
 		return out
 	}
-	// Truncate at rune boundary.
+	// i is a byte offset at a rune boundary (range over string yields those).
 	count := 0
 	for i := range out {
 		if count == snippetMaxChars {
@@ -38,15 +43,4 @@ func Snippet(markdown string) string {
 		count++
 	}
 	return out
-}
-
-func joinedLen(parts []string) int {
-	n := 0
-	for i, p := range parts {
-		if i > 0 {
-			n++
-		}
-		n += utf8.RuneCountInString(p)
-	}
-	return n
 }

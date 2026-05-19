@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 
+	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/web"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -32,6 +33,7 @@ type Pane struct {
 	conflictBar *ConflictBar // non-nil when conflict resolution UI is active
 	cmdBar      *CmdBar      // non-nil when command picker is active
 	webQueryBar *WebQueryBar // non-nil when web-search query input is active
+	todoBar     *TodoBar     // non-nil when /todo authoring modal is active
 }
 
 // SetRunActive toggles the run-in-progress state, which swaps the send button
@@ -43,6 +45,11 @@ func (p *Pane) SetRunActive(active bool) {
 // SetModelLabel sets the display label on the model button.
 func (p *Pane) SetModelLabel(label string) {
 	p.Buttons.ModelLabel = label
+}
+
+// SetAgentLabel sets the display label on the agent mode button.
+func (p *Pane) SetAgentLabel(label string) {
+	p.Buttons.AgentLabel = label
 }
 
 // SetModeLabel sets the display label on the mode button.
@@ -140,6 +147,31 @@ func (p Pane) CloseWebQueryBar() Pane {
 	return p
 }
 
+// OpenTodoBar activates the /todo authoring modal, replacing the prompt box.
+// existing is the current todo list, used to pre-populate the inputs.
+func (p Pane) OpenTodoBar(existing []todos.Todo) Pane {
+	tb := NewTodoBar(existing)
+	p.todoBar = &tb
+	p.findBar = nil
+	p.gotoBar = nil
+	p.webBar = nil
+	p.modelBar = nil
+	p.cmdBar = nil
+	p.webQueryBar = nil
+	p.buttonFocus = false
+	p.PromptBox.Blur()
+	return p
+}
+
+// CloseTodoBar deactivates the /todo authoring modal.
+func (p Pane) CloseTodoBar() Pane {
+	p.todoBar = nil
+	return p
+}
+
+// IsTodoMode reports whether the /todo authoring modal is currently active.
+func (p Pane) IsTodoMode() bool { return p.todoBar != nil }
+
 // CmdBarInitialIndicator returns the indicator text for the first focused
 // command after the picker opens. Returns "" if the picker is not active.
 func (p Pane) CmdBarInitialIndicator() string {
@@ -156,9 +188,17 @@ type RunCancelRequestedMsg struct{}
 // ModelOpenMsg is emitted when the model button (index 2) is pressed.
 type ModelOpenMsg struct{}
 
+// AgentModeCyclePressMsg is emitted when the agent mode button (index 3) is
+// pressed. app.go cycles through "off" → "read" → "work" → "off".
+type AgentModeCyclePressMsg struct{}
+
 // ModeTogglePressMsg is emitted when the mode button (index 4) is pressed.
 // app.go flips between "note" and "chat" modes.
 type ModeTogglePressMsg struct{}
+
+// AttachPickerPressMsg is emitted when the "+" button (index 0) is pressed.
+// app.go opens the system file picker and inserts the result as an @path token.
+type AttachPickerPressMsg struct{}
 
 // FocusTranscriptMsg is emitted when the prompt box receives up-arrow on its
 // first visual line. app.go handles it by transferring focus to the transcript
@@ -349,6 +389,25 @@ func (p Pane) OpenWebForURL(url string) (Pane, tea.Cmd) {
 	return p, WebFetchCmdNoRecord(url)
 }
 
+// OpenWebForFile opens the WebBar ready to display file or command output
+// content immediately. Unlike OpenWebForURL it does not fire a fetch cmd —
+// the caller applies content via ApplyWebPage right after calling this.
+func (p Pane) OpenWebForFile() Pane {
+	maxRows := webMaxRows(p.height)
+	innerWidth := p.width - 2
+	if innerWidth < 2 {
+		innerWidth = 2
+	}
+	wb := NewWebBar(innerWidth, maxRows)
+	wb.loadMsg = "Loading…"
+	p.webBar = &wb
+	p.findBar = nil
+	p.gotoBar = nil
+	p.buttonFocus = false
+	p.PromptBox.Blur()
+	return p
+}
+
 // CloseWeb deactivates @web mode.
 func (p Pane) CloseWeb() Pane {
 	p.webBar = nil
@@ -457,6 +516,9 @@ func (p Pane) Height() int {
 	if p.webQueryBar != nil {
 		return 3 + p.webQueryBar.Height()
 	}
+	if p.todoBar != nil {
+		return 3 + p.todoBar.Height()
+	}
 	return 4 + p.PromptBox.CurrentHeight()
 }
 
@@ -499,6 +561,11 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 		p.webQueryBar = &wb
 		return p, cmd
 	}
+	if p.todoBar != nil {
+		tb, cmd := p.todoBar.Update(msg)
+		p.todoBar = &tb
+		return p, cmd
+	}
 
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
@@ -507,18 +574,28 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 		}
 		// Button row is at Y = indicator(1) + top border(1) + prompt content rows.
 		if msg.Y == 2+p.PromptBox.CurrentHeight() {
+			// "+" button (index 0): open file picker.
+			plusStartX, plusEndX := ButtonXRange(0, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			if msg.X >= plusStartX && msg.X < plusEndX {
+				return p, func() tea.Msg { return AttachPickerPressMsg{} }
+			}
 			// "/" button (index 1): compute its X range from button layout.
-			slashStartX, slashEndX := ButtonXRange(1, p.Buttons.ModelLabel, p.Buttons.ModeLabel)
+			slashStartX, slashEndX := ButtonXRange(1, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
 			if msg.X >= slashStartX && msg.X < slashEndX {
 				return p, func() tea.Msg { return CmdPickerOpenMsg{} }
 			}
 			// Model button (index 2): open model picker.
-			modelStartX, modelEndX := ButtonXRange(2, p.Buttons.ModelLabel, p.Buttons.ModeLabel)
+			modelStartX, modelEndX := ButtonXRange(2, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
 			if msg.X >= modelStartX && msg.X < modelEndX {
 				return p, func() tea.Msg { return ModelOpenMsg{} }
 			}
+			// Agent mode button (index 3): cycle off → read → work → off.
+			agentStartX, agentEndX := ButtonXRange(3, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			if msg.X >= agentStartX && msg.X < agentEndX {
+				return p, func() tea.Msg { return AgentModeCyclePressMsg{} }
+			}
 			// Mode button (index 4): toggle note/chat mode.
-			modeStartX, modeEndX := ButtonXRange(4, p.Buttons.ModelLabel, p.Buttons.ModeLabel)
+			modeStartX, modeEndX := ButtonXRange(4, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
 			if msg.X >= modeStartX && msg.X < modeEndX {
 				return p, func() tea.Msg { return ModeTogglePressMsg{} }
 			}
@@ -561,10 +638,14 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 					content := p.PromptBox.Value()
 					p.PromptBox.Clear()
 					return p, func() tea.Msg { return PromptSubmitMsg{Content: content} }
+				} else if p.Buttons.focusedIdx == 0 { // "+" button → file picker
+					return p, func() tea.Msg { return AttachPickerPressMsg{} }
 				} else if p.Buttons.focusedIdx == 1 { // "/" button → command picker
 					return p, func() tea.Msg { return CmdPickerOpenMsg{} }
 				} else if p.Buttons.focusedIdx == 2 { // model button
 					return p, func() tea.Msg { return ModelOpenMsg{} }
+				} else if p.Buttons.focusedIdx == 3 { // agent mode button
+					return p, func() tea.Msg { return AgentModeCyclePressMsg{} }
 				} else if p.Buttons.focusedIdx == 4 { // mode button
 					return p, func() tea.Msg { return ModeTogglePressMsg{} }
 				}
@@ -586,6 +667,14 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 		pb, cmd := p.PromptBox.Update(msg)
 		p.PromptBox = pb
 		return p, cmd
+
+	case PasteTextMsg:
+		p.PromptBox.InsertString(msg.Text)
+		return p, nil
+
+	case PasteImageMsg:
+		// Image storage lives at the app level — forward the message up.
+		return p, func() tea.Msg { return msg }
 	}
 	return p, nil
 }
@@ -657,6 +746,13 @@ func (p Pane) View() string {
 		}
 	} else if p.webQueryBar != nil {
 		for _, line := range p.webQueryBar.View(innerWidth) {
+			b.WriteString("│")
+			b.WriteString(line)
+			b.WriteString("│")
+			b.WriteByte('\n')
+		}
+	} else if p.todoBar != nil {
+		for _, line := range p.todoBar.View(innerWidth) {
 			b.WriteString("│")
 			b.WriteString(line)
 			b.WriteString("│")

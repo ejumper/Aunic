@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"reflect"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ejumper/aunic/llm"
+	"github.com/ejumper/aunic/logs"
 )
 
 // kittyInputFilter translates kitty keyboard-protocol CSI-u sequences that
@@ -30,6 +32,13 @@ func kittyInputFilter(_ tea.Model, msg tea.Msg) tea.Msg {
 }
 
 func main() {
+	if err := logs.Init(logs.DefaultPath()); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
+	} else {
+		defer logs.Close()
+	}
+	slog.Info("aunic start", "args", os.Args[1:])
+
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: aunic <file>")
 		os.Exit(1)

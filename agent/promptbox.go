@@ -103,6 +103,12 @@ func (p *PromptBox) SetValue(s string) {
 	p.moveCursorTo(last, len([]rune(lines[last])))
 }
 
+// InsertString inserts s at the current cursor position.
+func (p *PromptBox) InsertString(s string) {
+	p.ta.InsertString(s)
+	p.refreshAfterChange()
+}
+
 // Focus marks the prompt box as having keyboard focus.
 func (p *PromptBox) Focus() { p.focused = true }
 
@@ -174,9 +180,7 @@ func (p PromptBox) handleKey(msg tea.KeyMsg) (PromptBox, tea.Cmd) {
 
 	case keyStr == "ctrl+v":
 		p.deleteSelectionIfActive()
-		if text, err := clipboard.ReadAll(); err == nil {
-			p.ta.InsertString(text)
-		}
+		return p, ReadClipboardCmd()
 
 	case keyStr == "ctrl+a":
 		lines := strings.Split(p.ta.Value(), "\n")
@@ -281,8 +285,8 @@ func (p PromptBox) View(innerWidth int) string {
 	var allRows []string
 	if sc != nil {
 		allRows = p.allVisualRowsFrom(ColorKeywords(val, sc, p.validModelNames), innerWidth)
-	} else if ParseAtCmd(val) != nil {
-		allRows = p.allVisualRowsFrom(ColorAtCmd(val), innerWidth)
+	} else if len(ParseAtFiles(val)) > 0 {
+		allRows = p.allVisualRowsFrom(ColorAtFiles(val), innerWidth)
 	} else {
 		allRows = p.allVisualRows(innerWidth)
 	}

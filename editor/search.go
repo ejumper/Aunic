@@ -122,11 +122,18 @@ func (m *Model) ReplaceAllMatches(replacement string) SearchResultMsg {
 	savedLine := m.textarea.Line()
 	savedCol := m.cursorCol()
 	content := m.textarea.Value()
-	// Walk in reverse so earlier byte offsets stay valid.
-	for i := len(m.searchMatches) - 1; i >= 0; i-- {
-		match := m.searchMatches[i]
-		content = content[:match.byteFrom] + replacement + content[match.byteTo:]
+	// findAllMatches returns matches in forward order; build the new content
+	// in one pass with strings.Builder to avoid O(N·L) repeated reallocation.
+	var b strings.Builder
+	b.Grow(len(content) + len(m.searchMatches)*len(replacement))
+	prev := 0
+	for _, match := range m.searchMatches {
+		b.WriteString(content[prev:match.byteFrom])
+		b.WriteString(replacement)
+		prev = match.byteTo
 	}
+	b.WriteString(content[prev:])
+	content = b.String()
 	m.textarea.SetValue(content)
 	lines := strings.Split(content, "\n")
 	if savedLine >= len(lines) {

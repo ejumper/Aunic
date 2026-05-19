@@ -1,0 +1,1 @@
+Create or replace the active todo list for the user's request. Use this for multi-step work (3+ steps) so the user can see your plan and you can track progress. Pass an array of short imperative task descriptions. IDs are assigned automatically starting from 1. Calling this again replaces the entire list — use it to revise the plan as work progresses.

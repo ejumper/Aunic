@@ -28,7 +28,7 @@ func TestSplit_WithDelimiter(t *testing.T) {
 }
 
 func TestJoin_NoRows(t *testing.T) {
-	got := Join("# hi", nil)
+	got := Join("# hi", nil, "")
 	if got != "# hi" {
 		t.Errorf("got %q, want %q", got, "# hi")
 	}
@@ -38,7 +38,7 @@ func TestJoin_WithRows(t *testing.T) {
 	rows := []Row{
 		{Num: 1, Role: RoleAssistant, Type: TypeToolCall, Tool: ToolWebSearch, ToolID: "call_1", Content: EncodeSearchCall("hello world")},
 	}
-	got := Join("body", rows)
+	got := Join("body", rows, "")
 	if !strings.Contains(got, "body\n***\n# Transcript\n") {
 		t.Errorf("missing delimiter: %q", got)
 	}
@@ -57,7 +57,7 @@ func TestRoundTrip(t *testing.T) {
 		{Num: 3, Role: RoleAssistant, Type: TypeToolCall, Tool: ToolWebFetch, ToolID: "call_2", Content: EncodeFetchCall("https://a.example/x")},
 		{Num: 4, Role: RoleTool, Type: TypeToolResult, Tool: ToolWebFetch, ToolID: "call_2", Content: EncodeFetchResult("Title A", "https://a.example/x", "first 300 chars…")},
 	}
-	full := Join("note body\n", rows)
+	full := Join("note body\n", rows, "")
 	_, tx := Split(full)
 	got, err := Parse(tx)
 	if err != nil {

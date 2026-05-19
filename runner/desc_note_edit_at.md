@@ -1,0 +1,1 @@
+Fill in scoped edits for numbered slots in the active note. The note contains <!--Write #N location--> markers (insert new text here) and <!--Rewrite #N start-->...<!--Rewrite #N end--> markers (replace the text between with new content). Calling this tool finalizes the run.

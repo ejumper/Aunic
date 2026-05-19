@@ -59,6 +59,20 @@ func ColorKeywords(s string, sc *SlashCmdResult, validModels map[string]bool) st
 		spans = inlineTokenSpan(trimmed, "/note")
 	case SlashChat:
 		spans = inlineTokenSpan(trimmed, "/chat")
+	case SlashWork:
+		spans = inlineTokenSpan(trimmed, "/work")
+	case SlashRead:
+		spans = inlineTokenSpan(trimmed, "/read")
+	case SlashAgentOff:
+		spans = inlineTokenSpan(trimmed, "/off")
+	case SlashWeb:
+		spans = inlineTokenSpan(trimmed, "/web")
+	case SlashTodo:
+		spans = inlineTokenSpan(trimmed, "/todo")
+	case SlashClear:
+		spans = inlineTokenSpan(trimmed, "/clear")
+	case SlashChat2Note:
+		spans = inlineTokenSpan(trimmed, "/chat2note")
 	}
 
 	var b strings.Builder
@@ -104,6 +118,35 @@ const (
 	SlashNote
 	// SlashChat switches the agent to chat mode (model ends runs with plain text).
 	SlashChat
+	// SlashWork enables agent work mode (read/write/edit/grep/glob/bash tools).
+	SlashWork
+	// SlashRead enables agent read mode (read/grep/glob tools).
+	SlashRead
+	// SlashAgentOff disables agent tools (off mode).
+	SlashAgentOff
+	// SlashWeb opens the web search bar, or searches directly if a query follows.
+	SlashWeb
+	// SlashTodo opens the todo authoring modal (prompt + list of todo inputs).
+	// Rejected in agent: off mode since todo_write / todo_done are only
+	// registered in read / work.
+	SlashTodo
+	// SlashClear removes transcript rows. ClearTarget selects what to clear:
+	// "trans" (all), "chat" (message rows), "tool" (non-web tool pairs), or
+	// "search" (web_search + web_fetch pairs). Empty ClearTarget is a no-op
+	// for safety.
+	SlashClear
+	// SlashMarkerInclude / SlashMarkerScope / SlashMarkerReadOnly /
+	// SlashMarkerExclude wrap the editor's active selection with the
+	// corresponding edit-command marker tokens. Picker-only entries — there
+	// is no text form to parse.
+	SlashMarkerInclude
+	SlashMarkerScope
+	SlashMarkerReadOnly
+	SlashMarkerExclude
+	// SlashChat2Note runs the two-step "condense chat into note" workflow.
+	// Optional extra guidance can follow the command (e.g. "/chat2note
+	// focus on the API design").
+	SlashChat2Note
 )
 
 // SlashCmdResult holds the parsed result of a recognized slash command.
@@ -114,6 +157,9 @@ type SlashCmdResult struct {
 	Line         int
 	CopyText     string
 	ModelName    string // non-empty for /model <name>
+	WebQuery     string // non-empty for /web <query>
+	ClearTarget  string // "trans"|"chat"|"tool"|"search" for /clear; "" for the bare /clear no-op
+	Chat2NoteExtra string // optional extra guidance appended to /chat2note
 }
 
 // ParseSlashCmd checks whether s is a recognized slash command and returns
@@ -180,6 +226,49 @@ func ParseSlashCmd(s string) *SlashCmdResult {
 
 	case s == "/chat":
 		return &SlashCmdResult{Kind: SlashChat}
+
+	case s == "/work":
+		return &SlashCmdResult{Kind: SlashWork}
+
+	case s == "/read":
+		return &SlashCmdResult{Kind: SlashRead}
+
+	case s == "/off":
+		return &SlashCmdResult{Kind: SlashAgentOff}
+
+	case s == "/web":
+		return &SlashCmdResult{Kind: SlashWeb}
+
+	case strings.HasPrefix(s, "/web "):
+		return &SlashCmdResult{Kind: SlashWeb, WebQuery: strings.TrimSpace(s[5:])}
+
+	case s == "/todo":
+		return &SlashCmdResult{Kind: SlashTodo}
+
+	case s == "/chat2note":
+		return &SlashCmdResult{Kind: SlashChat2Note}
+
+	case strings.HasPrefix(s, "/chat2note "):
+		extra := strings.TrimSpace(s[len("/chat2note "):])
+		return &SlashCmdResult{Kind: SlashChat2Note, Chat2NoteExtra: extra}
+
+	case s == "/clear":
+		return &SlashCmdResult{Kind: SlashClear}
+
+	case strings.HasPrefix(s, "/clear "):
+		target := strings.TrimSpace(s[len("/clear "):])
+		switch target {
+		case "trans", "chat", "tool", "search", "markers":
+			return &SlashCmdResult{Kind: SlashClear, ClearTarget: target}
+		}
+		// /clear followed by some combination of @ ! $ % strips those marker
+		// kinds from the editor body (see app.executeClearMarkers).
+		if isMarkerCharSet(target) {
+			return &SlashCmdResult{Kind: SlashClear, ClearTarget: target}
+		}
+		// Unknown target — still recognize as /clear so the app can show a
+		// usage hint rather than sending the literal text to the model.
+		return &SlashCmdResult{Kind: SlashClear}
 	}
 
 	return nil
@@ -199,6 +288,13 @@ func FindInlineCmd(s string) *SlashCmdResult {
 		{"/model", SlashModel},
 		{"/note", SlashNote},
 		{"/chat", SlashChat},
+		{"/work", SlashWork},
+		{"/read", SlashRead},
+		{"/off", SlashAgentOff},
+		{"/web", SlashWeb},
+		{"/todo", SlashTodo},
+		{"/clear", SlashClear},
+		{"/chat2note", SlashChat2Note},
 	} {
 		if r := findInlineToken(s, entry.token, entry.kind); r != nil {
 			return r
@@ -234,6 +330,23 @@ func findInlineToken(s, token string, kind SlashCmdKind) *SlashCmdResult {
 		return &SlashCmdResult{Kind: kind, CopyText: copyText}
 	}
 	return nil
+}
+
+// isMarkerCharSet reports whether s is a non-empty string composed only of
+// edit-marker symbol characters (@, !, $, %). Used to recognize forms like
+// "/clear @!" or "/clear %@$".
+func isMarkerCharSet(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '@', '!', '$', '%':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // inlineTokenSpan returns the byte-offset span of token within s as a

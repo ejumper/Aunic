@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,10 +15,11 @@ import (
 	"github.com/ejumper/aunic/agent"
 	"github.com/ejumper/aunic/editor"
 	"github.com/ejumper/aunic/llm"
+	"github.com/ejumper/aunic/markers"
 	"github.com/ejumper/aunic/runner"
+	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/transcript"
 	"github.com/ejumper/aunic/web"
-	"github.com/mattn/go-runewidth"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -90,6 +92,9 @@ type appModel struct {
 	// webQueryMode is true when the web search query input bar is open.
 	webQueryMode bool
 
+	// todoMode is true when the /todo authoring modal is open.
+	todoMode bool
+
 	// transcriptBar is the top-of-screen area showing parsed transcript rows
 	// from the note file. transcriptRows is the canonical in-memory list.
 	transcriptBar  agent.TranscriptBar
@@ -111,23 +116,63 @@ type appModel struct {
 	// note_edit/note_write tool call.
 	mode string
 
-	// pendingChatUserPrompt holds the user prompt that kicked off an in-flight
-	// chat-mode run, so the ChatFinishedMsg handler can append the user row
-	// alongside the assistant reply.
-	pendingChatUserPrompt string
+	// agentMode is "off" (default), "read", or "work". Controls which filesystem
+	// tools are included in the model's tool list for the run.
+	agentMode string
+
+	// pendingImages holds raw image bytes (PNG or JPEG) pasted from the clipboard
+	// via ctrl+v. They are cleared when a run starts and sent as multimodal
+	// content parts in the user message.
+	pendingImages [][]byte
+
+	// todos is the persistent todo list parsed from the "## Todos" section of
+	// the note file. Source of truth is the file; this slice is rewritten via
+	// writeNote() after every todo_write / todo_done.
+	todos []todos.Todo
+
+	// /chat2note state. chat2noteRowsToClear is the set of transcript Row
+	// numbers that should be removed when the current chat2note step-2 run
+	// finishes successfully. Non-empty implies a chat2note flow is in
+	// progress; an empty slice means a normal run is active.
+	chat2noteRowsToClear []int
+	chat2noteExtra       string
+
+	// homeDir and cwd are cached at startup so renderTitleBar/formatTitlePath
+	// don't issue os.UserHomeDir / os.Getwd syscalls on every render frame.
+	// Empty string means the lookup failed at startup; callers fall back to the
+	// absolute path in that case (same behavior as before caching).
+	homeDir string
+	cwd     string
+
+	// Marker-scan cache. refreshMarkerHighlight is wired into every keystroke
+	// path; markers.Scan is O(buffer-size). markerHashLen + markerHash form a
+	// content fingerprint — when both match the previous call, the scan is
+	// skipped. Any textual change perturbs at least one of these, so staleness
+	// is not possible.
+	markerHashLen int
+	markerHash    uint64
+	markerCached  bool
 }
 
 func newApp(fp, content string, cfg llm.Config) appModel {
 	noteBody, txArea := transcript.Split(content)
-	rows, _ := transcript.Parse(txArea)
+	tableArea, todosArea := transcript.SplitArea(txArea)
+	rows, _ := transcript.Parse(tableArea)
+	todoList := todos.Parse(todosArea)
 
+	home, _ := os.UserHomeDir()
+	wd, _ := os.Getwd()
 	m := appModel{
 		editor:         editor.New(fp, noteBody),
 		filepath:       fp,
 		savedValue:     noteBody,
 		llmCfg:         cfg,
 		transcriptRows: rows,
+		todos:          todoList,
 		mode:           runner.ModeNote,
+		agentMode:      "off",
+		homeDir:        home,
+		cwd:            wd,
 	}
 	// nextToolID seeded one past the highest existing row number so newly
 	// appended rows keep ordering monotonic.
@@ -138,6 +183,7 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 	}
 	m.transcriptBar = agent.NewTranscriptBar()
 	m.transcriptBar.SetRows(rows)
+	m.transcriptBar.SetTodos(todoList)
 	m.transcriptH = m.transcriptBar.Height()
 	// ag is sized in the first WindowSizeMsg; start with a zero-width pane so
 	// Height() still returns a valid value before the terminal size is known.
@@ -156,12 +202,14 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 	if cfg.ModelName != "" {
 		m.ag.SetModelLabel(cfg.ModelName)
 	}
+	m.ag.SetAgentLabel("agent: " + m.agentMode)
 	m.ag.SetModeLabel("mode: " + m.mode)
 	names := make(map[string]bool)
 	for _, e := range llm.AllModels() {
 		names[strings.ToLower(e.ModelName)] = true
 	}
 	m.ag.SetModelNames(names)
+	m.refreshMarkerHighlight()
 
 	return m
 }
@@ -170,11 +218,120 @@ func (m appModel) Init() tea.Cmd {
 	return tea.Batch(m.editor.Init(), m.ag.Indicator.StaleCmd())
 }
 
+// setInsertHighlight computes the byte range in `next` that differs from
+// `prev` (common prefix + common suffix diff, snapped to rune boundaries)
+// and stores it as the editor's insert overlay. The range stays in place
+// until clearInsertHighlight is called or the user changes the buffer.
+func (m *appModel) setInsertHighlight(prev, next string) {
+	if prev == next {
+		m.editor.SetInsertHighlight(nil)
+		return
+	}
+	start, end := diffRange(prev, next)
+	start, end = snapToRuneBoundaries(next, start, end)
+	if start >= end {
+		m.editor.SetInsertHighlight(nil)
+		return
+	}
+	m.editor.SetInsertHighlight([]editor.InsertSpan{{Start: start, End: end}})
+}
+
+// clearInsertHighlight removes any active insert highlight.
+func (m *appModel) clearInsertHighlight() {
+	m.editor.SetInsertHighlight(nil)
+}
+
+// diffRange returns the byte range [start, end) within `next` that differs
+// from `prev`. (0, 0) when identical or when only a deletion occurred (no
+// new bytes to highlight).
+func diffRange(prev, next string) (start, end int) {
+	p, n := len(prev), len(next)
+	minLen := p
+	if n < p {
+		minLen = n
+	}
+	i := 0
+	for i < minLen && prev[i] == next[i] {
+		i++
+	}
+	j := 0
+	maxJ := n - i
+	if p-i < maxJ {
+		maxJ = p - i
+	}
+	for j < maxJ && prev[p-1-j] == next[n-1-j] {
+		j++
+	}
+	return i, n - j
+}
+
+// snapToRuneBoundaries widens [start, end) outward until both edges sit on
+// UTF-8 rune-start bytes. Prevents the diff from splitting a multi-byte rune.
+func snapToRuneBoundaries(s string, start, end int) (int, int) {
+	for start > 0 && !isRuneStart(s[start]) {
+		start--
+	}
+	for end < len(s) && !isRuneStart(s[end]) {
+		end++
+	}
+	return start, end
+}
+
+func isRuneStart(b byte) bool {
+	return b < 0x80 || b >= 0xC0
+}
+
+// refreshMarkerHighlight recomputes the marker syntax-highlight spans from the
+// current editor content and pushes them to the editor overlay. Called after
+// any operation that may change the note body.
+//
+// The scan is skipped when the buffer's (length, fnv64-hash) pair matches the
+// previous call. Any single-byte change perturbs the hash, so this only avoids
+// the redundant scan when the buffer is byte-identical — staleness can't slip
+// through. Worth caching because this runs on every keystroke.
+func (m *appModel) refreshMarkerHighlight() {
+	v := m.editor.Value()
+	h := fnv64(v)
+	if m.markerCached && m.markerHashLen == len(v) && m.markerHash == h {
+		return
+	}
+	m.markerHashLen = len(v)
+	m.markerHash = h
+	m.markerCached = true
+
+	p := markers.Scan(v)
+	bg, ul := p.HighlightRanges()
+	bgSpans := make([]editor.MarkerSpan, len(bg))
+	for i, r := range bg {
+		bgSpans[i] = editor.MarkerSpan{Start: r.Start, End: r.End, Color: r.Color}
+	}
+	ulSpans := make([]editor.MarkerSpan, len(ul))
+	for i, r := range ul {
+		ulSpans[i] = editor.MarkerSpan{Start: r.Start, End: r.End, Color: r.Color}
+	}
+	m.editor.SetMarkerHighlight(bgSpans, ulSpans)
+}
+
+// fnv64 is the standard FNV-1a 64-bit hash. Used as a buffer fingerprint by
+// refreshMarkerHighlight; inlined to avoid a hash/fnv import + allocation.
+func fnv64(s string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
+}
+
 // writeNote serializes the editor body + transcript rows back to disk. The
 // editor's view is the *note body*; transcript rows are appended after a
 // "***\n# Transcript" delimiter when there are any.
 func (m *appModel) writeNote() error {
-	full := transcript.Join(m.editor.Value(), m.transcriptRows)
+	full := transcript.Join(m.editor.Value(), m.transcriptRows, todos.Render(m.todos))
 	return os.WriteFile(m.filepath, []byte(full), 0644)
 }
 
@@ -344,8 +501,13 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		msg.Y -= editorTop
+		prev := m.editor.Value()
 		em, cmd := m.editor.Update(msg)
 		m.editor = em.(editor.Model)
+		if m.editor.Value() != prev {
+			m.refreshMarkerHighlight()
+			m.clearInsertHighlight()
+		}
 		return m, cmd
 
 	case tea.KeyMsg:
@@ -381,6 +543,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			result = m.editor.ReplaceCurrentMatch(msg.Replacement)
 		}
+		m.refreshMarkerHighlight()
+		m.clearInsertHighlight()
 		m.ag.Indicator.Set(agent.FormatMatchCount(result.Count, result.Current))
 		return m, m.ag.Indicator.StaleCmd()
 
@@ -461,6 +625,35 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ag.Indicator.Set("Fetching…")
 		return m, tea.Batch(fetchCmd, m.maybeResizeEditorCmd())
 
+	case agent.TranscriptOpenFileMsg:
+		m.promptFocus = true
+		m.webMode = true
+		m.webOpen = true
+		m.ag = m.ag.OpenWebForFile()
+		m.editor.SetFocused(false)
+		var markdown string
+		if msg.Path != "" {
+			data, err := os.ReadFile(msg.Path)
+			if err != nil {
+				m.webMode = false
+				m.webOpen = false
+				m.ag = m.ag.CloseWeb()
+				m.editor.SetFocused(true)
+				m.ag.Indicator.SetError("Cannot read file: " + err.Error())
+				return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+			}
+			markdown = string(data)
+		} else {
+			markdown = msg.Content
+		}
+		title := msg.Title
+		if title == "" {
+			title = "output"
+		}
+		m.ag.ApplyWebPage(web.Page{Title: title, URL: msg.Path, Markdown: markdown})
+		m.ag.Indicator.Set(title)
+		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+
 	case agent.WebOpenBrowserMsg:
 		if err := web.Open(msg.URL); err != nil {
 			m.ag.Indicator.SetError("Open URL failed: " + err.Error())
@@ -510,12 +703,6 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cmd := agent.FindInlineCmd(msg.Content); cmd != nil {
 			return m.executeSlashCmd(cmd)
 		}
-		if msg.Content == "@web" {
-			return m.openWebQueryBar()
-		}
-		if atCmd := agent.ParseAtCmd(msg.Content); atCmd != nil {
-			return m.executeAtCmd(atCmd)
-		}
 		return m.startRun(msg.Content)
 
 	case agent.CmdPickerOpenMsg:
@@ -550,19 +737,43 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ag = m.ag.SetPromptFocus(true)
 			m.editor.SetFocused(false)
 			return m, m.maybeResizeEditorCmd()
-		case agent.CmdExecWebBar:
-			return m.openWebQueryBar()
 		}
 		return m, nil
 
 	case agent.WebQuerySubmitMsg:
 		m.webQueryMode = false
 		m.ag = m.ag.CloseWebQueryBar()
-		return m.executeAtCmd(&agent.AtCmdResult{Kind: agent.AtWeb, Query: msg.Query, N: 10})
+		return m.executeWebSearch(msg.Query, 10)
 
 	case agent.WebQueryClosedMsg:
 		m.webQueryMode = false
 		m.ag = m.ag.CloseWebQueryBar()
+		m.promptFocus = true
+		m.ag = m.ag.SetPromptFocus(true)
+		m.editor.SetFocused(false)
+		return m, m.maybeResizeEditorCmd()
+
+	case agent.TodoSubmitMsg:
+		// Mirror normal prompt editor: an empty prompt does not send.
+		if msg.Prompt == "" {
+			return m, nil
+		}
+		m.todos = todos.AssignIDs(msg.Todos)
+		m.transcriptBar.SetTodos(m.todos)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo write failed: " + err.Error())
+		}
+		m.todoMode = false
+		m.ag = m.ag.CloseTodoBar()
+		m.promptFocus = true
+		m.ag = m.ag.SetPromptFocus(true)
+		m.editor.SetFocused(false)
+		// Runner picks up m.todos via RunOptions.Todos.
+		return m.startRun(msg.Prompt)
+
+	case agent.TodoBarClosedMsg:
+		m.todoMode = false
+		m.ag = m.ag.CloseTodoBar()
 		m.promptFocus = true
 		m.ag = m.ag.SetPromptFocus(true)
 		m.editor.SetFocused(false)
@@ -578,6 +789,19 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ag = m.ag.OpenModel(buildModelItems())
 		return m, m.maybeResizeEditorCmd()
 
+	case agent.AgentModeCyclePressMsg:
+		switch m.agentMode {
+		case "off":
+			m.agentMode = "read"
+		case "read":
+			m.agentMode = "work"
+		default:
+			m.agentMode = "off"
+		}
+		m.ag.SetAgentLabel("agent: " + m.agentMode)
+		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
+		return m, m.ag.Indicator.StaleCmd()
+
 	case agent.ModeTogglePressMsg:
 		if m.mode == runner.ModeChat {
 			m.mode = runner.ModeNote
@@ -587,6 +811,28 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
 		return m, m.ag.Indicator.StaleCmd()
+
+	case agent.AttachPickerPressMsg:
+		return m, openFilePickerCmd()
+
+	case attachFileMsg:
+		token := "@" + msg.Path + " "
+		m.ag.PromptBox.SetValue(token + m.ag.PromptBox.Value())
+		m.promptFocus = true
+		m.ag = m.ag.SetPromptFocus(true)
+		m.editor.SetFocused(false)
+		return m, m.maybeResizeEditorCmd()
+
+	case agent.PasteImageMsg:
+		n := len(m.pendingImages) + 1
+		m.pendingImages = append(m.pendingImages, msg.Data)
+		token := fmt.Sprintf("[image #%d]", n)
+		if m.ag.PromptBox.Value() == "" {
+			m.ag.PromptBox.SetValue(token)
+		} else {
+			m.ag.PromptBox.InsertString(token)
+		}
+		return m, nil
 
 	case agent.FocusTranscriptMsg:
 		// Up-arrow at the top of the prompt box transfers focus to the
@@ -662,26 +908,29 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.runStream.NextCmd(), recordCmd)
 
 	case runner.RunFinishedMsg:
-		m.ag.Indicator.Set(fmt.Sprintf(
-			"Run finished on %s · %d in / %d out · %s",
-			msg.EndedOn, msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
-		))
+		// If a /chat2note flow is in progress, this RunFinishedMsg marks the
+		// end of step 2 — drop the rows we captured at step-1 invocation.
+		if len(m.chat2noteRowsToClear) > 0 {
+			m.transcriptRows = chat2noteRowFilter(m.transcriptRows, m.chat2noteRowsToClear)
+			m.transcriptBar.SetRows(m.transcriptRows)
+			m.chat2noteRowsToClear = nil
+			m.chat2noteExtra = ""
+			_ = m.writeNote()
+			m.ag.Indicator.Set(fmt.Sprintf(
+				"chat2note done · integrated %s · %d in / %d out · %s",
+				msg.EndedOn, msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
+			))
+		} else {
+			m.ag.Indicator.Set(fmt.Sprintf(
+				"Run finished on %s · %d in / %d out · %s",
+				msg.EndedOn, msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
+			))
+		}
 		next := m.runStream.NextCmd()
 		m = m.finishRun()
-		return m, tea.Batch(next, m.ag.Indicator.StaleCmd())
+		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
 
 	case runner.ChatFinishedMsg:
-		userPrompt := m.pendingChatUserPrompt
-		m.pendingChatUserPrompt = ""
-		if userPrompt != "" {
-			m.nextToolID++
-			m.transcriptRows = append(m.transcriptRows, transcript.Row{
-				Num:     m.nextToolID,
-				Role:    transcript.RoleUser,
-				Type:    transcript.TypeMessage,
-				Content: transcript.EncodeMessage(userPrompt),
-			})
-		}
 		m.nextToolID++
 		m.transcriptRows = append(m.transcriptRows, transcript.Row{
 			Num:     m.nextToolID,
@@ -702,98 +951,104 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.finishRun()
 		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
 
+	case runner.VisionUnsupportedMsg:
+		m.ag.Indicator.Set("Images not supported. Only text was sent.")
+		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.runStream.NextCmd())
+
 	case runner.RunErrorMsg:
 		m.ag.Indicator.SetError("Error: " + msg.Message)
 		next := m.runStream.NextCmd()
 		m = m.finishRun()
-		if m.conflictMode {
-			m.conflictMode = false
-			m.ag = m.ag.CloseConflict()
-			m.pendingNoteEdit = nil
-			m.pendingNoteWrite = nil
-			m.editor.SetFocused(true)
-		}
+		m = m.cancelPendingConflict()
+		// Abort any in-flight /chat2note. Transcript is left untouched.
+		m.chat2noteRowsToClear = nil
+		m.chat2noteExtra = ""
 		return m, tea.Batch(next, m.maybeResizeEditorCmd())
 
 	case runner.RunCancelledMsg:
 		m.ag.Indicator.Set("Run cancelled")
 		next := m.runStream.NextCmd()
 		m = m.finishRun()
-		if m.conflictMode {
-			m.conflictMode = false
-			m.ag = m.ag.CloseConflict()
-			m.pendingNoteEdit = nil
-			m.pendingNoteWrite = nil
-			m.editor.SetFocused(true)
-		}
+		m = m.cancelPendingConflict()
+		m.chat2noteRowsToClear = nil
+		m.chat2noteExtra = ""
 		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
 
 	case runner.RunStreamDoneMsg:
 		m.runStream = nil
 		return m, nil
 
-	case agent.ConflictUserWinsMsg:
-		m.conflictMode = false
-		m.ag = m.ag.CloseConflict()
-		m.editor.SetFocused(true)
-		m.conflictJustResolved = true
-		if m.pendingNoteEdit != nil {
-			clipboard.WriteAll(m.pendingNoteEdit.New)
-			m.pendingNoteEdit.Reply <- runner.NoteEditApplyReply{ConflictNotFound: true}
-			m.pendingNoteEdit = nil
-		} else if m.pendingNoteWrite != nil {
-			clipboard.WriteAll(m.pendingNoteWrite.Content)
-			m.pendingNoteWrite.Reply <- runner.NoteWriteApplyReply{HashMismatch: true}
-			m.pendingNoteWrite = nil
+	case chat2noteStep1DoneMsg:
+		// Structuring step finished. Strip Superfluous + empty sections, then
+		// kick off step 2 as a normal note-mode run whose user-prompt is the
+		// integration directive followed by the cleaned digest. The runner
+		// sees the transcript as it stands now — but since the integration
+		// directive is self-contained, the transcript context is redundant
+		// for step 2; we pass it through unchanged for simplicity.
+		cleaned := runner.CleanChat2NoteIntermediate(msg.Intermediate)
+		if strings.TrimSpace(cleaned) == "" {
+			m.ag.Indicator.SetError("chat2note: structuring step produced nothing usable")
+			m.chat2noteRowsToClear = nil
+			m.chat2noteExtra = ""
+			return m, m.ag.Indicator.StaleCmd()
 		}
-		m.ag.Indicator.Set("Edit copied to clipboard and not applied")
-		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.runStream.NextCmd(), m.maybeResizeEditorCmd())
+		prompt := runner.Chat2NoteStep2Prompt(cleaned, m.chat2noteExtra)
+		m.ag.Indicator.Set("integrating into note…")
+		// Record the row Num that startRun will assign to the step-2 user
+		// prompt so we can also clear it on success. The next row's Num is
+		// m.nextToolID + 1 because startRun does nextToolID++ before using it.
+		m.chat2noteRowsToClear = append(m.chat2noteRowsToClear, m.nextToolID+1)
+		return m.startRun(prompt)
+
+	case chat2noteStep1ErrMsg:
+		m.ag.Indicator.SetError("chat2note: " + msg.Err.Error())
+		m.chat2noteRowsToClear = nil
+		m.chat2noteExtra = ""
+		return m, m.ag.Indicator.StaleCmd()
+
+	case agent.ConflictUserWinsMsg:
+		return m.resolveConflictUserWins()
 
 	case agent.ConflictModelWinsMsg:
-		m.conflictMode = false
-		m.ag = m.ag.CloseConflict()
-		m.editor.SetFocused(true)
-		if m.pendingNoteEdit != nil {
-			// Revert to snapshot so old_string is guaranteed to be present.
-			m.editor.SetContent(m.runSnapshotContent)
-			res := m.editor.ApplyNoteEdit(m.pendingNoteEdit.Old, m.pendingNoteEdit.New, m.pendingNoteEdit.ReplaceAll)
-			content := editor.NormalizeMarkdownTables(m.editor.Value())
-			m.editor.SetContent(content)
-			if err := m.writeNote(); err == nil {
-				m.savedValue = content
+		return m.resolveConflictModelWins()
+
+	case runner.NoteEditApplyMsg:
+		live := m.editor.Value()
+		liveSnap := markers.Scan(live).BuildSnapshot()
+		if liveSnap.HasShaping {
+			updated, count, conflict := liveSnap.ResolveEdit(msg.Old, msg.New, msg.ReplaceAll)
+			if conflict == markers.EditConflictProtected {
+				m.ag.Indicator.SetError("Edit blocked by $>> <<$ protected range")
+				msg.Reply <- runner.NoteEditApplyReply{ConflictProtected: true, Count: count}
+				return m, tea.Batch(m.runStream.NextCmd(), m.ag.Indicator.StaleCmd())
 			}
-			m.pendingNoteEdit.Reply <- runner.NoteEditApplyReply{Applied: res.Applied, Count: res.Count}
-			m.pendingNoteEdit = nil
-		} else if m.pendingNoteWrite != nil {
-			normalized := editor.NormalizeMarkdownTables(m.pendingNoteWrite.Content)
+			if conflict != markers.EditConflictNone {
+				label := editConflictLabel(conflict == markers.EditConflictAmbiguous, count)
+				return m.enterEditConflict(&msg, label)
+			}
+			normalized := editor.NormalizeMarkdownTables(updated)
 			m.editor.SetContent(normalized)
+			m.refreshMarkerHighlight()
+			m.setInsertHighlight(live, normalized)
 			if err := m.writeNote(); err == nil {
 				m.savedValue = normalized
 			}
-			m.pendingNoteWrite.Reply <- runner.NoteWriteApplyReply{Applied: true}
-			m.pendingNoteWrite = nil
+			msg.Reply <- runner.NoteEditApplyReply{Applied: true, Count: count}
+			return m, m.runStream.NextCmd()
 		}
-		return m, tea.Batch(m.runStream.NextCmd(), m.maybeResizeEditorCmd())
 
-	case runner.NoteEditApplyMsg:
+		prevForInsert := m.editor.Value()
 		res := m.editor.ApplyNoteEdit(msg.Old, msg.New, msg.ReplaceAll)
 		if res.Conflict != editor.ConflictNone {
 			// Open conflict UI — don't fill Reply yet; runner goroutine stays blocked.
-			m.pendingNoteEdit = &msg
-			m.conflictMode = true
-			m.ag = m.ag.OpenConflict()
-			m.promptFocus = false
-			m.editor.SetFocused(false)
-			if res.Conflict == editor.ConflictAmbiguous {
-				m.ag.Indicator.SetError(fmt.Sprintf("Conflict on note edit! (%d matches)", res.Count))
-			} else {
-				m.ag.Indicator.SetError("Conflict on note edit!")
-			}
-			return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+			label := editConflictLabel(res.Conflict == editor.ConflictAmbiguous, res.Count)
+			return m.enterEditConflict(&msg, label)
 		}
 		reply := runner.NoteEditApplyReply{Applied: true, Count: res.Count}
 		content := editor.NormalizeMarkdownTables(m.editor.Value())
 		m.editor.SetContent(content)
+		m.refreshMarkerHighlight()
+		m.setInsertHighlight(prevForInsert, content)
 		if err := m.writeNote(); err == nil {
 			m.savedValue = content
 		}
@@ -803,21 +1058,111 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case runner.NoteWriteApplyMsg:
 		if runner.HashContent(m.editor.Value()) != m.runSnapshotHash {
 			// Open conflict UI — don't fill Reply yet.
-			m.pendingNoteWrite = &msg
-			m.conflictMode = true
-			m.ag = m.ag.OpenConflict()
-			m.promptFocus = false
-			m.editor.SetFocused(false)
-			m.ag.Indicator.SetError("Conflict on note write!")
-			return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+			return m.enterWriteConflict(&msg)
 		}
-		normalized := editor.NormalizeMarkdownTables(msg.Content)
+		prevWrite := m.editor.Value()
+		liveSnap := markers.Scan(prevWrite).BuildSnapshot()
+		resolved, ok := liveSnap.ResolveWrite(msg.Content)
+		if !ok {
+			msg.Reply <- runner.NoteWriteApplyReply{Applied: false}
+			return m, m.runStream.NextCmd()
+		}
+		normalized := editor.NormalizeMarkdownTables(resolved)
 		m.editor.SetContent(normalized)
+		m.refreshMarkerHighlight()
+		m.setInsertHighlight(prevWrite, normalized)
 		if err := m.writeNote(); err == nil {
 			m.savedValue = normalized
 		}
 		msg.Reply <- runner.NoteWriteApplyReply{Applied: true}
 		return m, m.runStream.NextCmd()
+
+	case runner.NoteEditAtApplyMsg:
+		live := m.editor.Value()
+		parsed := markers.Scan(live)
+		updated, applied, err := parsed.ApplyEdits(live, msg.Edits)
+		if err != nil {
+			msg.Reply <- runner.NoteEditAtApplyReply{ValidationError: err.Error()}
+			return m, m.runStream.NextCmd()
+		}
+		if len(applied) > 0 {
+			normalized := editor.NormalizeMarkdownTables(updated)
+			m.editor.SetContent(normalized)
+			m.refreshMarkerHighlight()
+			m.setInsertHighlight(live, normalized)
+			if werr := m.writeNote(); werr == nil {
+				m.savedValue = normalized
+			}
+		}
+		msg.Reply <- runner.NoteEditAtApplyReply{Applied: true, AppliedSlots: applied}
+		return m, m.runStream.NextCmd()
+
+	case runner.TodoWriteApplyMsg:
+		items := todos.AssignIDs(msg.Texts)
+		m.todos = items
+		m.transcriptBar.SetTodos(items)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo write failed: " + err.Error())
+		}
+		msg.Reply <- runner.TodoWriteApplyReply{Applied: true, Items: items}
+		return m, m.runStream.NextCmd()
+
+	case runner.TodoDoneApplyMsg:
+		updated, ok := todos.MarkDone(m.todos, msg.ID)
+		if !ok {
+			msg.Reply <- runner.TodoDoneApplyReply{NotFound: true}
+			return m, m.runStream.NextCmd()
+		}
+		m.todos = updated
+		m.transcriptBar.SetTodos(updated)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo update failed: " + err.Error())
+		}
+		msg.Reply <- runner.TodoDoneApplyReply{Applied: true, Items: updated}
+		return m, m.runStream.NextCmd()
+
+	case runner.TodosClearedMsg:
+		m.todos = nil
+		m.transcriptBar.SetTodos(nil)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo clear failed: " + err.Error())
+		}
+		return m, m.runStream.NextCmd()
+
+	case agent.TodoSummaryClearAllMsg:
+		m.todos = nil
+		m.transcriptBar.SetTodos(nil)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo clear failed: " + err.Error())
+		}
+		return m, m.maybeResizeEditorCmd()
+
+	case agent.TodoItemToggleMsg:
+		for i := range m.todos {
+			if m.todos[i].ID == msg.ID {
+				m.todos[i].Done = !m.todos[i].Done
+				break
+			}
+		}
+		m.transcriptBar.SetTodos(m.todos)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo update failed: " + err.Error())
+		}
+		return m, nil
+
+	case agent.TodoItemDeleteMsg:
+		out := m.todos[:0]
+		for _, t := range m.todos {
+			if t.ID != msg.ID {
+				out = append(out, t)
+			}
+		}
+		m.todos = out
+		m.transcriptBar.SetTodos(m.todos)
+		if err := m.writeNote(); err != nil {
+			m.ag.Indicator.SetError("todo update failed: " + err.Error())
+		}
+		return m, m.maybeResizeEditorCmd()
 	}
 
 	em, cmd := m.editor.Update(msg)
@@ -871,6 +1216,13 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Web query bar is open and owns the prompt slot: route keys to the agent pane.
 	if m.webQueryMode && m.promptFocus {
+		pane, cmd := m.ag.Update(msg)
+		m.ag = pane
+		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
+	}
+
+	// /todo bar is open and owns the prompt slot: route keys to the agent pane.
+	if m.todoMode && m.promptFocus {
 		pane, cmd := m.ag.Update(msg)
 		m.ag = pane
 		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
@@ -1012,96 +1364,14 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.ag.Indicator.StaleCmd()
 	}
 
+	prev := m.editor.Value()
 	em, cmd := m.editor.Update(msg)
 	m.editor = em.(editor.Model)
+	if m.editor.Value() != prev {
+		m.refreshMarkerHighlight()
+		m.clearInsertHighlight()
+	}
 	return m, cmd
-}
-
-// focusArea identifies one of the three navigable panes.
-type focusArea int
-
-const (
-	focusEditor focusArea = iota
-	focusTranscript
-	focusPrompt
-)
-
-// currentFocus returns which pane currently has keyboard focus.
-func (m appModel) currentFocus() focusArea {
-	if m.transcriptFocus {
-		return focusTranscript
-	}
-	if m.promptFocus {
-		return focusPrompt
-	}
-	return focusEditor
-}
-
-// setFocus clears focus from all panes and grants it to target. Also records
-// prevFocusWasPrompt so esc-from-transcript can return to the originating
-// pane. Cursor position inside the transcript bar is preserved across visits.
-func (m appModel) setFocus(target focusArea) appModel {
-	prev := m.currentFocus()
-	// Clear all.
-	m.transcriptFocus = false
-	m.transcriptBar.SetFocused(false)
-	m.promptFocus = false
-	m.ag = m.ag.SetPromptFocus(false)
-	m.editor.SetFocused(false)
-	// Grant target.
-	switch target {
-	case focusEditor:
-		m.editor.SetFocused(true)
-		// Unfocus the web bar (keep it rendered but stop routing keys to it).
-		if m.webOpen {
-			m.webMode = false
-		}
-	case focusTranscript:
-		m.transcriptFocus = true
-		m.transcriptBar.SetFocused(true)
-		m.prevFocusWasPrompt = prev == focusPrompt
-		// Unfocus the web bar (keep it rendered but stop routing keys to it).
-		if m.webOpen {
-			m.webMode = false
-		}
-	case focusPrompt:
-		m.promptFocus = true
-		m.ag = m.ag.SetPromptFocus(true)
-		// Refocus the web bar if it was open.
-		if m.webOpen {
-			m.webMode = true
-		}
-	}
-	return m
-}
-
-// cycleFocusNext returns the model with focus moved to the next pane in cycle
-// editor → transcript → prompt → editor, skipping panes that are currently
-// "closed": the transcript when collapsed, and the editor when the transcript
-// is in full-height mode (which hides the editor).
-func (m appModel) cycleFocusNext() appModel {
-	order := []focusArea{focusEditor, focusTranscript, focusPrompt}
-	cur := m.currentFocus()
-	start := 0
-	for i, f := range order {
-		if f == cur {
-			start = i
-			break
-		}
-	}
-	txCollapsed := m.transcriptBar.IsCollapsed()
-	txFull := m.transcriptBar.IsFullHeight()
-	for i := 1; i <= len(order); i++ {
-		cand := order[(start+i)%len(order)]
-		if cand == focusTranscript && txCollapsed {
-			continue
-		}
-		if cand == focusEditor && txFull {
-			continue
-		}
-		return m.setFocus(cand)
-	}
-	return m
 }
 
 // maybeResizeEditorCmd checks if the agent pane height changed and, if so,
@@ -1214,6 +1484,8 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 			content = editor.NormalizeMarkdownTables(m.editor.Value())
 		}
 		m.editor.SetContent(content)
+		m.refreshMarkerHighlight()
+		m.clearInsertHighlight()
 		if err := m.writeNote(); err == nil {
 			m.savedValue = content
 		}
@@ -1235,8 +1507,226 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
 		return m, m.ag.Indicator.StaleCmd()
+
+	case agent.SlashWork, agent.SlashRead, agent.SlashAgentOff:
+		switch cmd.Kind {
+		case agent.SlashWork:
+			m.agentMode = "work"
+		case agent.SlashRead:
+			m.agentMode = "read"
+		default:
+			m.agentMode = "off"
+		}
+		if cmd.CopyText != "" {
+			m.ag.PromptBox.SetValue(cmd.CopyText)
+		}
+		m.ag.SetAgentLabel("agent: " + m.agentMode)
+		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
+		return m, m.ag.Indicator.StaleCmd()
+
+	case agent.SlashWeb:
+		if cmd.WebQuery != "" {
+			return m.executeWebSearch(cmd.WebQuery, 10)
+		}
+		return m.openWebQueryBar()
+
+	case agent.SlashTodo:
+		if m.agentMode == "off" {
+			m.ag.Indicator.SetError(`Error: /todo not available in "agent: off" mode`)
+			return m, m.ag.Indicator.StaleCmd()
+		}
+		m.todoMode = true
+		m.promptFocus = true
+		m.ag = m.ag.OpenTodoBar(m.todos)
+		m.editor.SetFocused(false)
+		return m, m.maybeResizeEditorCmd()
+
+	case agent.SlashClear:
+		return m.executeClear(cmd.ClearTarget)
+
+	case agent.SlashMarkerInclude:
+		return m.executeWrapMarker("!>>", "<<!")
+	case agent.SlashMarkerScope:
+		return m.executeWrapMarker("@>>", "<<@")
+	case agent.SlashMarkerReadOnly:
+		return m.executeWrapMarker("$>>", "<<$")
+	case agent.SlashMarkerExclude:
+		return m.executeWrapMarker("%>>", "<<%")
+
+	case agent.SlashChat2Note:
+		return m.executeChat2Note(cmd.Chat2NoteExtra)
 	}
 	return m, nil
+}
+
+// executeWrapMarker wraps the editor's active selection with the supplied
+// marker tokens. With no active selection it surfaces a red indicator error
+// (text must be selected) and makes no edit.
+func (m appModel) executeWrapMarker(open, close string) (tea.Model, tea.Cmd) {
+	if !m.editor.WrapSelection(open, close) {
+		m.ag.Indicator.SetError("Error: text must be selected in file")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	m.refreshMarkerHighlight()
+	m.clearInsertHighlight()
+	if err := m.writeNote(); err != nil {
+		m.ag.Indicator.SetError("write failed: " + err.Error())
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	m.savedValue = m.editor.Value()
+	m.promptFocus = false
+	m.ag = m.ag.SetPromptFocus(false)
+	m.editor.SetFocused(true)
+	return m, m.maybeResizeEditorCmd()
+}
+
+// executeClear dispatches /clear to either transcript-row clearing
+// (trans/chat/tool/search) or marker-token clearing (markers / @!$% subset).
+// An empty target (bare "/clear") is an intentional no-op that only shows a
+// usage hint.
+func (m appModel) executeClear(target string) (tea.Model, tea.Cmd) {
+	if target == "" {
+		m.ag.Indicator.Set("Usage: /clear <trans|chat|tool|search|markers|@!$%>")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+
+	if target == "markers" || isMarkerCharTarget(target) {
+		return m.executeClearMarkers(target)
+	}
+
+	before := len(m.transcriptRows)
+	m.transcriptRows = clearTranscriptRows(m.transcriptRows, target)
+	removed := before - len(m.transcriptRows)
+
+	m.transcriptBar.SetRows(m.transcriptRows)
+	if err := m.writeNote(); err != nil {
+		m.ag.Indicator.SetError("clear failed: " + err.Error())
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	m.ag.Indicator.Set(fmt.Sprintf("Cleared %d transcript row(s)", removed))
+	return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+}
+
+// isMarkerCharTarget mirrors agent.isMarkerCharSet for the app side. Kept
+// local to avoid exporting an internal helper from agent.
+func isMarkerCharTarget(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch r {
+		case '@', '!', '$', '%':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// executeClearMarkers strips marker wrappers (the bracket tokens) from the
+// editor body for the requested kinds. Body content is preserved. "markers"
+// targets all four kinds; otherwise target is a char-subset like "@!".
+func (m appModel) executeClearMarkers(target string) (tea.Model, tea.Cmd) {
+	var kinds []markers.Kind
+	if target == "markers" {
+		kinds = []markers.Kind{markers.KindWriteScope, markers.KindExclude, markers.KindIncludeOnly, markers.KindReadOnly}
+	} else {
+		seen := make(map[markers.Kind]bool)
+		for _, r := range target {
+			var k markers.Kind
+			switch r {
+			case '@':
+				k = markers.KindWriteScope
+			case '%':
+				k = markers.KindExclude
+			case '!':
+				k = markers.KindIncludeOnly
+			case '$':
+				k = markers.KindReadOnly
+			default:
+				continue
+			}
+			if !seen[k] {
+				seen[k] = true
+				kinds = append(kinds, k)
+			}
+		}
+	}
+	if len(kinds) == 0 {
+		m.ag.Indicator.Set("Usage: /clear <trans|chat|tool|search|markers|@!$%>")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+
+	before := m.editor.Value()
+	after := markers.StripMarkers(before, kinds...)
+	if after == before {
+		m.ag.Indicator.Set("No matching markers to clear")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	m.editor.SetContent(after)
+	m.refreshMarkerHighlight()
+	m.clearInsertHighlight()
+	if err := m.writeNote(); err != nil {
+		m.ag.Indicator.SetError("clear failed: " + err.Error())
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	m.savedValue = after
+	m.ag.Indicator.Set(fmt.Sprintf("Cleared %s", markerKindsLabel(kinds)))
+	return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+}
+
+// markerKindsLabel formats a slice of marker kinds as "@>> <<@, %>> <<%, …"
+// for the indicator message.
+func markerKindsLabel(kinds []markers.Kind) string {
+	parts := make([]string, len(kinds))
+	for i, k := range kinds {
+		parts[i] = k.String()
+	}
+	return strings.Join(parts, ", ")
+}
+
+// clearTranscriptRows returns a new slice with rows matching target removed.
+// tool_call and tool_result rows are paired by ToolID — when a call is
+// dropped, its result is dropped too.
+func clearTranscriptRows(rows []transcript.Row, target string) []transcript.Row {
+	if target == "trans" {
+		return nil
+	}
+	dropPairID := map[string]bool{}
+	out := make([]transcript.Row, 0, len(rows))
+	for _, r := range rows {
+		if shouldClearRow(r, target, dropPairID) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+func shouldClearRow(r transcript.Row, target string, dropPairID map[string]bool) bool {
+	switch target {
+	case "chat":
+		return r.Type == transcript.TypeMessage
+	case "tool":
+		if r.Type == transcript.TypeToolCall &&
+			r.Tool != transcript.ToolWebSearch && r.Tool != transcript.ToolWebFetch {
+			dropPairID[r.ToolID] = true
+			return true
+		}
+		if r.Type == transcript.TypeToolResult && dropPairID[r.ToolID] {
+			return true
+		}
+	case "search":
+		if r.Type == transcript.TypeToolCall &&
+			(r.Tool == transcript.ToolWebSearch || r.Tool == transcript.ToolWebFetch) {
+			dropPairID[r.ToolID] = true
+			return true
+		}
+		if r.Type == transcript.TypeToolResult && dropPairID[r.ToolID] {
+			return true
+		}
+	}
+	return false
 }
 
 func (m appModel) openWebQueryBar() (tea.Model, tea.Cmd) {
@@ -1247,20 +1737,16 @@ func (m appModel) openWebQueryBar() (tea.Model, tea.Cmd) {
 	return m, m.maybeResizeEditorCmd()
 }
 
-func (m appModel) executeAtCmd(cmd *agent.AtCmdResult) (tea.Model, tea.Cmd) {
-	switch cmd.Kind {
-	case agent.AtWeb:
-		m.promptFocus = true
-		m.webMode = true
-		m.webOpen = true
-		m.lastWebQuery = cmd.Query
-		var searchCmd tea.Cmd
-		m.ag, searchCmd = m.ag.OpenWeb(cmd.Query, cmd.N)
-		m.editor.SetFocused(false)
-		m.ag.Indicator.Set("Searching…")
-		return m, tea.Batch(searchCmd, m.maybeResizeEditorCmd())
-	}
-	return m, nil
+func (m appModel) executeWebSearch(query string, n int) (tea.Model, tea.Cmd) {
+	m.promptFocus = true
+	m.webMode = true
+	m.webOpen = true
+	m.lastWebQuery = query
+	var searchCmd tea.Cmd
+	m.ag, searchCmd = m.ag.OpenWeb(query, n)
+	m.editor.SetFocused(false)
+	m.ag.Indicator.Set("Searching…")
+	return m, tea.Batch(searchCmd, m.maybeResizeEditorCmd())
 }
 
 // resizeWebTo handles a drag-motion event on the agent pane's top border,
@@ -1356,26 +1842,6 @@ func (m appModel) handleDialogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // dialogOptionCols returns the visual [start, end) column ranges of each
 // dialog option within the title bar.
-func dialogOptionCols(termWidth int) (prefix string, starts, ends [3]int) {
-	prefix = "Unsaved Changes! "
-	labels := [3]string{"[save]", "[exit]", "[cancel]"}
-	total := len(prefix)
-	for _, l := range labels {
-		total += len(l)
-	}
-	leftPad := (termWidth - total) / 2
-	if leftPad < 0 {
-		leftPad = 0
-	}
-	pos := leftPad + len(prefix)
-	for i, l := range labels {
-		starts[i] = pos
-		ends[i] = pos + len(l)
-		pos = ends[i]
-	}
-	return
-}
-
 func (m appModel) handleDialogClick(x int) (tea.Model, tea.Cmd) {
 	_, starts, ends := dialogOptionCols(m.width)
 	for i := range starts {
@@ -1425,7 +1891,7 @@ func (m appModel) View() string {
 
 	unsaved := m.editor.Value() != m.savedValue
 	parts := []string{
-		renderTitleBar(m.width, m.filepath, unsaved, m.showExitDialog, m.dialogFocus),
+		renderTitleBar(m.width, m.filepath, m.homeDir, m.cwd, unsaved, m.showExitDialog, m.dialogFocus),
 	}
 	if m.transcriptBar.IsFullHeight() {
 		// Full-height mode: editor is hidden. The separator sits in the row
@@ -1442,224 +1908,6 @@ func (m appModel) View() string {
 	}
 	parts = append(parts, m.ag.View())
 	return strings.Join(parts, "\n")
-}
-
-const (
-	titleSaveIcon   = "🖫"
-	titleCloseLabel = "X"
-	titleMinLabel   = "–"
-)
-
-// titleBarLayout returns the column boundaries of the interactive title bar
-// elements for mouse hit-testing. All values are 0-indexed absolute columns.
-//
-//	save icon:  [0, saveEnd)   — col 0 is leading space, icon follows
-//	minimize:   [minStart, minEnd)
-//	close:      [closeStart, width)  — last col is trailing space
-func titleBarLayout(width int) (saveEnd, minStart, minEnd, closeStart int) {
-	saveW := runewidth.StringWidth(titleSaveIcon)
-	closeW := runewidth.StringWidth(titleCloseLabel) // 1
-	minW := runewidth.StringWidth(titleMinLabel)     // 1
-
-	// col 0 = leading space, cols 1..saveW = icon
-	saveEnd = 1 + saveW
-	// col width-1 = trailing space, close occupies width-1-closeW..width-2
-	closeStart = width - 1 - closeW
-	// 1-space gap, then minimize
-	minEnd = closeStart - 1
-	minStart = minEnd - minW
-	return
-}
-
-// truncateTitleStr truncates s to at most maxW visual cells, appending "…".
-func truncateTitleStr(s string, maxW int) string {
-	if runewidth.StringWidth(s) <= maxW {
-		return s
-	}
-	budget := maxW - 1 // reserve 1 cell for "…"
-	if budget <= 0 {
-		return "…"
-	}
-	w := 0
-	for i, r := range s {
-		rw := runewidth.RuneWidth(r)
-		if w+rw > budget {
-			return s[:i] + "…"
-		}
-		w += rw
-	}
-	return s + "…"
-}
-
-// formatTitlePath splits fp into a faint directory prefix and a bold filename.
-// Priority: ~/... when under $HOME, then cwd-relative when strictly under cwd
-// (no ".." traversal), then absolute path as fallback.
-func formatTitlePath(fp string) (dir, base string) {
-	base = filepath.Base(fp)
-	if base == "" || base == "." {
-		base = "Untitled"
-	}
-
-	// ~/... when the file lives under the home directory.
-	if home, err := os.UserHomeDir(); err == nil {
-		if rel, err := filepath.Rel(home, fp); err == nil && !strings.HasPrefix(rel, "..") {
-			d := filepath.Dir(rel)
-			if d == "." || d == "" {
-				return "~/", base
-			}
-			return "~/" + d + string(filepath.Separator), base
-		}
-	}
-
-	// Cwd-relative, but only when the file is strictly under cwd (no "..").
-	if wd, err := os.Getwd(); err == nil {
-		if rel, err := filepath.Rel(wd, fp); err == nil && !strings.HasPrefix(rel, "..") {
-			d := filepath.Dir(rel)
-			if d != "." && d != "" {
-				return d + string(filepath.Separator), base
-			}
-			return "", base
-		}
-	}
-
-	// Absolute path fallback.
-	d := filepath.Dir(fp)
-	if d != "" && d != "." {
-		return d + string(filepath.Separator), base
-	}
-	return "", base
-}
-
-func renderTitleBar(width int, fp string, unsaved, showDialog bool, dialogFocus int) string {
-	if showDialog {
-		return renderDialogBar(width, dialogFocus)
-	}
-
-	dir, base := formatTitlePath(fp)
-	if unsaved {
-		base += "*"
-	}
-
-	saveW := runewidth.StringWidth(titleSaveIcon)
-	leftW := 1 + saveW + 1 // leading space + icon + trailing space
-
-	closeW := runewidth.StringWidth(titleCloseLabel)
-	minW := runewidth.StringWidth(titleMinLabel)
-	rightW := minW + 1 + closeW + 1 // min + space + close + trailing space
-
-	centerAvail := width - leftW - rightW
-	if centerAvail < 0 {
-		centerAvail = 0
-	}
-
-	// Truncate to fit: drop dir first, then truncate base with "…".
-	dirW := runewidth.StringWidth(dir)
-	baseW := runewidth.StringWidth(base)
-	if dirW+baseW > centerAvail {
-		if baseW <= centerAvail {
-			dir = "" // drop directory prefix; base alone fits
-			dirW = 0
-		} else {
-			dir = ""
-			dirW = 0
-			base = truncateTitleStr(base, centerAvail)
-			baseW = runewidth.StringWidth(base)
-		}
-	}
-
-	centerPlain := dirW + baseW
-	leftPad := (centerAvail - centerPlain) / 2
-	if leftPad < 0 {
-		leftPad = 0
-	}
-	rightPad := centerAvail - leftPad - centerPlain
-	if rightPad < 0 {
-		rightPad = 0
-	}
-
-	const (
-		bg      = "\x1b[44m" // ANSI 4 background (blue)
-		fgReset = "\x1b[39m" // reset foreground only, keep background
-		rst     = "\x1b[0m"  // full reset
-	)
-
-	saveColor := "\x1b[37m" // ANSI 7 (white) — nothing to save
-	if unsaved {
-		saveColor = "\x1b[97m" // ANSI 15 (bright white) — unsaved
-	}
-
-	var b strings.Builder
-	b.WriteString(bg)
-	// Leading space + save icon
-	b.WriteString(" ")
-	b.WriteString(saveColor)
-	b.WriteString(titleSaveIcon)
-	b.WriteString(fgReset + " ")
-	// Center padding + path
-	b.WriteString(strings.Repeat(" ", leftPad))
-	if dir != "" {
-		b.WriteString("\x1b[37m") // ANSI 7 (white) — file path
-		b.WriteString(dir)
-		b.WriteString(fgReset)
-	}
-	b.WriteString("\x1b[1;3;97m") // ANSI 15 (bright white) bold italic — file name
-	b.WriteString(base)
-	b.WriteString("\x1b[22;23;39m") // reset bold, italic, fg — keep bg
-	b.WriteString(strings.Repeat(" ", rightPad))
-	// Minimize — bold ANSI 11 (bright yellow)
-	b.WriteString("\x1b[1;93m")
-	b.WriteString(titleMinLabel)
-	b.WriteString("\x1b[22;39m ")
-	// Close — bold ANSI 9 (bright red) + trailing space
-	b.WriteString("\x1b[1;91m")
-	b.WriteString(titleCloseLabel)
-	b.WriteString("\x1b[22;39m " + rst)
-
-	return b.String()
-}
-
-func renderDialogBar(width, dialogFocus int) string {
-	const (
-		base       = "\x1b[4m\x1b[34m"
-		focusOpen  = "\x1b[44m\x1b[97m"
-		focusClose = "\x1b[0m\x1b[4m\x1b[34m"
-		rst        = "\x1b[0m"
-	)
-
-	prefix, _, _ := dialogOptionCols(width)
-	labels := [3]string{"[save]", "[exit]", "[cancel]"}
-
-	total := len(prefix)
-	for _, l := range labels {
-		total += len(l)
-	}
-	leftPad := (width - total) / 2
-	if leftPad < 0 {
-		leftPad = 0
-	}
-	rightPad := width - leftPad - total
-	if rightPad < 0 {
-		rightPad = 0
-	}
-
-	italicLabel := "\x1b[3mUnsaved Changes!\x1b[23m "
-
-	var b strings.Builder
-	b.WriteString(base)
-	b.WriteString(strings.Repeat(" ", leftPad))
-	b.WriteString(italicLabel)
-	for i, label := range labels {
-		if i == dialogFocus {
-			b.WriteString(focusOpen)
-			b.WriteString(label)
-			b.WriteString(focusClose)
-		} else {
-			b.WriteString(label)
-		}
-	}
-	b.WriteString(strings.Repeat(" ", rightPad))
-	b.WriteString(rst)
-	return b.String()
 }
 
 // ── Model runs ────────────────────────────────────────────────────────────────
@@ -1691,6 +1939,41 @@ func (m appModel) startRun(userPrompt string) (tea.Model, tea.Cmd) {
 	}
 
 	content := m.editor.Value()
+
+	modelSnapshot := content
+	scopeCount := 0
+	noteWriteForbidden := false
+	parsed := markers.Scan(content)
+	if vErr := parsed.Validate(); vErr != nil {
+		m.ag.Indicator.SetError(vErr.Message)
+		m.ag.PromptBox.SetValue(userPrompt)
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	snap := parsed.BuildSnapshot()
+	modelSnapshot = snap.Visible
+	if m.mode != runner.ModeChat {
+		scopeCount = len(snap.Slots)
+	}
+	if snap.WritePolicy == markers.WritePolicyForbidden {
+		noteWriteForbidden = true
+	}
+
+	// Snapshot rows for the runner before recording the current user prompt so
+	// the runner sees prior-turn history without the current prompt (which is
+	// sent explicitly via opts.UserPrompt).
+	runRows := m.transcriptRows
+
+	// Record user prompt in the transcript immediately so it precedes the tool
+	// call rows that will be appended during the run.
+	m.nextToolID++
+	m.transcriptRows = append(m.transcriptRows, transcript.Row{
+		Num:     m.nextToolID,
+		Role:    transcript.RoleUser,
+		Type:    transcript.TypeMessage,
+		Content: transcript.EncodeMessage(userPrompt),
+	})
+	m.transcriptBar.SetRows(m.transcriptRows)
+
 	if err := m.writeNote(); err != nil {
 		m.ag.Indicator.SetError("auto-save failed: " + err.Error())
 		return m, m.ag.Indicator.StaleCmd()
@@ -1700,7 +1983,7 @@ func (m appModel) startRun(userPrompt string) (tea.Model, tea.Cmd) {
 	hash := runner.HashContent(content)
 	rc := &runner.RunContext{
 		ActivePath:      m.filepath,
-		SnapshotContent: content,
+		SnapshotContent: modelSnapshot,
 		SnapshotHash:    hash,
 	}
 	m.runSnapshotHash = hash
@@ -1711,18 +1994,55 @@ func (m appModel) startRun(userPrompt string) (tea.Model, tea.Cmd) {
 	m.runActive = true
 	m.ag.SetRunActive(true)
 
-	if m.mode == runner.ModeChat {
-		m.pendingChatUserPrompt = userPrompt
+	// Parse @path tokens, load file contents, record transcript rows.
+	var fileAttachments []runner.FileAttachment
+	for _, path := range agent.ParseAtFiles(userPrompt) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			m.ag.Indicator.SetError("Cannot read: " + path)
+			continue
+		}
+		content := string(data)
+		lines := strings.SplitN(content, "\n", 6)
+		if len(lines) > 5 {
+			lines = lines[:5]
+		}
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		cmd := m.appendTranscriptPair(
+			transcript.ToolRead,
+			transcript.EncodeAgentFileCall(path, "", ""),
+			transcript.EncodeAgentPreviewResult(lines),
+		)
+		if cmd != nil {
+			_ = cmd // transcript rows recorded synchronously via appendTranscriptPair
+		}
+		fileAttachments = append(fileAttachments, runner.FileAttachment{
+			Path:    path,
+			Content: content,
+		})
 	}
+	cleanPrompt := agent.StripAtFiles(userPrompt)
+
+	// Consume pending images for this run.
+	pendingImgs := m.pendingImages
+	m.pendingImages = nil
 
 	opts := runner.RunOptions{
-		Mode:           m.mode,
-		UserPrompt:     userPrompt,
-		TranscriptRows: m.transcriptRows,
+		Mode:            m.mode,
+		AgentMode:       m.agentMode,
+		UserPrompt:      cleanPrompt,
+		TranscriptRows:  runRows,
+		FileAttachments: fileAttachments,
+		PendingImages:   pendingImgs,
+		Todos:              m.todos,
+		WriteScopeCount:    scopeCount,
+		NoteWriteForbidden: noteWriteForbidden,
 	}
 	stream, first := runner.StartCmd(ctx, m.llmCfg, rc, opts)
 	m.runStream = stream
-	return m, first
+	return m, tea.Batch(first, m.maybeResizeEditorCmd())
 }
 
 // finishRun clears run-active state and resets the send button. The stream
@@ -1730,7 +2050,6 @@ func (m appModel) startRun(userPrompt string) (tea.Model, tea.Cmd) {
 func (m appModel) finishRun() appModel {
 	m.runActive = false
 	m.runCancel = nil
-	m.pendingChatUserPrompt = ""
 	m.ag.SetRunActive(false)
 	return m
 }
@@ -1740,6 +2059,25 @@ func roundDuration(d time.Duration) time.Duration {
 		return d.Round(10 * time.Millisecond)
 	}
 	return d.Round(100 * time.Millisecond)
+}
+
+// attachFileMsg is delivered by openFilePickerCmd when the user selects a file.
+type attachFileMsg struct{ Path string }
+
+// openFilePickerCmd runs zenity --file-selection in a goroutine and delivers
+// attachFileMsg with the selected path, or nil if cancelled.
+func openFilePickerCmd() tea.Cmd {
+	return func() tea.Msg {
+		out, err := exec.Command("zenity", "--file-selection").Output()
+		if err != nil {
+			return nil
+		}
+		path := strings.TrimSpace(string(out))
+		if path == "" {
+			return nil
+		}
+		return attachFileMsg{Path: path}
+	}
 }
 
 // recordSearchInTranscript appends a tool_call/tool_result pair for a web
@@ -1802,6 +2140,172 @@ func (m *appModel) recordRunnerToolInTranscript(name, callJSON, resultJSON strin
 			return nil
 		}
 		return m.recordFetchInTranscript(web.Page{Title: page.Title, URL: page.URL, Markdown: page.Markdown})
+
+	case "Read":
+		var args struct {
+			FilePath string `json:"file_path"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
+			return nil
+		}
+		var result struct {
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal([]byte(resultJSON), &result)
+		lines := strings.SplitN(result.Content, "\n", 6)
+		if len(lines) > 5 {
+			lines = lines[:5]
+		}
+		// Strip trailing empty line from split
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolRead,
+			transcript.EncodeAgentFileCall(args.FilePath, "", ""),
+			transcript.EncodeAgentPreviewResult(lines),
+		)
+
+	case "Write":
+		var args struct {
+			FilePath string `json:"file_path"`
+			Content  string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
+			return nil
+		}
+		lines := strings.SplitN(args.Content, "\n", 6)
+		if len(lines) > 5 {
+			lines = lines[:5]
+		}
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolWrite,
+			transcript.EncodeAgentFileCall(args.FilePath, "", ""),
+			transcript.EncodeAgentPreviewResult(lines),
+		)
+
+	case "Edit":
+		var args struct {
+			FilePath  string `json:"file_path"`
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
+			return nil
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolEdit,
+			transcript.EncodeAgentFileCall(args.FilePath, args.OldString, args.NewString),
+			transcript.EncodeAgentPreviewResult(nil),
+		)
+
+	case "Bash":
+		var args struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Command == "" {
+			return nil
+		}
+		var result struct {
+			Output string `json:"output"`
+		}
+		_ = json.Unmarshal([]byte(resultJSON), &result)
+		return m.appendTranscriptPair(
+			transcript.ToolBash,
+			transcript.EncodeAgentCmdCall(args.Command),
+			transcript.EncodeAgentOutputResult(result.Output),
+		)
+
+	case "Grep":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Pattern == "" {
+			return nil
+		}
+		var result struct {
+			Mode      string   `json:"mode"`
+			Filenames []string `json:"filenames"`
+			Content   string   `json:"content"`
+		}
+		_ = json.Unmarshal([]byte(resultJSON), &result)
+		var previewLines []string
+		if result.Mode == "content" {
+			all := strings.SplitN(result.Content, "\n", 6)
+			if len(all) > 5 {
+				all = all[:5]
+			}
+			previewLines = all
+		} else {
+			n := 5
+			if len(result.Filenames) < n {
+				n = len(result.Filenames)
+			}
+			previewLines = result.Filenames[:n]
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolGrep,
+			transcript.EncodeAgentPatternCall(args.Pattern),
+			transcript.EncodeAgentPreviewResult(previewLines),
+		)
+
+	case "Glob":
+		var args struct {
+			Pattern string `json:"pattern"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Pattern == "" {
+			return nil
+		}
+		var result struct {
+			Filenames []string `json:"filenames"`
+		}
+		_ = json.Unmarshal([]byte(resultJSON), &result)
+		n := 5
+		if len(result.Filenames) < n {
+			n = len(result.Filenames)
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolGlob,
+			transcript.EncodeAgentPatternCall(args.Pattern),
+			transcript.EncodeAgentPreviewResult(result.Filenames[:n]),
+		)
+
+	case "note_edit":
+		var args struct {
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil {
+			return nil
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolNoteEdit,
+			transcript.EncodeAgentFileCall(m.filepath, args.OldString, args.NewString),
+			transcript.EncodeAgentPreviewResult(nil),
+		)
+
+	case "note_write":
+		var args struct {
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil {
+			return nil
+		}
+		lines := strings.SplitN(args.Content, "\n", 6)
+		if len(lines) > 5 {
+			lines = lines[:5]
+		}
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		return m.appendTranscriptPair(
+			transcript.ToolNoteWrite,
+			transcript.EncodeAgentFileCall(m.filepath, "", ""),
+			transcript.EncodeAgentPreviewResult(lines),
+		)
 	}
 	return nil
 }
@@ -1874,3 +2378,86 @@ func removeTranscriptEntry(rows []transcript.Row, rowNum, hitIdx int) []transcri
 	}
 	return out
 }
+
+// ─── /chat2note ──────────────────────────────────────────────────────────────
+
+// chat2noteStep1DoneMsg carries the structuring step's raw text output.
+type chat2noteStep1DoneMsg struct {
+	Intermediate string
+}
+
+// chat2noteStep1ErrMsg signals that step 1 failed; the transcript is left
+// untouched and the flow aborts.
+type chat2noteStep1ErrMsg struct {
+	Err error
+}
+
+// executeChat2Note kicks off the two-step "condense chat into note" flow.
+// Step 1 (structuring) runs via a one-shot LLM call wrapped in a tea.Cmd;
+// when it returns, the chat2noteStep1DoneMsg handler proceeds to step 2 by
+// invoking the normal runner with the cleaned intermediate as the prompt.
+func (m appModel) executeChat2Note(extra string) (tea.Model, tea.Cmd) {
+	if m.runActive || len(m.chat2noteRowsToClear) > 0 {
+		m.ag.Indicator.SetError("Another run is already active")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	if m.llmCfg.Model == "" {
+		m.ag.Indicator.SetError("No model configured — check ~/.config/aunic/aunic.json")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+	if len(m.transcriptRows) == 0 {
+		m.ag.Indicator.SetError("No transcript content to integrate")
+		return m, m.ag.Indicator.StaleCmd()
+	}
+
+	// Capture the row Nums currently in scope. These get cleared after
+	// step 2 completes successfully.
+	rowNums := make([]int, len(m.transcriptRows))
+	rowsCopy := make([]transcript.Row, len(m.transcriptRows))
+	for i, r := range m.transcriptRows {
+		rowNums[i] = r.Num
+		rowsCopy[i] = r
+	}
+	m.chat2noteRowsToClear = rowNums
+	m.chat2noteExtra = extra
+
+	m.ag.Indicator.Set("structuring chat…")
+	return m, tea.Batch(
+		m.ag.Indicator.StaleCmd(),
+		chat2noteStep1Cmd(m.llmCfg, rowsCopy),
+	)
+}
+
+// chat2noteStep1Cmd runs the one-shot structuring LLM call in a goroutine.
+func chat2noteStep1Cmd(cfg llm.Config, rows []transcript.Row) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		text, err := runner.Chat2NoteStep1(ctx, cfg, rows)
+		if err != nil {
+			return chat2noteStep1ErrMsg{Err: err}
+		}
+		return chat2noteStep1DoneMsg{Intermediate: text}
+	}
+}
+
+// chat2noteRowFilter returns a copy of rows with any row whose Num appears
+// in clearSet removed.
+func chat2noteRowFilter(rows []transcript.Row, clearSet []int) []transcript.Row {
+	if len(clearSet) == 0 {
+		return rows
+	}
+	idx := make(map[int]bool, len(clearSet))
+	for _, n := range clearSet {
+		idx[n] = true
+	}
+	out := make([]transcript.Row, 0, len(rows))
+	for _, r := range rows {
+		if idx[r.Num] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+

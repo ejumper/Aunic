@@ -21,6 +21,14 @@ const (
 const (
 	ToolWebSearch = "web_search"
 	ToolWebFetch  = "web_fetch"
+	ToolRead      = "Read"
+	ToolWrite     = "Write"
+	ToolEdit      = "Edit"
+	ToolBash      = "Bash"
+	ToolGrep      = "Grep"
+	ToolGlob      = "Glob"
+	ToolNoteEdit  = "note_edit"
+	ToolNoteWrite = "note_write"
 )
 
 // Row is one entry in the transcript table. The schema is fixed; the Content

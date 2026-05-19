@@ -349,6 +349,11 @@ func injectCursor(s string, visualCol int) string {
 // to its rendered location: an absolute visual row (counting all wrapped
 // rows from line 0) and a visual column within the content area (excluding
 // the gutter).
+//
+// Callers pass row from m.textarea.Line() (always valid) or from search/marker
+// positions that could be stale if the buffer changed between scan and render.
+// The clamping below is the defensive guard for that case; it is not a hot
+// path and the cost is negligible.
 func (m Model) bufferPosToVisual(row, col int) (int, int) {
 	lines := strings.Split(m.textarea.Value(), "\n")
 	if row < 0 {
@@ -356,6 +361,8 @@ func (m Model) bufferPosToVisual(row, col int) (int, int) {
 	}
 	if row >= len(lines) {
 		row = len(lines) - 1
+		// strings.Split returns at least one element, so row >= 0 here;
+		// the inner check below is defensive only.
 		if row < 0 {
 			return 0, 0
 		}

@@ -2,6 +2,9 @@ package runner
 
 import (
 	"context"
+	_ "embed"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,6 +16,7 @@ import (
 	"github.com/charmbracelet/openai-go/shared"
 
 	"github.com/ejumper/aunic/llm"
+	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/transcript"
 )
 
@@ -28,23 +32,41 @@ const (
 	ModeChat = "chat"
 )
 
-const noteSystemPrompt = `You are aunic, a note-based AI agent. The user's active markdown note is sent
-to you first, followed by their request. Always end your run by calling
-note_edit or note_write to update the note — do not reply with plain text.
-You may use web_search and web_fetch to gather information before editing.`
+//go:embed system_note.md
+var noteSystemPrompt string
 
-const chatSystemPrompt = `You are aunic, a note-based AI assistant in chat mode.
-The user's active markdown note is provided as context, followed by their request.
-Reply with a plain-text message — do not call note_edit or note_write (they are
-not available in this mode). You may use web_search and web_fetch to gather
-information before replying.`
+//go:embed system_scoped.md
+var scopedNoteSystemPrompt string
+
+//go:embed system_chat.md
+var chatSystemPrompt string
+
+// FileAttachment is a user-provided text file passed as a pseudo-Read call.
+type FileAttachment struct {
+	Path    string
+	Content string
+}
 
 // RunOptions carries everything Run needs beyond the shared LLM config and the
 // RunContext.
 type RunOptions struct {
-	Mode           string // ModeNote or ModeChat; empty defaults to ModeNote
-	UserPrompt     string
-	TranscriptRows []transcript.Row
+	Mode            string // ModeNote or ModeChat; empty defaults to ModeNote
+	AgentMode       string // "off", "read", or "work"; empty defaults to "off"
+	UserPrompt      string
+	TranscriptRows  []transcript.Row
+	FileAttachments []FileAttachment
+	PendingImages   [][]byte // raw image bytes (PNG or JPEG) from clipboard
+	Todos           []todos.Todo
+	// WriteScopeCount is the number of active @>> <<@ slots in the snapshot.
+	// When > 0, note_edit / note_write are dropped from the API tool list and
+	// note_edit_at is registered in their place.
+	WriteScopeCount int
+	// NoteWriteForbidden drops note_write from the API tool list — set by
+	// content-shaping markers that make a single full-note write unsafe
+	// (multiple !>><<! spans, or a %>><<% in the middle of writable
+	// content). Has no effect when WriteScopeCount > 0 (scope swap already
+	// removes note_write).
+	NoteWriteForbidden bool
 }
 
 func plainTextNudge(response string) string {
@@ -103,6 +125,36 @@ func StartCmd(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptio
 			return NoteWriteApplyReply{}, ctx.Err()
 		}
 	}
+	rc.ApplyTodoWrite = func(ctx context.Context, texts []string) (TodoWriteApplyReply, error) {
+		reply := make(chan TodoWriteApplyReply, 1)
+		emit(TodoWriteApplyMsg{Texts: texts, Reply: reply})
+		select {
+		case r := <-reply:
+			return r, nil
+		case <-ctx.Done():
+			return TodoWriteApplyReply{}, ctx.Err()
+		}
+	}
+	rc.ApplyTodoDone = func(ctx context.Context, id int) (TodoDoneApplyReply, error) {
+		reply := make(chan TodoDoneApplyReply, 1)
+		emit(TodoDoneApplyMsg{ID: id, Reply: reply})
+		select {
+		case r := <-reply:
+			return r, nil
+		case <-ctx.Done():
+			return TodoDoneApplyReply{}, ctx.Err()
+		}
+	}
+	rc.ApplyNoteEditAt = func(ctx context.Context, edits map[string]string) (NoteEditAtApplyReply, error) {
+		reply := make(chan NoteEditAtApplyReply, 1)
+		emit(NoteEditAtApplyMsg{Edits: edits, Reply: reply})
+		select {
+		case r := <-reply:
+			return r, nil
+		case <-ctx.Done():
+			return NoteEditAtApplyReply{}, ctx.Err()
+		}
+	}
 
 	go func() {
 		defer close(s.ch)
@@ -121,6 +173,8 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 	sysPrompt := noteSystemPrompt
 	if mode == ModeChat {
 		sysPrompt = chatSystemPrompt
+	} else if opts.WriteScopeCount > 0 {
+		sysPrompt = scopedNoteSystemPrompt
 	}
 
 	client := llm.NewClient(cfg)
@@ -128,11 +182,26 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 		openai.SystemMessage(sysPrompt),
 	}
 	msgs = append(msgs, transcript.ToAPIMessages(opts.TranscriptRows)...)
-	msgs = append(msgs,
-		openai.UserMessage(rc.SnapshotContent),
-		openai.UserMessage(opts.UserPrompt),
-	)
-	tools := buildToolParams(mode)
+	msgs = append(msgs, openai.UserMessage(rc.SnapshotContent))
+
+	// Inject pseudo-Read tool calls for user-provided file attachments.
+	for _, fa := range opts.FileAttachments {
+		toolID := fmt.Sprintf("att-%d", time.Now().UnixNano())
+		msgs = append(msgs, pseudoReadCall(fa.Path, toolID))
+		msgs = append(msgs, openai.ToolMessage(fa.Content, toolID))
+	}
+
+	// Live todo list — mutated by todo_write / todo_done apply replies so the
+	// user message can be re-rendered between turns.
+	liveTodos := append([]todos.Todo(nil), opts.Todos...)
+
+	// Build user message — multimodal when images are pending. The active todo
+	// list is appended to the prompt text so the model sees the current state.
+	userMsg := buildUserMessage(userTextWithTodos(opts.UserPrompt, liveTodos), opts.PendingImages)
+	msgs = append(msgs, userMsg)
+	userMsgIdx := len(msgs) - 1
+
+	tools := buildToolParams(mode, opts.AgentMode, opts.WriteScopeCount, opts.NoteWriteForbidden)
 	start := time.Now()
 
 	emit(RunStartedMsg{})
@@ -153,8 +222,28 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				emit(RunCancelledMsg{})
 				return
 			}
-			emit(RunErrorMsg{Message: err.Error()})
-			return
+			// If images caused the error, retry once without them.
+			if len(opts.PendingImages) > 0 && isVisionError(err) {
+				emit(VisionUnsupportedMsg{})
+				msgs[userMsgIdx] = openai.UserMessage(userTextWithTodos(opts.UserPrompt, liveTodos))
+				opts.PendingImages = nil
+				resp, err = client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+					Model:    cfg.Model,
+					Messages: msgs,
+					Tools:    tools,
+				})
+				if err != nil {
+					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+						emit(RunCancelledMsg{})
+						return
+					}
+					emit(RunErrorMsg{Message: err.Error()})
+					return
+				}
+			} else {
+				emit(RunErrorMsg{Message: err.Error()})
+				return
+			}
 		}
 
 		if len(resp.Choices) == 0 {
@@ -167,6 +256,9 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 
 		if len(choice.Message.ToolCalls) == 0 {
 			if mode == ModeChat {
+				if todos.AllDone(liveTodos) {
+					emit(TodosClearedMsg{})
+				}
 				emit(ChatFinishedMsg{
 					Text:    choice.Message.Content,
 					InTok:   int(resp.Usage.PromptTokens),
@@ -202,7 +294,18 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 				ResultJSON: result.JSON,
 			})
 
+			// If a tool mutated the active todo list, update our local copy
+			// and re-render the user message so the next API call shows the
+			// new checkbox state.
+			if result.TodosAfter != nil {
+				liveTodos = result.TodosAfter
+				msgs[userMsgIdx] = buildUserMessage(userTextWithTodos(opts.UserPrompt, liveTodos), opts.PendingImages)
+			}
+
 			if result.EndsRun && !result.IsError {
+				if todos.AllDone(liveTodos) {
+					emit(TodosClearedMsg{})
+				}
 				emit(RunFinishedMsg{
 					EndedOn: shortName(name),
 					InTok:   int(resp.Usage.PromptTokens),
@@ -217,11 +320,26 @@ func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, e
 	emit(RunErrorMsg{Message: "max steps reached"})
 }
 
-func buildToolParams(mode string) []openai.ChatCompletionToolUnionParam {
-	all := AllTools()
-	out := make([]openai.ChatCompletionToolUnionParam, 0, len(all))
+func buildToolParams(mode, agentMode string, writeScopeCount int, noteWriteForbidden bool) []openai.ChatCompletionToolUnionParam {
+	var all []Tool
+	switch agentMode {
+	case "read":
+		all = append(AllTools(), AgentReadTools()...)
+	case "work":
+		all = append(AllTools(), AgentWorkTools()...)
+	default:
+		all = AllTools()
+	}
+	scopeActive := mode == ModeNote && writeScopeCount > 0
+	out := make([]openai.ChatCompletionToolUnionParam, 0, len(all)+1)
 	for _, t := range all {
 		if mode == ModeChat && (t.Name() == "note_edit" || t.Name() == "note_write") {
+			continue
+		}
+		if scopeActive && (t.Name() == "note_edit" || t.Name() == "note_write") {
+			continue
+		}
+		if noteWriteForbidden && t.Name() == "note_write" {
 			continue
 		}
 		out = append(out, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
@@ -230,7 +348,51 @@ func buildToolParams(mode string) []openai.ChatCompletionToolUnionParam {
 			Parameters:  shared.FunctionParameters(t.Schema()),
 		}))
 	}
+	if scopeActive {
+		out = append(out, openai.ChatCompletionFunctionTool(shared.FunctionDefinitionParam{
+			Name:        "note_edit_at",
+			Description: param.NewOpt(scopedEditDescription(writeScopeCount)),
+			Parameters:  shared.FunctionParameters(scopedEditSchema(writeScopeCount)),
+		}))
+	}
 	return out
+}
+
+// scopedEditSchema returns a JSON Schema whose `edits` object enumerates the
+// exact slot keys present in the snapshot. Exposing the keys to the model
+// lets it self-correct without needing to guess what's valid.
+func scopedEditSchema(slotCount int) map[string]any {
+	props := make(map[string]any, slotCount)
+	for i := 1; i <= slotCount; i++ {
+		props[fmt.Sprintf("%d", i)] = map[string]any{
+			"type":        "string",
+			"description": fmt.Sprintf("Content for slot #%d.", i),
+		}
+	}
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"edits": map[string]any{
+				"type":                 "object",
+				"description":          "Map of slot number (string key like \"1\") to new content. Omitted slots are left unchanged. Empty string deletes the slot's body but preserves its markers.",
+				"properties":           props,
+				"additionalProperties": false,
+			},
+		},
+		"required":             []string{"edits"},
+		"additionalProperties": false,
+	}
+}
+
+func scopedEditDescription(slotCount int) string {
+	slotWord := "slot"
+	if slotCount != 1 {
+		slotWord = "slots"
+	}
+	return fmt.Sprintf(
+		"End the run by filling in the %d scoped-edit %s in the active note. The note contains <!--Write #N location--> markers (insert new text here) and <!--Rewrite #N start-->...<!--Rewrite #N end--> markers (replace the existing body). Submit content for any subset of slots; omitted slots are left unchanged. The @>> <<@ wrapper markers in the raw note are preserved automatically.",
+		slotCount, slotWord,
+	)
 }
 
 func previewArgs(args string) string {
@@ -248,7 +410,72 @@ func shortName(toolName string) string {
 		return "edit"
 	case "note_write":
 		return "write"
+	case "note_edit_at":
+		return "edit_at"
 	default:
 		return toolName
 	}
+}
+
+// pseudoReadCall builds a synthetic assistant message that looks like the model
+// called the "Read" tool — used to present user-attached files as already-read
+// context before the user's actual message.
+func pseudoReadCall(filePath, toolID string) openai.ChatCompletionMessageParamUnion {
+	argsJSON, _ := json.Marshal(map[string]string{"file_path": filePath})
+	assistant := openai.ChatCompletionAssistantMessageParam{
+		ToolCalls: []openai.ChatCompletionMessageToolCallUnionParam{{
+			OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+				ID: toolID,
+				Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
+					Name:      "Read",
+					Arguments: string(argsJSON),
+				},
+			},
+		}},
+	}
+	return openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant}
+}
+
+// userTextWithTodos returns the user prompt text with the active todos block
+// appended when there are any. The runner re-renders this whenever liveTodos
+// changes so the next API call shows current state.
+func userTextWithTodos(prompt string, items []todos.Todo) string {
+	block := todos.PromptBlock(items)
+	if block == "" {
+		return prompt
+	}
+	if prompt == "" {
+		return block
+	}
+	return prompt + "\n\n" + block
+}
+
+// buildUserMessage returns a text-only or multimodal user message depending on
+// whether images are provided.
+func buildUserMessage(text string, images [][]byte) openai.ChatCompletionMessageParamUnion {
+	if len(images) == 0 {
+		return openai.UserMessage(text)
+	}
+	parts := []openai.ChatCompletionContentPartUnionParam{
+		openai.TextContentPart(text),
+	}
+	for _, img := range images {
+		encoded := "data:image/png;base64," + base64.StdEncoding.EncodeToString(img)
+		parts = append(parts, openai.ImageContentPart(
+			openai.ChatCompletionContentPartImageImageURLParam{URL: encoded},
+		))
+	}
+	return openai.UserMessage(parts)
+}
+
+// isVisionError reports whether an API error is likely caused by the model not
+// supporting image content.
+func isVisionError(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, kw := range []string{"vision", "image", "multimodal", "unsupported_media_type"} {
+		if strings.Contains(s, kw) {
+			return true
+		}
+	}
+	return false
 }

@@ -2,10 +2,17 @@ package runner
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 )
+
+//go:embed desc_note_edit.md
+var noteEditDesc string
+
+//go:embed desc_note_write.md
+var noteWriteDesc string
 
 // note_edit ────────────────────────────────────────────────────────────────────
 
@@ -19,9 +26,7 @@ type noteEditTool struct{}
 
 func (noteEditTool) Name() string { return "note_edit" }
 
-func (noteEditTool) Description() string {
-	return "Edit the current active markdown note using exact old_string/new_string replacement. old_string must come from the current note content exactly as it appears."
-}
+func (noteEditTool) Description() string { return noteEditDesc }
 
 func (noteEditTool) Schema() map[string]any {
 	return map[string]any{
@@ -65,6 +70,8 @@ func (noteEditTool) Execute(ctx context.Context, rc *RunContext, argsJSON string
 		return errorResult("old_string_not_found", "old_string not present in the current note.")
 	case reply.ConflictAmbiguous:
 		return errorResult("multiple_matches", fmt.Sprintf("old_string occurs %d times; set replace_all=true or disambiguate.", reply.Count))
+	case reply.ConflictProtected:
+		return errorResult("protected_range", "the requested edit overlaps a $>> <<$ protected range; choose a different old_string outside the protected area.")
 	case !reply.Applied:
 		return errorResult("apply_failed", "edit was not applied.")
 	}
@@ -96,9 +103,7 @@ type noteWriteTool struct{}
 
 func (noteWriteTool) Name() string { return "note_write" }
 
-func (noteWriteTool) Description() string {
-	return "Replace the entire content of the current active markdown note with the provided content."
-}
+func (noteWriteTool) Description() string { return noteWriteDesc }
 
 func (noteWriteTool) Schema() map[string]any {
 	return map[string]any{

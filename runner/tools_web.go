@@ -2,11 +2,18 @@ package runner
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 
 	"github.com/ejumper/aunic/web"
 )
+
+//go:embed desc_web_search.md
+var webSearchDesc string
+
+//go:embed desc_web_fetch.md
+var webFetchDesc string
 
 const fetchTruncate = 8000
 
@@ -21,9 +28,7 @@ type webSearchTool struct{}
 
 func (webSearchTool) Name() string { return "web_search" }
 
-func (webSearchTool) Description() string {
-	return "Search the web with DuckDuckGo. Returns results with title, url, domain, and abstract. Use this to find candidate URLs, then call web_fetch to read a page."
-}
+func (webSearchTool) Description() string { return webSearchDesc }
 
 func (webSearchTool) Schema() map[string]any {
 	return map[string]any{
@@ -81,9 +86,7 @@ type webFetchTool struct{}
 
 func (webFetchTool) Name() string { return "web_fetch" }
 
-func (webFetchTool) Description() string {
-	return "Fetch a URL and return its main content as markdown. Use after web_search."
-}
+func (webFetchTool) Description() string { return webFetchDesc }
 
 func (webFetchTool) Schema() map[string]any {
 	return map[string]any{

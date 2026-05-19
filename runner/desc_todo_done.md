@@ -1,0 +1,1 @@
+Mark a todo as completed. Pass the todo's ID number (the N in #N shown in the active todos list). Call this immediately after finishing a task. The checkbox in the user's view will update on the next turn.
