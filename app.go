@@ -155,10 +155,32 @@ type appModel struct {
 }
 
 func newApp(fp, content string, cfg llm.Config) appModel {
+	content, savedState, _ := transcript.ExtractState(content)
 	noteBody, txArea := transcript.Split(content)
 	tableArea, todosArea := transcript.SplitArea(txArea)
 	rows, _ := transcript.Parse(tableArea)
 	todoList := todos.Parse(todosArea)
+
+	// Apply persisted state with validation. Unknown values fall back to
+	// defaults silently; the next writeNote will rewrite the state line with
+	// the corrected values.
+	mode := runner.ModeNote
+	if savedState.Mode == runner.ModeChat || savedState.Mode == runner.ModeNote {
+		mode = savedState.Mode
+	}
+	agentMode := "off"
+	if savedState.Agent == "read" || savedState.Agent == "work" || savedState.Agent == "off" {
+		agentMode = savedState.Agent
+	}
+	appliedCfg := cfg
+	if savedState.Model != "" {
+		if slash := strings.Index(savedState.Model, "/"); slash > 0 {
+			pk, mk := savedState.Model[:slash], savedState.Model[slash+1:]
+			if c, err := llm.ConfigForModel(pk, mk); err == nil {
+				appliedCfg = c
+			}
+		}
+	}
 
 	home, _ := os.UserHomeDir()
 	wd, _ := os.Getwd()
@@ -166,11 +188,11 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 		editor:         editor.New(fp, noteBody),
 		filepath:       fp,
 		savedValue:     noteBody,
-		llmCfg:         cfg,
+		llmCfg:         appliedCfg,
 		transcriptRows: rows,
 		todos:          todoList,
-		mode:           runner.ModeNote,
-		agentMode:      "off",
+		mode:           mode,
+		agentMode:      agentMode,
 		homeDir:        home,
 		cwd:            wd,
 	}
@@ -184,23 +206,34 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 	m.transcriptBar = agent.NewTranscriptBar()
 	m.transcriptBar.SetRows(rows)
 	m.transcriptBar.SetTodos(todoList)
+	switch savedState.Transcript {
+	case "open:partial":
+		m.transcriptBar.SetCollapsed(false)
+		m.transcriptBar.SetFullHeight(false)
+	case "open:full":
+		m.transcriptBar.SetCollapsed(false)
+		m.transcriptBar.SetFullHeight(true)
+	default: // "closed", "", or anything unrecognized
+		m.transcriptBar.SetCollapsed(true)
+		m.transcriptBar.SetFullHeight(false)
+	}
 	m.transcriptH = m.transcriptBar.Height()
 	// ag is sized in the first WindowSizeMsg; start with a zero-width pane so
 	// Height() still returns a valid value before the terminal size is known.
 	m.ag = agent.NewPane(80)
 	m.agentH = m.ag.Height()
 	switch {
-	case cfg.Err() != "":
-		m.ag.Indicator.SetError("config error: " + cfg.Err())
-	case cfg.ModelName != "":
-		m.ag.Indicator.Set(filepath.Base(fp) + " loaded · " + cfg.ModelName)
+	case appliedCfg.Err() != "":
+		m.ag.Indicator.SetError("config error: " + appliedCfg.Err())
+	case appliedCfg.ModelName != "":
+		m.ag.Indicator.Set(filepath.Base(fp) + " loaded · " + appliedCfg.ModelName)
 	default:
 		m.ag.Indicator.Set(filepath.Base(fp) + " loaded")
 	}
 
 	// Populate model button label and valid-names map from the config file.
-	if cfg.ModelName != "" {
-		m.ag.SetModelLabel(cfg.ModelName)
+	if appliedCfg.ModelName != "" {
+		m.ag.SetModelLabel(appliedCfg.ModelName)
 	}
 	m.ag.SetAgentLabel("agent: " + m.agentMode)
 	m.ag.SetModeLabel("mode: " + m.mode)
@@ -327,12 +360,38 @@ func fnv64(s string) uint64 {
 	return h
 }
 
-// writeNote serializes the editor body + transcript rows back to disk. The
-// editor's view is the *note body*; transcript rows are appended after a
-// "***\n# Transcript" delimiter when there are any.
+// writeNote serializes the editor body + transcript rows + UI state back to
+// disk. The editor's view is the *note body*; transcript rows are appended
+// after a "***\n# Transcript" delimiter when there are any; the persistent
+// UI state is the final line of the file as an HTML comment.
 func (m *appModel) writeNote() error {
 	full := transcript.Join(m.editor.Value(), m.transcriptRows, todos.Render(m.todos))
+	full = transcript.AppendStateLine(full, m.currentState())
 	return os.WriteFile(m.filepath, []byte(full), 0644)
+}
+
+// currentState gathers the persistent UI state for serialization. Transcript
+// visibility collapses (collapsed=true, fullHeight=*) into "closed" since
+// IsFullHeight is observable-false while collapsed.
+func (m *appModel) currentState() transcript.State {
+	transcriptVis := "closed"
+	if !m.transcriptBar.IsCollapsed() {
+		if m.transcriptBar.IsFullHeight() {
+			transcriptVis = "open:full"
+		} else {
+			transcriptVis = "open:partial"
+		}
+	}
+	model := ""
+	if m.llmCfg.ProviderKey != "" && m.llmCfg.ModelKey != "" {
+		model = m.llmCfg.ProviderKey + "/" + m.llmCfg.ModelKey
+	}
+	return transcript.State{
+		Mode:       m.mode,
+		Agent:      m.agentMode,
+		Model:      model,
+		Transcript: transcriptVis,
+	}
 }
 
 // appendTranscriptPair adds a (tool_call, tool_result) pair, refreshes the bar,
@@ -456,12 +515,16 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Y >= txTop && msg.Y < paneTop {
 			msg.Y -= txTop
 			wasFull := m.transcriptBar.IsFullHeight()
+			wasCollapsed := m.transcriptBar.IsCollapsed()
 			bar, cmd := m.transcriptBar.Update(msg)
 			m.transcriptBar = bar
 			// If [+] just promoted the bar to full-height and the editor was
 			// holding focus, move focus to the now-only-visible transcript.
 			if !wasFull && m.transcriptBar.IsFullHeight() && m.currentFocus() == focusEditor {
 				m = m.setFocus(focusTranscript)
+			}
+			if wasFull != m.transcriptBar.IsFullHeight() || wasCollapsed != m.transcriptBar.IsCollapsed() {
+				_ = m.writeNote()
 			}
 			return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
 		}
@@ -800,6 +863,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
+		_ = m.writeNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.ModeTogglePressMsg:
@@ -810,6 +874,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
+		_ = m.writeNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.AttachPickerPressMsg:
@@ -862,6 +927,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.llmCfg = cfg
 			m.ag.SetModelLabel(cfg.ModelName)
 			m.ag.Indicator.Set("Model: " + cfg.ModelName)
+			_ = m.writeNote()
 		} else {
 			m.ag.Indicator.SetError("model error: " + err.Error())
 		}
@@ -1272,8 +1338,13 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.setFocus(target), nil
 		}
+		wasFull := m.transcriptBar.IsFullHeight()
+		wasCollapsed := m.transcriptBar.IsCollapsed()
 		bar, cmd := m.transcriptBar.Update(msg)
 		m.transcriptBar = bar
+		if wasFull != m.transcriptBar.IsFullHeight() || wasCollapsed != m.transcriptBar.IsCollapsed() {
+			_ = m.writeNote()
+		}
 		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
 	}
 
@@ -1466,6 +1537,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 						m.llmCfg = cfg
 						m.ag.SetModelLabel(cfg.ModelName)
 						m.ag.Indicator.Set("Model: " + cfg.ModelName)
+						_ = m.writeNote()
 						return m, m.ag.Indicator.StaleCmd()
 					}
 				}
@@ -1506,6 +1578,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		m.mode = target
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
+		_ = m.writeNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.SlashWork, agent.SlashRead, agent.SlashAgentOff:
@@ -1522,6 +1595,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		}
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
+		_ = m.writeNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.SlashWeb:
@@ -2122,22 +2196,27 @@ func (m *appModel) recordRunnerToolInTranscript(name, callJSON, resultJSON strin
 			Domain   string `json:"domain"`
 			Abstract string `json:"abstract"`
 		}
-		if err := json.Unmarshal([]byte(resultJSON), &raw); err != nil {
-			return nil
-		}
+		_ = json.Unmarshal([]byte(resultJSON), &raw)
 		results := make([]web.Result, len(raw))
 		for i, r := range raw {
 			results[i] = web.Result{Title: r.Title, URL: r.URL, Domain: r.Domain, Abstract: r.Abstract}
 		}
 		return m.recordSearchInTranscript(args.Query, results)
 	case "web_fetch":
+		var args struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.URL == "" {
+			return nil
+		}
 		var page struct {
 			Title    string `json:"title"`
 			URL      string `json:"url"`
 			Markdown string `json:"markdown"`
 		}
-		if err := json.Unmarshal([]byte(resultJSON), &page); err != nil || page.URL == "" {
-			return nil
+		_ = json.Unmarshal([]byte(resultJSON), &page)
+		if page.URL == "" {
+			page.URL = args.URL
 		}
 		return m.recordFetchInTranscript(web.Page{Title: page.Title, URL: page.URL, Markdown: page.Markdown})
 

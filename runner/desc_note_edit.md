@@ -106,3 +106,36 @@ edits: [
 
 Recovery — on a 3-op batch where ops 1 and 3 applied but op 2 failed, resubmit ONLY op 2 (corrected). Do not resend op 1 or op 3.
 </batch_examples>
+
+<tips>
+Prefer nested "outline notes" over markdown tables. For example:
+```
+## Outline Notes Style Rules
+| Rule                   | Do                                          | Don't                                          |
+| ---------------------- | ------------------------------------------- | ---------------------------------------------- |
+| One idea per line      | Keep each bullet to a single thought        | Cram multiple points into one line             |
+| Parallel structure     | Use the same grammatical form at each level | Mix nouns and full sentences at the same level |
+| Consistent symbols     | Stick to one symbol system throughout       | Switch between •, -, and * arbitrarily         |
+| Indentation discipline | Only go deeper when genuinely more specific | Indent randomly to break up visual space       |
+| Brevity                | Use keywords and short phrases              | Write full paragraph sentences in bullets      |
+```
+could become...
+```
+## Outline Style Rules
+One idea per line
+- Do 
+  - Keep each bullet to a single thought
+- Don't
+  - Cram multiple points into one line
+Indentation discipline
+- Do
+  - Only go deeper when genuinely more specific
+- Don't  
+  - Indent randomly to break up visual space
+Brevity
+- Do
+  - Use keywords and short phrases
+- Don't  
+  - Write long paragraph sentences in bullets
+```
+</tips>

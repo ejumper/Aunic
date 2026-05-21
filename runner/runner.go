@@ -22,7 +22,7 @@ import (
 	"github.com/ejumper/aunic/transcript"
 )
 
-const maxSteps = 10
+const maxSteps = 100
 
 // ModeNote and ModeChat select runner behavior on plain-text responses and
 // available tool names. ModeNote (the original behavior) nudges the model
@@ -168,6 +168,10 @@ func StartCmd(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptio
 // Run executes the agent loop synchronously, emitting events via emit().
 // Returns when the run ends (finished, error, cancelled, or max steps).
 func Run(ctx context.Context, cfg llm.Config, rc *RunContext, opts RunOptions, emit func(tea.Msg)) {
+	if cfg.ProviderKind == "agent_sdk" {
+		runAgentSDK(ctx, cfg, rc, opts, emit)
+		return
+	}
 	mode := opts.Mode
 	if mode == "" {
 		mode = ModeNote

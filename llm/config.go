@@ -21,6 +21,13 @@ type Config struct {
 	ProviderKey  string // e.g. "llamacpp"
 	ModelKey     string // e.g. "qwen9b"
 
+	// ProviderKind selects the runner backend. "" or "openai" → OpenAI-compatible
+	// HTTP client. "agent_sdk" → Claude Agent SDK via the Node.js bridge.
+	ProviderKind string
+	// Effort maps to the Agent SDK's effort level when ProviderKind == "agent_sdk".
+	// Valid values: "low", "medium", "high", "xhigh", "max". Empty → "medium".
+	Effort string
+
 	parseError string // non-empty when the config file was found but malformed
 }
 
@@ -40,10 +47,41 @@ type providerConfig struct {
 	BaseURL string                 `json:"base_url"`
 	APIKey  string                 `json:"api_key,omitempty"` // may be "{env:VAR}"
 	Models  map[string]modelConfig `json:"models"`
+	// Kind selects the backend. "" or "openai" → OpenAI-compatible HTTP client
+	// (the default). "agent_sdk" → Claude Agent SDK via the Node.js bridge.
+	Kind string `json:"kind,omitempty"`
+	// Enabled is honoured for agent_sdk providers: when false, the provider's
+	// models are filtered out of AllModels() (so they don't appear in the
+	// picker). openai-kind providers default to enabled.
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 type modelConfig struct {
 	Name string `json:"name"`
+	// ID is the canonical model ID sent to the SDK or API. Defaults to the
+	// model's key in the parent providerConfig.Models map.
+	ID string `json:"id,omitempty"`
+	// Effort maps to the Agent SDK's effort level. Only meaningful when the
+	// parent provider's Kind == "agent_sdk".
+	Effort string `json:"effort,omitempty"`
+}
+
+// providerEnabled returns true when the provider is enabled. openai-kind
+// providers default to enabled; agent_sdk-kind providers default to disabled
+// (must be opted in explicitly).
+func providerEnabled(p providerConfig) bool {
+	if p.Enabled != nil {
+		return *p.Enabled
+	}
+	return p.Kind != "agent_sdk"
+}
+
+// modelID returns the API-facing model ID, falling back to the map key.
+func modelID(m modelConfig, key string) string {
+	if m.ID != "" {
+		return m.ID
+	}
+	return key
 }
 
 // ── Loader ────────────────────────────────────────────────────────────────────
@@ -111,11 +149,13 @@ func parseFileConfig(data []byte) (Config, error) {
 	return Config{
 		BaseURL:      baseURL,
 		APIKey:       resolveEnvRef(prov.APIKey),
-		Model:        modelKey,
+		Model:        modelID(mod, modelKey),
 		ProviderName: prov.Name,
 		ModelName:    mod.Name,
 		ProviderKey:  provKey,
 		ModelKey:     modelKey,
+		ProviderKind: prov.Kind,
+		Effort:       mod.Effort,
 	}, nil
 }
 
@@ -173,7 +213,8 @@ type ModelEntry struct {
 }
 
 // AllModels returns all configured models sorted by provider key then model key.
-// Returns nil if aunic.json is missing or unparseable.
+// Returns nil if aunic.json is missing or unparseable. Disabled providers
+// (notably opt-in agent_sdk providers) are skipped.
 func AllModels() []ModelEntry {
 	providers := AllProviders()
 	if providers == nil {
@@ -181,6 +222,9 @@ func AllModels() []ModelEntry {
 	}
 	var entries []ModelEntry
 	for pk, p := range providers {
+		if !providerEnabled(p) {
+			continue
+		}
 		for mk, m := range p.Models {
 			entries = append(entries, ModelEntry{
 				ProviderKey:  pk,
@@ -224,10 +268,12 @@ func ConfigForModel(providerKey, modelKey string) (Config, error) {
 	return Config{
 		BaseURL:      baseURL,
 		APIKey:       resolveEnvRef(prov.APIKey),
-		Model:        modelKey,
+		Model:        modelID(mod, modelKey),
 		ProviderName: prov.Name,
 		ModelName:    mod.Name,
 		ProviderKey:  providerKey,
 		ModelKey:     modelKey,
+		ProviderKind: prov.Kind,
+		Effort:       mod.Effort,
 	}, nil
 }

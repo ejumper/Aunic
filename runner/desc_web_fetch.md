@@ -1,4 +1,4 @@
-Fetch a URL and return its content as markdown. Use iteratively after web_search or when you already know the URL.
+Fetch a URL from the internet and return its content as markdown. Use iteratively after web_search or when you already know the URL.
 
 <parameters>
 - url: The URL to fetch. HTTP or HTTPS only. Required.

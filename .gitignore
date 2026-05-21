@@ -10,3 +10,6 @@ go.work.sum
 # Test scratch files
 test*.md
 test*.txt
+
+# Node / bridge dependencies
+bridge/node_modules/

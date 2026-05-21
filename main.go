@@ -9,6 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ejumper/aunic/bridge"
 	"github.com/ejumper/aunic/llm"
 	"github.com/ejumper/aunic/logs"
 )
@@ -55,7 +56,16 @@ func main() {
 		}
 	}
 
-	m := newApp(filepath, string(content), llm.LoadConfig())
+	cfg := llm.LoadConfig()
+	// If the active model is agent_sdk-backed, the Node bridge is required.
+	// Warn (not fatal) at startup so the user sees the problem before sending.
+	if cfg.ProviderKind == "agent_sdk" {
+		if err := bridge.CheckNode(); err != nil {
+			slog.Warn("bridge_precheck", "error", err.Error())
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+		}
+	}
+	m := newApp(filepath, string(content), cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithFilter(kittyInputFilter))
 
 	if _, err := p.Run(); err != nil {

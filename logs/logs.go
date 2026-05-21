@@ -41,15 +41,34 @@ func Close() {
 	}
 }
 
-// DefaultPath returns <cwd>/aunic-logging/tech-logs/aunic.log.
-// Falls back to ~/.local/share/aunic/aunic.log if the working directory
-// cannot be determined.
+// DefaultPath returns <binary-dir>/aunic-logging/tech-logs/aunic.log.
+// Falls back to <cwd>/aunic-logging/tech-logs/aunic.log, then
+// ~/.local/share/aunic/aunic.log.
 func DefaultPath() string {
+	return filepath.Join(BaseLogDir(), "tech-logs", "aunic.log")
+}
+
+// BaseLogDir resolves the aunic-logging root. Search order:
+//
+//  1. $AUNIC_LOG_DIR (explicit override — useful during development)
+//  2. <binary-dir>/aunic-logging/ (production: binary ships with sibling dir)
+//  3. <cwd>/aunic-logging/
+//  4. ~/.local/share/aunic/aunic-logging/
+func BaseLogDir() string {
+	if env := os.Getenv("AUNIC_LOG_DIR"); env != "" {
+		return env
+	}
+	if exe, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		return filepath.Join(filepath.Dir(exe), "aunic-logging")
+	}
 	if dir, err := os.Getwd(); err == nil {
-		return filepath.Join(dir, "aunic-logging", "tech-logs", "aunic.log")
+		return filepath.Join(dir, "aunic-logging")
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".local", "share", "aunic", "aunic.log")
+	return filepath.Join(home, ".local", "share", "aunic", "aunic-logging")
 }
 
 // prettyHandler writes each log record as indented JSON followed by a blank line.

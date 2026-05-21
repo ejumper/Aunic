@@ -255,6 +255,17 @@ func (tb TranscriptBar) IsCollapsed() bool { return tb.collapsed }
 // A collapsed bar is never full-height regardless of the flag.
 func (tb TranscriptBar) IsFullHeight() bool { return tb.fullHeight && !tb.collapsed }
 
+// SetCollapsed forces the collapsed flag (used to restore persisted UI
+// state on file load). Invalidates cached layout.
+func (tb *TranscriptBar) SetCollapsed(v bool) {
+	tb.collapsed = v
+	tb.invalidateCache()
+}
+
+// SetFullHeight forces the fullHeight flag (used to restore persisted UI
+// state on file load).
+func (tb *TranscriptBar) SetFullHeight(v bool) { tb.fullHeight = v }
+
 // ── Height ──────────────────────────────────────────────────────────────────
 
 // Height returns the number of terminal rows the bar wants. The caller (app.go)

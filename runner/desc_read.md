@@ -1,4 +1,4 @@
-Read a file from the filesystem with line numbers. Does not end the run.
+Read a file from the filesystem with line numbers.
 
 <parameters>
 - file_path: Absolute path to the file to read. Required.

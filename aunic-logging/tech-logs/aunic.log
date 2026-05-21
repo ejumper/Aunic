@@ -1,0 +1,295 @@
+{
+  "args": [
+    "26-05-19_calculator-project_166e.log"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-19T22:48:21.401598087Z"
+}
+
+{
+  "args": [
+    "26-05-19_calculator-project_db35.log"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-19T22:48:47.561568092Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-20T17:09:43.505870184Z"
+}
+
+{
+  "agent_mode": "off",
+  "level": "INFO",
+  "mode": "chat",
+  "msg": "run_start",
+  "prompt_len": 39,
+  "time": "2026-05-20T17:10:30.047723458Z",
+  "todos": 0
+}
+
+{
+  "level": "DEBUG",
+  "messages": 38,
+  "model": "qwen9b",
+  "msg": "api_request",
+  "step": 0,
+  "time": "2026-05-20T17:10:30.055722396Z"
+}
+
+{
+  "duration": "1.211488525s",
+  "error": "Post \"http://0.0.0.0:8080/v1/chat/completions\": dial tcp 0.0.0.0:8080: connect: connection refused",
+  "level": "ERROR",
+  "msg": "api_error",
+  "step": 0,
+  "time": "2026-05-20T17:10:31.267226461Z"
+}
+
+{
+  "agent_mode": "off",
+  "level": "INFO",
+  "mode": "chat",
+  "msg": "run_start",
+  "prompt_len": 39,
+  "time": "2026-05-20T17:10:51.772155951Z",
+  "todos": 0
+}
+
+{
+  "level": "DEBUG",
+  "messages": 39,
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "msg": "api_request",
+  "step": 0,
+  "time": "2026-05-20T17:10:51.772407323Z"
+}
+
+{
+  "duration": "2m7.437637758s",
+  "input_tokens": 11579,
+  "level": "INFO",
+  "msg": "api_response",
+  "output_tokens": 2860,
+  "step": 0,
+  "stop_reason": "stop",
+  "time": "2026-05-20T17:12:59.210053091Z"
+}
+
+{
+  "elapsed": "2m7.438118832s",
+  "input_tokens": 11579,
+  "level": "INFO",
+  "msg": "run_finish",
+  "output_tokens": 2860,
+  "reason": "chat",
+  "time": "2026-05-20T17:12:59.210269563Z"
+}
+
+{
+  "args": [
+    "aunic.json"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-20T21:02:22.166194167Z"
+}
+
+{
+  "args": [
+    "/home/ejumps/.config/aunic/aunic.json"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-20T21:11:03.004357614Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:38:34.895445808Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:40:41.936104525Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:40:54.447881598Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:49:50.51814799Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:49:57.171489146Z"
+}
+
+{
+  "args": [
+    "test2.md"
+  ],
+  "level": "INFO",
+  "msg": "aunic start",
+  "time": "2026-05-21T02:54:38.948401569Z"
+}
+
+{
+  "agent_mode": "off",
+  "effort": "high",
+  "level": "INFO",
+  "mode": "note",
+  "model": "claude-haiku-4-5",
+  "msg": "run_start_agent_sdk",
+  "time": "2026-05-21T02:55:03.846491692Z"
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:10.072525322Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:10.20299228Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:10.35903093Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:18.688126572Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:19.37320371Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:19.404420554Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:26.48658242Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:27.018798361Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:55:53.288204487Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T02:56:29.553743211Z",
+  "tool": ""
+}
+
+{
+  "agent_mode": "off",
+  "effort": "high",
+  "level": "INFO",
+  "mode": "note",
+  "model": "claude-haiku-4-5",
+  "msg": "run_start_agent_sdk",
+  "time": "2026-05-21T03:11:11.770035821Z"
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T03:11:24.643499998Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T03:11:25.004306969Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T03:11:32.018061917Z",
+  "tool": ""
+}
+
+{
+  "level": "WARN",
+  "msg": "builtin_result_without_call",
+  "time": "2026-05-21T03:11:33.285875868Z",
+  "tool": ""
+}
+
+{
+  "elapsed": "36.745122479s",
+  "input_tokens": 640,
+  "level": "INFO",
+  "msg": "run_finish",
+  "output_tokens": 24,
+  "reason": "edit",
+  "time": "2026-05-21T03:11:48.51515944Z"
+}
+

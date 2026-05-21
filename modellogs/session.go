@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/ejumper/aunic/logs"
 )
 
 const (
@@ -25,16 +27,12 @@ type Session struct {
 	totalOut int
 }
 
-// Start opens a new session log file under <cwd>/aunic-logging/model-logs/.
+// Start opens a new session log file under <binary-dir>/aunic-logging/model-logs/.
 // File name: <yy-mm-dd>_<notename>_<id>.log
 // Returns nil and an error if the file cannot be created — callers should
 // log the error and continue without model logging.
 func Start(notePath string) (*Session, error) {
-	dir, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("modellogs: getwd: %w", err)
-	}
-	logDir := filepath.Join(dir, "aunic-logging", "model-logs")
+	logDir := filepath.Join(logs.BaseLogDir(), "model-logs")
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, fmt.Errorf("modellogs: mkdir: %w", err)
 	}
