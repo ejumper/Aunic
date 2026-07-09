@@ -1,19 +1,19 @@
 // Package markers parses Aunic's edit-command markers (@>><<@, %>><<%,
-// !>><<!, $>><<$) from raw note text and produces the artifacts the runner
-// needs: validation, the model-visible snapshot, the source map back to raw
-// offsets, and the policy hints that decide which note tools stay registered.
+// !>><<!, $>><<$) from raw note text and produces the model-visible snapshot
+// (marker tokens replaced by HTML-comment annotations, hidden regions elided),
+// nesting validation, and the editor highlight overlay ranges.
 //
-// $>><<$ is recognized so nesting rules can be enforced, but is not yet
-// semantically wired (read-only enforcement, comment substitution) — its
-// tokens are stripped from the visible snapshot and its body is left as
-// regular content.
+// Mechanical write enforcement (WritePolicy, protected-range checks,
+// ApplyEdits/ResolveEdit/ResolveWrite) was removed along with the built-in
+// note_write/note_edit tools it served — see git history. Marker boundaries
+// are currently honored at the prompt level only (the harness system prompts
+// explain the snapshot annotations to the model); re-adding enforcement for
+// the generic file-edit tools the harnesses use is still an open problem.
 package markers
 
 import (
 	"fmt"
-	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -67,65 +67,21 @@ type ValidationError struct {
 func (e *ValidationError) Error() string { return e.Message }
 
 // Slot is a single @>><<@ wrap mapped to its 1-based slot number used in the
-// model-visible snapshot and the note_edit_at form. Hidden wraps (those
-// outside !>><<! or inside %>><<%) never become slots.
+// model-visible snapshot's <!--Write/Rewrite #N--> annotations. Hidden wraps
+// (those outside !>><<! or inside %>><<%) never become slots.
 type Slot struct {
 	SpanIdx int
 	Number  int
 	Empty   bool
 }
 
-// WritePolicy describes how note_write is allowed to operate given the
-// current marker configuration.
-type WritePolicy int
-
-const (
-	// WritePolicyFull lets note_write replace the entire note body.
-	WritePolicyFull WritePolicy = iota
-	// WritePolicyScoped restricts note_write to a specific raw range
-	// (Snapshot.NoteWriteRange) — the include's body, or the writable region
-	// between edge-only excludes.
-	WritePolicyScoped
-	// WritePolicyForbidden removes note_write from the tool list entirely.
-	// Triggered by multiple !>><<! spans, by a %>><<% in the middle of
-	// writable content, or whenever @>><<@ scoped edits are active.
-	WritePolicyForbidden
-)
-
-// Range is a half-open [Start, End) raw byte range.
-type Range struct {
-	Start int
-	End   int
-}
-
-// SourceSegment maps a span of visible (model-seen) text back to a span of
-// raw note text. Visible offsets are within Snapshot.Visible, raw offsets
-// are within Snapshot.Raw. The two spans always have equal length.
-type SourceSegment struct {
-	VisibleStart int
-	VisibleEnd   int
-	RawStart     int
-	RawEnd       int
-}
-
-// Snapshot is the full set of artifacts produced from a parsed note that the
-// runner and tools need: the visible text the model sees, the source map
-// back to raw offsets, the surviving @>><<@ slots in numbering order, and
-// the note_write policy.
+// Snapshot is the model-visible rendering of a parsed note.
 type Snapshot struct {
-	Raw            string
-	Visible        string
-	SourceMap      []SourceSegment
-	Slots          []Slot
-	WritePolicy    WritePolicy
-	NoteWriteRange Range
-	// Protected lists raw byte ranges covered by visible $>> <<$ spans.
-	// ResolveEdit rejects any edit whose raw range overlaps one of these.
-	Protected []Range
+	Raw     string
+	Visible string
 	// HasShaping is true when at least one !>><<!, %>><<%, or $>><<$ span
-	// exists. Callers use this to decide whether note_edit must go through
-	// the source map (and protection check) rather than a plain string
-	// find/replace.
+	// exists. Callers use this to decide whether the injected note context
+	// needs the marker-annotation explanation.
 	HasShaping bool
 }
 
@@ -455,28 +411,23 @@ func (p Parse) protectedRenders() []protectedRender {
 	return out
 }
 
-// BuildSnapshot produces the artifacts needed by the runner and the
-// note-edit/note-write apply paths: the model-visible text, a source map
-// back to the raw note, the surviving @>><<@ slots, the protected ranges
-// from $>><<$, and the note_write policy. Call Validate first if you need
-// nesting violations rejected.
+// BuildSnapshot produces the model-visible text of a parsed note: marker
+// tokens are replaced by HTML-comment annotations and hidden regions are
+// elided. Call Validate first if you need nesting violations rejected.
 //
-// The walk uses two indexed maps — leadingByOpenStart and
-// trailingByCloseStart — so nested marker bodies are emitted naturally:
-// the opener's leading comment is written at OpenStart, the body content
-// is walked through normally (potentially encountering nested markers),
-// and the closer's trailing comment is written at CloseStart.
+// The walk uses two indexed maps — leading and trailing — so nested marker
+// bodies are emitted naturally: the opener's comment is written at OpenStart,
+// the body content is walked through normally (potentially encountering
+// nested markers), and the closer's comment is written at CloseStart.
 func (p Parse) BuildSnapshot() Snapshot {
 	text := p.Text
 	vis := p.computeVisibility()
 	wrap := p.wrapperMask()
-	slots := p.Slots()
 
 	leading := make(map[int]string)
 	trailing := make(map[int]string)
-	var protected []Range
 
-	for _, sl := range slots {
+	for _, sl := range p.Slots() {
 		sp := p.Spans[sl.SpanIdx]
 		if sl.Empty {
 			leading[sp.OpenStart] = fmt.Sprintf("<!--Write #%d location-->", sl.Number)
@@ -494,27 +445,13 @@ func (p Parse) BuildSnapshot() Snapshot {
 		}
 		leading[sp.OpenStart] = fmt.Sprintf("<!--PROTECTED #%d start: NO EDITS-->", pr.number)
 		trailing[sp.CloseStart] = fmt.Sprintf("<!--PROTECTED #%d end-->", pr.number)
-		protected = append(protected, Range{Start: sp.BodyStart(), End: sp.BodyEnd()})
 	}
 
 	var b strings.Builder
-	var segs []SourceSegment
-
-	chunkRawStart := -1
-	chunkVisStart := 0
+	inChunk := false
 	pendingElision := false
 
-	flushChunk := func(rawEnd int) {
-		if chunkRawStart >= 0 {
-			segs = append(segs, SourceSegment{
-				VisibleStart: chunkVisStart,
-				VisibleEnd:   b.Len(),
-				RawStart:     chunkRawStart,
-				RawEnd:       rawEnd,
-			})
-			chunkRawStart = -1
-		}
-	}
+	flushChunk := func() { inChunk = false }
 	emitElisionIfPending := func() {
 		if pendingElision {
 			b.WriteString(elidedPlaceholder)
@@ -526,321 +463,44 @@ func (p Parse) BuildSnapshot() Snapshot {
 	n := len(text)
 	for i < n {
 		if lead, ok := leading[i]; ok {
-			flushChunk(i)
+			flushChunk()
 			emitElisionIfPending()
 			b.WriteString(lead)
 		}
 		if tail, ok := trailing[i]; ok {
-			flushChunk(i)
+			flushChunk()
 			b.WriteString(tail)
 		}
 
 		if wrap[i] {
-			flushChunk(i)
+			flushChunk()
 			i++
 			continue
 		}
 
 		if !vis[i] {
-			flushChunk(i)
+			flushChunk()
 			pendingElision = true
 			i++
 			continue
 		}
 
-		if chunkRawStart < 0 {
+		if !inChunk {
 			emitElisionIfPending()
-			chunkRawStart = i
-			chunkVisStart = b.Len()
+			inChunk = true
 		}
 		b.WriteByte(text[i])
 		i++
 	}
-	flushChunk(n)
 	if pendingElision {
 		b.WriteString(elidedPlaceholder)
 	}
 
-	policy, rng := computeWritePolicy(p, vis, wrap)
-
 	return Snapshot{
-		Raw:            text,
-		Visible:        b.String(),
-		SourceMap:      segs,
-		Slots:          slots,
-		WritePolicy:    policy,
-		NoteWriteRange: rng,
-		Protected:      protected,
-		HasShaping:     hasShaping(p),
+		Raw:        text,
+		Visible:    b.String(),
+		HasShaping: hasShaping(p),
 	}
-}
-
-// computeWritePolicy applies the policy table: any $>><<$ → forbidden;
-// multiple includes → forbidden; single include → scoped to the include
-// body; middle exclude → forbidden; edge-only excludes → scoped between
-// them; else full.
-func computeWritePolicy(p Parse, vis, wrap []bool) (WritePolicy, Range) {
-	var includes, excludes []int
-	hasReadOnly := false
-	for i, s := range p.Spans {
-		switch s.Kind {
-		case KindIncludeOnly:
-			includes = append(includes, i)
-		case KindExclude:
-			excludes = append(excludes, i)
-		case KindReadOnly:
-			hasReadOnly = true
-		}
-	}
-
-	// A visible $>><<$ anywhere makes a full-note write unsafe: the model
-	// can't reliably reproduce protected content byte-for-byte from the
-	// commented snapshot. %>><<%-buried $>><<$ doesn't count — the model
-	// never sees those, so they don't constrain writability.
-	if hasReadOnly && anyVisibleReadOnly(p) {
-		return WritePolicyForbidden, Range{}
-	}
-
-	if len(includes) > 1 {
-		return WritePolicyForbidden, Range{}
-	}
-	if len(includes) == 1 {
-		s := p.Spans[includes[0]]
-		return WritePolicyScoped, Range{Start: s.BodyStart(), End: s.BodyEnd()}
-	}
-	if len(excludes) == 0 {
-		return WritePolicyFull, Range{Start: 0, End: len(p.Text)}
-	}
-
-	firstVisible, lastVisible := -1, -1
-	for i := range vis {
-		if vis[i] && !wrap[i] {
-			if firstVisible < 0 {
-				firstVisible = i
-			}
-			lastVisible = i
-		}
-	}
-
-	topEnd := 0
-	botStart := len(p.Text)
-	hasTop, hasBot := false, false
-	for _, idx := range excludes {
-		s := p.Spans[idx]
-		isTop := firstVisible < 0 || s.CloseEnd <= firstVisible
-		isBot := lastVisible < 0 || s.OpenStart > lastVisible
-		switch {
-		case isTop:
-			hasTop = true
-			if s.CloseEnd > topEnd {
-				topEnd = s.CloseEnd
-			}
-		case isBot:
-			hasBot = true
-			if s.OpenStart < botStart {
-				botStart = s.OpenStart
-			}
-		default:
-			return WritePolicyForbidden, Range{}
-		}
-	}
-	if !hasTop {
-		topEnd = 0
-	}
-	if !hasBot {
-		botStart = len(p.Text)
-	}
-	return WritePolicyScoped, Range{Start: topEnd, End: botStart}
-}
-
-// ApplyEdits returns text with each requested slot's body replaced by the
-// supplied content. Slot keys may be numeric strings ("1"). The @>> and
-// <<@ markers themselves are preserved. Submitting an empty string deletes
-// the body (the markers remain so the wrap stays available for the next
-// turn).
-func (p Parse) ApplyEdits(text string, edits map[string]string) (newText string, applied []int, err error) {
-	slots := p.Slots()
-	if len(slots) == 0 && len(edits) > 0 {
-		return text, nil, fmt.Errorf("no @>> <<@ slots exist in the current note")
-	}
-	byNum := make(map[int]Slot, len(slots))
-	valid := make([]int, 0, len(slots))
-	for _, s := range slots {
-		byNum[s.Number] = s
-		valid = append(valid, s.Number)
-	}
-	sort.Ints(valid)
-
-	type op struct {
-		start, end int
-		content    string
-		slot       int
-	}
-	ops := make([]op, 0, len(edits))
-	for key, content := range edits {
-		num, convErr := strconv.Atoi(strings.TrimPrefix(strings.TrimSpace(key), "#"))
-		if convErr != nil {
-			return text, nil, fmt.Errorf("invalid slot key %q (expected an integer like \"1\")", key)
-		}
-		sl, ok := byNum[num]
-		if !ok {
-			return text, nil, fmt.Errorf("slot #%d does not exist; valid slots are %s", num, formatSlotList(valid))
-		}
-		sp := p.Spans[sl.SpanIdx]
-		ops = append(ops, op{
-			start:   sp.BodyStart(),
-			end:     sp.BodyEnd(),
-			content: stripScopeComments(content),
-			slot:    num,
-		})
-	}
-	sort.Slice(ops, func(a, b int) bool { return ops[a].start > ops[b].start })
-
-	out := text
-	done := make([]int, 0, len(ops))
-	for _, o := range ops {
-		out = out[:o.start] + o.content + out[o.end:]
-		done = append(done, o.slot)
-	}
-	sort.Ints(done)
-	return out, done, nil
-}
-
-// EditConflict classifies the outcome of ResolveEdit when the requested
-// edit cannot be applied. Matches editor.ConflictKind so the runner
-// surfaces the same diagnostics as the non-shaped path, plus
-// EditConflictProtected for $>><<$ hits.
-type EditConflict int
-
-const (
-	EditConflictNone EditConflict = iota
-	EditConflictNotFound
-	EditConflictAmbiguous
-	EditConflictProtected
-)
-
-// anyVisibleReadOnly reports whether at least one $>><<$ span survives
-// content shaping — i.e., its body is not entirely buried inside a
-// %>><<% region.
-func anyVisibleReadOnly(p Parse) bool {
-	vis := p.computeVisibility()
-	for _, s := range p.Spans {
-		if s.Kind != KindReadOnly {
-			continue
-		}
-		probe := s.OpenEnd
-		if s.BodyStart() != s.BodyEnd() {
-			probe = s.BodyStart()
-		}
-		if probe >= len(vis) || vis[probe] {
-			return true
-		}
-	}
-	return false
-}
-
-func overlapsAny(start, end int, ranges []Range) bool {
-	for _, r := range ranges {
-		if start < r.End && end > r.Start {
-			return true
-		}
-	}
-	return false
-}
-
-// ResolveEdit performs a snapshot-aware note_edit: it finds old in the
-// visible text, maps the match back to raw offsets through the source
-// map, and applies the replacement on the raw text. Matches that fall on
-// the placeholder/HTML comment text (no source mapping) are ignored. If
-// no valid match remains the result reports NotFound; if more than one
-// match exists without replace_all the result reports Ambiguous.
-func (s Snapshot) ResolveEdit(old, new string, replaceAll bool) (updated string, count int, conflict EditConflict) {
-	if old == "" {
-		return s.Raw, 0, EditConflictNotFound
-	}
-	var matches []match
-	protectedHits := 0
-	from := 0
-	for from < len(s.Visible) {
-		idx := strings.Index(s.Visible[from:], old)
-		if idx < 0 {
-			break
-		}
-		visStart := from + idx
-		if rawStart, ok := visibleToRaw(s.SourceMap, visStart, len(old)); ok {
-			if overlapsAny(rawStart, rawStart+len(old), s.Protected) {
-				protectedHits++
-			} else {
-				matches = append(matches, match{rawStart: rawStart, length: len(old)})
-			}
-		}
-		from = visStart + 1
-	}
-	if len(matches) == 0 {
-		if protectedHits > 0 {
-			return s.Raw, protectedHits, EditConflictProtected
-		}
-		return s.Raw, 0, EditConflictNotFound
-	}
-	if len(matches) > 1 && !replaceAll {
-		return s.Raw, len(matches), EditConflictAmbiguous
-	}
-	sort.Slice(matches, func(a, b int) bool { return matches[a].rawStart > matches[b].rawStart })
-	out := s.Raw
-	for _, m := range matches {
-		out = out[:m.rawStart] + new + out[m.rawStart+m.length:]
-	}
-	return out, len(matches), EditConflictNone
-}
-
-type match struct {
-	rawStart int
-	length   int
-}
-
-func visibleToRaw(segs []SourceSegment, visStart, length int) (int, bool) {
-	visEnd := visStart + length
-	for _, seg := range segs {
-		if visStart >= seg.VisibleStart && visEnd <= seg.VisibleEnd {
-			return seg.RawStart + (visStart - seg.VisibleStart), true
-		}
-	}
-	return 0, false
-}
-
-// ResolveWrite produces the raw text after a note_write call given the
-// snapshot's policy. For WritePolicyScoped, the content is spliced into
-// NoteWriteRange (the include body or the between-edges region) while
-// preserving the surrounding markers and untouched content. Returns
-// (rawText, false) when the policy is forbidden — callers should never
-// reach this path because the tool is dropped from the API list, but the
-// guard keeps the contract explicit.
-func (s Snapshot) ResolveWrite(content string) (string, bool) {
-	switch s.WritePolicy {
-	case WritePolicyFull:
-		return content, true
-	case WritePolicyScoped:
-		return s.Raw[:s.NoteWriteRange.Start] + content + s.Raw[s.NoteWriteRange.End:], true
-	}
-	return s.Raw, false
-}
-
-// stripScopeComments removes any <!--Write #N location--> or
-// <!--Rewrite #N start--> / <!--Rewrite #N end--> markers the model may
-// have accidentally echoed back inside its submitted content. They're
-// tool-machinery, not part of the user's note.
-var scopeCommentRe = regexp.MustCompile(`<!--(?:Write #\d+ location|Rewrite #\d+ (?:start|end))-->`)
-
-func stripScopeComments(s string) string {
-	return scopeCommentRe.ReplaceAllString(s, "")
-}
-
-func formatSlotList(nums []int) string {
-	parts := make([]string, 0, len(nums))
-	for _, n := range nums {
-		parts = append(parts, fmt.Sprintf("#%d", n))
-	}
-	return strings.Join(parts, ", ")
 }
 
 // StripMarkers removes the opener and closer tokens of all matched spans

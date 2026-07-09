@@ -32,12 +32,10 @@ func BuildPrompt(userPrompt, noteCtx, webCtx string) string {
 // the note actually uses shaping markers (snap.HasShaping) — keeps the
 // common (no-markers) case free of unused-concept noise.
 //
-// This is a prompt-level mitigation, not real enforcement: markers.Snapshot's
-// write-scope/exclude/protected machinery (WritePolicy, Protected, Slots,
-// ApplyEdits/ResolveEdit/ResolveWrite) is fully implemented but consumed
-// nowhere in this harness — it was built for a bespoke note_write/note_edit
-// tool interface that no longer exists. There is no code path that would
-// reject or repair a violation of the boundaries described in the legend.
+// This is a prompt-level mitigation, not real enforcement: the mechanical
+// write-enforcement machinery was removed with the built-in note tools (see
+// the markers package doc), so no code path rejects or repairs a violation
+// of the boundaries described in the legend.
 func BuildNoteContext(notePath string, snap markers.Snapshot) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<note-context path=%q>\n", notePath)

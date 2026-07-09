@@ -32,9 +32,6 @@ func TestBuildSnapshot_EmptyWrap(t *testing.T) {
 	if snap.HasShaping {
 		t.Errorf("HasShaping should be false")
 	}
-	if snap.WritePolicy != WritePolicyFull {
-		t.Errorf("want WritePolicyFull, got %v", snap.WritePolicy)
-	}
 }
 
 func TestBuildSnapshot_Rewrite(t *testing.T) {
@@ -98,9 +95,6 @@ func TestBuildSnapshot_Exclude_Middle(t *testing.T) {
 	if !snap.HasShaping {
 		t.Errorf("HasShaping should be true")
 	}
-	if snap.WritePolicy != WritePolicyForbidden {
-		t.Errorf("middle exclude → forbidden, got %v", snap.WritePolicy)
-	}
 }
 
 func TestBuildSnapshot_Exclude_TopOnly(t *testing.T) {
@@ -108,12 +102,6 @@ func TestBuildSnapshot_Exclude_TopOnly(t *testing.T) {
 	snap := Scan(text).BuildSnapshot()
 	if !strings.HasPrefix(snap.Visible, "<!-- elided -->") {
 		t.Errorf("missing leading elision: %q", snap.Visible)
-	}
-	if snap.WritePolicy != WritePolicyScoped {
-		t.Errorf("edge-only exclude → scoped, got %v", snap.WritePolicy)
-	}
-	if snap.NoteWriteRange.Start == 0 {
-		t.Errorf("scoped range should start after the top exclude close, got %+v", snap.NoteWriteRange)
 	}
 }
 
@@ -123,9 +111,6 @@ func TestBuildSnapshot_Exclude_BottomOnly(t *testing.T) {
 	if !strings.HasSuffix(snap.Visible, "<!-- elided -->") {
 		t.Errorf("missing trailing elision: %q", snap.Visible)
 	}
-	if snap.WritePolicy != WritePolicyScoped {
-		t.Errorf("edge-only exclude → scoped, got %v", snap.WritePolicy)
-	}
 }
 
 func TestBuildSnapshot_Exclude_BothEdges(t *testing.T) {
@@ -134,17 +119,6 @@ func TestBuildSnapshot_Exclude_BothEdges(t *testing.T) {
 	want := "<!-- elided --> middle <!-- elided -->"
 	if snap.Visible != want {
 		t.Errorf("got %q, want %q", snap.Visible, want)
-	}
-	if snap.WritePolicy != WritePolicyScoped {
-		t.Errorf("edge-only → scoped, got %v", snap.WritePolicy)
-	}
-}
-
-func TestBuildSnapshot_Exclude_MiddleAndEdge_Forbidden(t *testing.T) {
-	text := "%>>top<<% middle %>>mid<<% more %>>bot<<%"
-	snap := Scan(text).BuildSnapshot()
-	if snap.WritePolicy != WritePolicyForbidden {
-		t.Errorf("middle exclude with surrounding writable → forbidden, got %v", snap.WritePolicy)
 	}
 }
 
@@ -157,17 +131,11 @@ func TestBuildSnapshot_IncludeOnly_Single(t *testing.T) {
 	if snap.Visible != want {
 		t.Errorf("got %q, want %q", snap.Visible, want)
 	}
-	if snap.WritePolicy != WritePolicyScoped {
-		t.Errorf("single include → scoped, got %v", snap.WritePolicy)
-	}
 }
 
-func TestBuildSnapshot_IncludeOnly_Multiple_Forbidden(t *testing.T) {
+func TestBuildSnapshot_IncludeOnly_Multiple(t *testing.T) {
 	text := "!>>a<<! middle !>>b<<!"
 	snap := Scan(text).BuildSnapshot()
-	if snap.WritePolicy != WritePolicyForbidden {
-		t.Errorf("multiple include → forbidden, got %v", snap.WritePolicy)
-	}
 	want := "a<!-- elided -->b"
 	if snap.Visible != want {
 		t.Errorf("got %q, want %q", snap.Visible, want)
@@ -178,20 +146,22 @@ func TestBuildSnapshot_IncludeOnly_Multiple_Forbidden(t *testing.T) {
 
 func TestBuildSnapshot_Scope_InsideIncludeOnly(t *testing.T) {
 	text := "before !>> @>><<@ <<! after"
-	snap := Scan(text).BuildSnapshot()
+	p := Scan(text)
+	snap := p.BuildSnapshot()
 	if !strings.Contains(snap.Visible, "<!--Write #1 location-->") {
 		t.Errorf("slot should be visible inside !>><<!: %q", snap.Visible)
 	}
-	if len(snap.Slots) != 1 {
-		t.Errorf("want 1 slot, got %d", len(snap.Slots))
+	if len(p.Slots()) != 1 {
+		t.Errorf("want 1 slot, got %d", len(p.Slots()))
 	}
 }
 
 func TestBuildSnapshot_Scope_OutsideIncludeOnly_NotASlot(t *testing.T) {
 	text := "@>><<@ before !>>shown<<! @>><<@"
-	snap := Scan(text).BuildSnapshot()
-	if len(snap.Slots) != 0 {
-		t.Errorf("wraps outside !>><<! should not be slots, got %d", len(snap.Slots))
+	p := Scan(text)
+	snap := p.BuildSnapshot()
+	if len(p.Slots()) != 0 {
+		t.Errorf("wraps outside !>><<! should not be slots, got %d", len(p.Slots()))
 	}
 	if strings.Contains(snap.Visible, "Write #") {
 		t.Errorf("no slot comments expected in visible: %q", snap.Visible)
@@ -200,112 +170,12 @@ func TestBuildSnapshot_Scope_OutsideIncludeOnly_NotASlot(t *testing.T) {
 
 func TestBuildSnapshot_Scope_InsideExclude_Swallowed(t *testing.T) {
 	text := "%>> ignore @>><<@ this <<% @>>real<<@"
-	snap := Scan(text).BuildSnapshot()
-	if len(snap.Slots) != 1 {
-		t.Fatalf("want 1 surviving slot, got %d", len(snap.Slots))
+	slots := Scan(text).Slots()
+	if len(slots) != 1 {
+		t.Fatalf("want 1 surviving slot, got %d", len(slots))
 	}
-	if snap.Slots[0].Empty {
+	if slots[0].Empty {
 		t.Errorf("surviving slot should be Rewrite")
-	}
-}
-
-// ── Source map for ResolveEdit ───────────────────────────────────────────
-
-func TestResolveEdit_AcrossElision_NoMatch(t *testing.T) {
-	text := "before %>>hidden<<% after"
-	snap := Scan(text).BuildSnapshot()
-	// Visible: "before <!-- elided --> after"
-	// Try to replace across the elision boundary
-	_, _, conflict := snap.ResolveEdit("before  after", "X", false)
-	if conflict != EditConflictNotFound {
-		t.Errorf("expected NotFound across elision, got %v", conflict)
-	}
-}
-
-func TestResolveEdit_VisibleMatch_AppliesToRaw(t *testing.T) {
-	text := "before %>>hidden<<% after"
-	snap := Scan(text).BuildSnapshot()
-	updated, count, conflict := snap.ResolveEdit("after", "AFTER", false)
-	if conflict != EditConflictNone || count != 1 {
-		t.Fatalf("expected single clean match, got count=%d conflict=%v", count, conflict)
-	}
-	if updated != "before %>>hidden<<% AFTER" {
-		t.Errorf("got %q", updated)
-	}
-}
-
-func TestResolveEdit_OnlyHiddenMatch_NotFound(t *testing.T) {
-	text := "%>>secret<<% public"
-	snap := Scan(text).BuildSnapshot()
-	_, _, conflict := snap.ResolveEdit("secret", "X", false)
-	if conflict != EditConflictNotFound {
-		t.Errorf("hidden-only match should be NotFound, got %v", conflict)
-	}
-}
-
-func TestResolveEdit_AmbiguousVisible(t *testing.T) {
-	text := "foo bar foo"
-	snap := Scan(text).BuildSnapshot()
-	_, count, conflict := snap.ResolveEdit("foo", "X", false)
-	if conflict != EditConflictAmbiguous || count != 2 {
-		t.Errorf("expected Ambiguous (count=2), got count=%d conflict=%v", count, conflict)
-	}
-}
-
-func TestResolveEdit_ReplaceAll(t *testing.T) {
-	text := "foo bar %>>foo<<% foo"
-	snap := Scan(text).BuildSnapshot()
-	updated, count, conflict := snap.ResolveEdit("foo", "X", true)
-	if conflict != EditConflictNone || count != 2 {
-		t.Fatalf("expected 2 visible matches replaced, got count=%d conflict=%v", count, conflict)
-	}
-	// Hidden foo stays untouched
-	if updated != "X bar %>>foo<<% X" {
-		t.Errorf("got %q", updated)
-	}
-}
-
-// ── ResolveWrite ─────────────────────────────────────────────────────────
-
-func TestResolveWrite_Full(t *testing.T) {
-	text := "anything"
-	snap := Scan(text).BuildSnapshot()
-	out, ok := snap.ResolveWrite("brand new")
-	if !ok || out != "brand new" {
-		t.Errorf("got ok=%v out=%q", ok, out)
-	}
-}
-
-func TestResolveWrite_ScopedInclude(t *testing.T) {
-	text := "before !>>old<<! after"
-	snap := Scan(text).BuildSnapshot()
-	out, ok := snap.ResolveWrite("NEW")
-	if !ok {
-		t.Fatal("scoped write should be allowed")
-	}
-	if out != "before !>>NEW<<! after" {
-		t.Errorf("got %q", out)
-	}
-}
-
-func TestResolveWrite_ScopedExcludeEdges(t *testing.T) {
-	text := "%>>top<<% middle %>>bot<<%"
-	snap := Scan(text).BuildSnapshot()
-	out, ok := snap.ResolveWrite("NEW")
-	if !ok {
-		t.Fatal("scoped write should be allowed")
-	}
-	if out != "%>>top<<%NEW%>>bot<<%" {
-		t.Errorf("got %q", out)
-	}
-}
-
-func TestResolveWrite_Forbidden(t *testing.T) {
-	text := "!>>a<<! middle !>>b<<!"
-	snap := Scan(text).BuildSnapshot()
-	_, ok := snap.ResolveWrite("X")
-	if ok {
-		t.Error("forbidden policy should refuse write")
 	}
 }
 
@@ -336,14 +206,8 @@ func TestBuildSnapshot_ReadOnly_Empty(t *testing.T) {
 	if snap.Visible != want {
 		t.Errorf("got %q, want %q", snap.Visible, want)
 	}
-	if len(snap.Protected) != 0 {
-		t.Errorf("empty $>><<$ should produce no Protected range, got %+v", snap.Protected)
-	}
 	if !snap.HasShaping {
 		t.Errorf("$>><<$ should set HasShaping")
-	}
-	if snap.WritePolicy != WritePolicyForbidden {
-		t.Errorf("$>><<$ should forbid note_write, got %v", snap.WritePolicy)
 	}
 }
 
@@ -354,66 +218,6 @@ func TestBuildSnapshot_ReadOnly_NonEmpty(t *testing.T) {
 	if snap.Visible != want {
 		t.Errorf("got %q, want %q", snap.Visible, want)
 	}
-	if len(snap.Protected) != 1 {
-		t.Fatalf("expected 1 Protected range, got %d", len(snap.Protected))
-	}
-}
-
-func TestResolveEdit_HitsProtected_ReturnsProtected(t *testing.T) {
-	text := "before $>>locked<<$ after"
-	snap := Scan(text).BuildSnapshot()
-	_, count, conflict := snap.ResolveEdit("locked", "X", false)
-	if conflict != EditConflictProtected {
-		t.Errorf("expected Protected, got %v", conflict)
-	}
-	if count != 1 {
-		t.Errorf("expected 1 protected hit count, got %d", count)
-	}
-}
-
-func TestResolveEdit_EditOutsideProtected_OK(t *testing.T) {
-	text := "before $>>locked<<$ after"
-	snap := Scan(text).BuildSnapshot()
-	updated, count, conflict := snap.ResolveEdit("after", "AFTER", false)
-	if conflict != EditConflictNone || count != 1 {
-		t.Fatalf("expected single clean match, got count=%d conflict=%v", count, conflict)
-	}
-	if updated != "before $>>locked<<$ AFTER" {
-		t.Errorf("got %q", updated)
-	}
-}
-
-func TestResolveEdit_PartialOverlapProtected_ReturnsProtected(t *testing.T) {
-	text := "abc$>>locked<<$xyz"
-	snap := Scan(text).BuildSnapshot()
-	// "locke" is entirely inside protected → blocked.
-	_, _, conflict := snap.ResolveEdit("locke", "X", false)
-	if conflict != EditConflictProtected {
-		t.Errorf("expected Protected, got %v", conflict)
-	}
-}
-
-func TestResolveEdit_VisibleCommentNotMappable(t *testing.T) {
-	text := "$>>x<<$"
-	snap := Scan(text).BuildSnapshot()
-	// The PROTECTED comment text isn't in any source segment, so any
-	// old_string that includes it should fail (not even valid in source map).
-	_, _, conflict := snap.ResolveEdit("<!--PROTECTED #1 start: NO EDITS-->x", "y", false)
-	if conflict != EditConflictNotFound {
-		t.Errorf("expected NotFound for old_string crossing comment text, got %v", conflict)
-	}
-}
-
-func TestResolveEdit_ReplaceAll_SkipsProtected(t *testing.T) {
-	text := "foo $>>foo<<$ foo"
-	snap := Scan(text).BuildSnapshot()
-	updated, count, conflict := snap.ResolveEdit("foo", "X", true)
-	if conflict != EditConflictNone || count != 2 {
-		t.Fatalf("expected 2 replacements outside protected, got count=%d conflict=%v", count, conflict)
-	}
-	if updated != "X $>>foo<<$ X" {
-		t.Errorf("got %q", updated)
-	}
 }
 
 func TestBuildSnapshot_ReadOnly_NestedInsideIncludeOnly(t *testing.T) {
@@ -422,9 +226,6 @@ func TestBuildSnapshot_ReadOnly_NestedInsideIncludeOnly(t *testing.T) {
 	if !strings.Contains(snap.Visible, "<!--PROTECTED #1 start: NO EDITS-->locked<!--PROTECTED #1 end-->") {
 		t.Errorf("nested $>><<$ inside !>><<! should render: %q", snap.Visible)
 	}
-	if len(snap.Protected) != 1 {
-		t.Errorf("nested $>><<$ should be tracked, got %d ranges", len(snap.Protected))
-	}
 }
 
 func TestBuildSnapshot_ReadOnly_BuriedInExclude_Skipped(t *testing.T) {
@@ -432,9 +233,6 @@ func TestBuildSnapshot_ReadOnly_BuriedInExclude_Skipped(t *testing.T) {
 	snap := Scan(text).BuildSnapshot()
 	if strings.Contains(snap.Visible, "PROTECTED") {
 		t.Errorf("$>><<$ buried in %%>><<%% should not render: %q", snap.Visible)
-	}
-	if len(snap.Protected) != 0 {
-		t.Errorf("buried $>><<$ should not track protection, got %d ranges", len(snap.Protected))
 	}
 }
 
@@ -446,70 +244,6 @@ func TestBuildSnapshot_NestedReadOnly(t *testing.T) {
 	}
 	if !strings.Contains(snap.Visible, "<!--PROTECTED #2 start: NO EDITS-->") {
 		t.Errorf("inner $>><<$ should render: %q", snap.Visible)
-	}
-	if len(snap.Protected) != 2 {
-		t.Errorf("both nested $>><<$ should be tracked, got %d", len(snap.Protected))
-	}
-}
-
-func TestResolveWrite_ReadOnly_Forbidden(t *testing.T) {
-	text := "before $>>locked<<$ after"
-	snap := Scan(text).BuildSnapshot()
-	_, ok := snap.ResolveWrite("anything")
-	if ok {
-		t.Error("note_write should be forbidden when $>><<$ is present")
-	}
-}
-
-// ── ApplyEdits (note_edit_at slot apply) ─────────────────────────────────
-
-func TestApplyEdits_EmptyToFilled(t *testing.T) {
-	text := "before @>><<@ after"
-	p := Scan(text)
-	out, applied, err := p.ApplyEdits(text, map[string]string{"1": "filled"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "before @>>filled<<@ after" {
-		t.Errorf("got %q", out)
-	}
-	if len(applied) != 1 || applied[0] != 1 {
-		t.Errorf("want applied=[1], got %v", applied)
-	}
-}
-
-func TestApplyEdits_MultipleOrder(t *testing.T) {
-	text := "@>><<@ X @>><<@ Y @>><<@"
-	p := Scan(text)
-	out, _, err := p.ApplyEdits(text, map[string]string{"1": "one", "2": "two", "3": "three"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "@>>one<<@ X @>>two<<@ Y @>>three<<@" {
-		t.Errorf("got %q", out)
-	}
-}
-
-func TestApplyEdits_BadSlot(t *testing.T) {
-	text := "@>><<@"
-	p := Scan(text)
-	_, _, err := p.ApplyEdits(text, map[string]string{"7": "x"})
-	if err == nil || !strings.Contains(err.Error(), "#7") {
-		t.Errorf("expected error naming #7, got %v", err)
-	}
-}
-
-func TestApplyEdits_StripsScopeComments(t *testing.T) {
-	text := "@>><<@"
-	p := Scan(text)
-	out, _, err := p.ApplyEdits(text, map[string]string{
-		"1": "<!--Write #1 location-->hello<!--Rewrite #1 start-->world<!--Rewrite #1 end-->",
-	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if out != "@>>helloworld<<@" {
-		t.Errorf("got %q", out)
 	}
 }
 
@@ -607,12 +341,9 @@ func TestHighlightRanges_NoMarkers(t *testing.T) {
 }
 
 func TestHighlightRanges_SingleInclude(t *testing.T) {
-	// !>>body<<!  — tokens get color 6 bg, body gets color 6 ul.
-	text := "!>>body<<!!"
-	// text bytes: !>>  (0-2), body (3-6), <<! (7-9), ! (10) — the last ! is not a closer
-	// Actually: "!>>" is bytes 0,1,2; "body" is 3,4,5,6; "<<!" is 7,8,9; "!" is 10
-	// Wait let me re-check the token lengths: "!>>" = 3 bytes, "<<!" = 3 bytes
-	text = "!>>body<<!"
+	// !>>body<<! — tokens get color 6 bg, body gets color 6 ul.
+	// "!>>" is bytes 0-2; "body" is 3-6; "<<!" is 7-9.
+	text := "!>>body<<!"
 	p := Scan(text)
 	if len(p.Spans) != 1 {
 		t.Fatalf("want 1 span, got %d", len(p.Spans))
