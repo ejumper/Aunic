@@ -21,8 +21,8 @@ type Todo struct {
 // Parse reads the body of a "## Todos" section (without the heading line) and
 // returns the todo list. Recognizes lines of the form:
 //
-//	- [ ] #N text
-//	- [x] #N text
+//   - [ ] #N text
+//   - [x] #N text
 //
 // Lines that don't match are skipped silently. Returns nil if no items found.
 func Parse(text string) []Todo {

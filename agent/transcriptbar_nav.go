@@ -22,10 +22,10 @@ const (
 	cellFilterSearch
 	cellFilterTools
 
-	cellRowExpand   // expand/collapse a row (search or fetch)
-	cellRowTool     // tool name button (filters when activated)
-	cellRowQuery    // query/url body — open in browser
-	cellRowDelete   // [x] — delete row
+	cellRowExpand // expand/collapse a row (search or fetch)
+	cellRowTool   // tool name button (filters when activated)
+	cellRowQuery  // query/url body — open in browser
+	cellRowDelete // [x] — delete row
 
 	cellHitExpand
 	cellHitURL

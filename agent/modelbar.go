@@ -8,15 +8,15 @@ import (
 
 // ModelItem is one entry in the model picker.
 type ModelItem struct {
-	HarnessKey  string
-	ModelKey    string
-	Name        string // display name from aunic.json
+	HarnessKey string
+	ModelKey   string
+	Name       string // display name from aunic.json
 }
 
 // ModelSelectedMsg is emitted when the user selects a model from the picker.
 type ModelSelectedMsg struct {
-	HarnessKey  string
-	ModelKey    string
+	HarnessKey string
+	ModelKey   string
 }
 
 // ModelBarClosedMsg is emitted when the model picker is dismissed without a selection.

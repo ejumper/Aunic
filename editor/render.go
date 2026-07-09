@@ -879,12 +879,12 @@ func buildView(lines []string, contentWidth, gutterW, cursorLine int, hlCache ma
 				b.WriteString(rowState.emit())
 			}
 
-		var written string
-		if h1 {
-			written = fillH1Underline(wl, contentWidth)
-		} else {
-			written = wl
-		}
+			var written string
+			if h1 {
+				written = fillH1Underline(wl, contentWidth)
+			} else {
+				written = wl
+			}
 			b.WriteString(written)
 			rowState = walkAnsiState(written, rowState)
 			b.WriteByte('\n')

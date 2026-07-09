@@ -421,9 +421,9 @@ func (m Model) View() string {
 	// with space-filled lines (not empty strings). Every real content row from
 	// buildView contains "│"; space-only padding rows do not. Replace those
 
- 	gutterPad := strings.Repeat(" ", m.gutterW-1) + "\x1b[90m│\x1b[0m"
- 	for i, line := range lines {
- 		if !strings.Contains(line, "│") {
+	gutterPad := strings.Repeat(" ", m.gutterW-1) + "\x1b[90m│\x1b[0m"
+	for i, line := range lines {
+		if !strings.Contains(line, "│") {
 			lines[i] = gutterPad
 		}
 	}

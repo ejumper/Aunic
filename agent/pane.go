@@ -3,9 +3,9 @@ package agent
 import (
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/web"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Pane is the agent UI pane that sits below the file editor. It contains an
@@ -23,7 +23,7 @@ type Pane struct {
 	PromptBox   PromptBox
 	Buttons     ButtonRow
 	width       int
-	height      int          // terminal height, used for webBar maxRows
+	height      int // terminal height, used for webBar maxRows
 	buttonFocus bool
 	runActive   bool         // true while a model run is in flight
 	findBar     *FindBar     // non-nil when find mode is active

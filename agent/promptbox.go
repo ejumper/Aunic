@@ -27,7 +27,7 @@ type PromptBox struct {
 	applyingHistory bool
 
 	focused         bool
-	width           int // inner content width (terminal width - 2 for box border)
+	width           int             // inner content width (terminal width - 2 for box border)
 	validModelNames map[string]bool // lowercase model names for /model coloring
 	GhostText       string          // displayed dimmed when value is empty; set by app layer
 

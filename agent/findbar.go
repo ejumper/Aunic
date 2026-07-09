@@ -43,23 +43,23 @@ type FindBar struct {
 
 // find-only button indices (left to right: left group, then right close)
 const (
-	fbBtnCase          = iota
+	fbBtnCase = iota
 	fbBtnNext
 	fbBtnPrev
-	fbBtnToggle        // [F→R]
-	fbBtnClose         // right-justified close
+	fbBtnToggle // [F→R]
+	fbBtnClose  // right-justified close
 	fbBtnCountFindOnly
 )
 
 // find+replace button indices
 const (
-	fbReplBtnCase       = iota
+	fbReplBtnCase = iota
 	fbReplBtnNext
 	fbReplBtnPrev
 	fbReplBtnReplace
 	fbReplBtnReplaceAll
-	fbReplBtnToggle     // [R→F]
-	fbReplBtnClose      // right-justified close
+	fbReplBtnToggle // [R→F]
+	fbReplBtnClose  // right-justified close
 	fbBtnCountRepl
 )
 

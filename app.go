@@ -90,8 +90,8 @@ type appModel struct {
 
 	// transcriptFocus is true when keyboard events route to the transcript bar.
 	// prevFocusWasPrompt records which focus state to restore on exit.
-	transcriptFocus     bool
-	prevFocusWasPrompt  bool
+	transcriptFocus    bool
+	prevFocusWasPrompt bool
 
 	// lastWebQuery is the query string of the in-flight @web search. Used to
 	// record the search in the transcript when WebSearchDoneMsg arrives.
@@ -133,30 +133,30 @@ type appModel struct {
 	markerCached  bool
 
 	// Voice I/O state.
-	voiceEnabled      bool            // true when 🔈 is active
-	ttsCmd            *exec.Cmd       // in-flight mpv process; nil when idle
-	voicePipeCh       <-chan string   // receives lines from the STT pipe; nil when off
-	voicePipeRelease  func()          // closes the pipe + clears the symlink; nil when off
+	voiceEnabled     bool          // true when 🔈 is active
+	ttsCmd           *exec.Cmd     // in-flight mpv process; nil when idle
+	voicePipeCh      <-chan string // receives lines from the STT pipe; nil when off
+	voicePipeRelease func()        // closes the pipe + clears the symlink; nil when off
 
 	// Pi harness state.
-	piProc           *pi.Process       // nil when harness is not Pi or Pi failed to start
-	piRunActive      bool              // true while Pi is processing a prompt
-	noteSnapshotHash string            // fingerprint of the last snapshot injected into Pi
-	noteEditedInRun  bool              // true if Pi touched the note file during this run
-	piFollowUpSent   bool              // true if a follow-up was already sent this agent cycle
-	pendingWebCtx    string            // formatted web search results; prepended on next run (shared across harnesses)
-	inProgressRow    int               // index into transcriptRows for the streaming assistant row; -1 if none
-	activeToolRows   map[string]int    // toolCallId → transcriptRows index
+	piProc           *pi.Process    // nil when harness is not Pi or Pi failed to start
+	piRunActive      bool           // true while Pi is processing a prompt
+	noteSnapshotHash string         // fingerprint of the last snapshot injected into Pi
+	noteEditedInRun  bool           // true if Pi touched the note file during this run
+	piFollowUpSent   bool           // true if a follow-up was already sent this agent cycle
+	pendingWebCtx    string         // formatted web search results; prepended on next run (shared across harnesses)
+	inProgressRow    int            // index into transcriptRows for the streaming assistant row; -1 if none
+	activeToolRows   map[string]int // toolCallId → transcriptRows index
 
 	// Claude harness state.
-	claudeProc             *claude.Process        // nil when harness is not Claude or Claude failed to start
-	claudeRunActive        bool                   // true while Claude is processing a prompt
-	claudeNoteSnapshotHash string                 // fingerprint of the last snapshot injected into Claude
-	claudeNoteEditedInRun  bool                   // true if Claude touched the note file during this run
-	claudeFollowUpSent     bool                   // true if a follow-up was already sent this agent cycle
-	claudeInProgressRow    int                    // index into transcriptRows for the streaming assistant row; -1 if none
-	claudeActiveToolRows   map[string]int         // toolUseId → transcriptRows index
-	claudeHistoryInjected  bool                   // true once the cold-start transcript recap has been sent for this process instance
+	claudeProc             *claude.Process            // nil when harness is not Claude or Claude failed to start
+	claudeRunActive        bool                       // true while Claude is processing a prompt
+	claudeNoteSnapshotHash string                     // fingerprint of the last snapshot injected into Claude
+	claudeNoteEditedInRun  bool                       // true if Claude touched the note file during this run
+	claudeFollowUpSent     bool                       // true if a follow-up was already sent this agent cycle
+	claudeInProgressRow    int                        // index into transcriptRows for the streaming assistant row; -1 if none
+	claudeActiveToolRows   map[string]int             // toolUseId → transcriptRows index
+	claudeHistoryInjected  bool                       // true once the cold-start transcript recap has been sent for this process instance
 	claudeToolCallBufs     map[int]*claudeToolCallBuf // content-block index → in-progress tool_use argument buffer
 
 	// Task overlay state.
@@ -207,18 +207,18 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 	home, _ := os.UserHomeDir()
 	wd, _ := os.Getwd()
 	m := appModel{
-		editor:         editor.New(fp, noteBody),
-		filepath:       fp,
-		savedValue:     noteBody,
-		llmCfg:         appliedCfg,
-		transcriptRows: rows,
-		todos:          todoList,
-		mode:           mode,
-		agentMode:      agentMode,
-		homeDir:        home,
-		cwd:            wd,
-		inProgressRow:  -1,
-		activeToolRows: make(map[string]int),
+		editor:               editor.New(fp, noteBody),
+		filepath:             fp,
+		savedValue:           noteBody,
+		llmCfg:               appliedCfg,
+		transcriptRows:       rows,
+		todos:                todoList,
+		mode:                 mode,
+		agentMode:            agentMode,
+		homeDir:              home,
+		cwd:                  wd,
+		inProgressRow:        -1,
+		activeToolRows:       make(map[string]int),
 		claudeInProgressRow:  -1,
 		claudeActiveToolRows: make(map[string]int),
 	}
@@ -2043,4 +2043,3 @@ func removeTranscriptEntry(rows []transcript.Row, rowNum, hitIdx int) []transcri
 	}
 	return out
 }
-

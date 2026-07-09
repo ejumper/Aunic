@@ -17,9 +17,9 @@ import (
 
 // Chunking thresholds (in bytes of UTF-8 text):
 //
-//   < shortLimit  → single chunk (no split needed, wait is short)
-//   < midLimit    → two equal halves (concurrent; both ready before first finishes)
-//   ≥ midLimit    → N chunks of chunkTarget chars each (all concurrent from t=0)
+//	< shortLimit  → single chunk (no split needed, wait is short)
+//	< midLimit    → two equal halves (concurrent; both ready before first finishes)
+//	≥ midLimit    → N chunks of chunkTarget chars each (all concurrent from t=0)
 const (
 	shortLimit  = 100
 	midLimit    = 300

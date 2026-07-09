@@ -41,11 +41,11 @@ type Opts struct {
 
 // Process is a running pi --mode rpc subprocess.
 type Process struct {
-	cmd    *exec.Cmd
-	stdin  *json.Encoder
-	mu     sync.Mutex // guards stdin writes
-	ch     chan []byte
-	done   chan struct{}
+	cmd     *exec.Cmd
+	stdin   *json.Encoder
+	mu      sync.Mutex // guards stdin writes
+	ch      chan []byte
+	done    chan struct{}
 	logFile *os.File
 }
 

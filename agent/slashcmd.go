@@ -152,7 +152,7 @@ type SlashCmdResult struct {
 	CopyText     string
 	ModelName    string // non-empty for /model <name>
 	WebQuery     string // non-empty for /web <query>
-	ClearTarget string // "trans"|"chat"|"tool"|"search" for /clear; "" for the bare /clear no-op
+	ClearTarget  string // "trans"|"chat"|"tool"|"search" for /clear; "" for the bare /clear no-op
 }
 
 // ParseSlashCmd checks whether s is a recognized slash command and returns

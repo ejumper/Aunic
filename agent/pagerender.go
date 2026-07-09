@@ -35,24 +35,25 @@ type pageLine struct {
 }
 
 // tableSepRe matches a markdown table separator row. Examples:
-//   |---|---|
-//   | :--- | ---: | :---: |
-//   ---|---
+//
+//	|---|---|
+//	| :--- | ---: | :---: |
+//	---|---
 var tableSepRe = regexp.MustCompile(`^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$`)
 
 // Link rendering uses two sentinel characters (Start-of-Heading and
 // Start-of-Text in ASCII) instead of injecting ANSI codes directly:
 //
-//   1. preprocessLinks: scans the source with a real parser (handles balanced
-//      parens in URLs, empty alt text, nested image-in-link markup) and wraps
-//      the visible portion of each link in linkOpenSentinel / linkCloseSentinel.
-//   2. editor.HighlightLine then sees only sentinels — no `[` chars to confuse
-//      its own link regex, no `\x1b` chars to bait other inline rules.
-//   3. wordWrap passes sentinels through untouched (RuneWidth treats control
-//      chars as width 0).
-//   4. finalizeLinkSentinels translates sentinels to ANSI as a final pass,
-//      tracking depth across the soft-wrapped lines so a link that crosses a
-//      wrap point is closed on the left line and reopened on the right.
+//  1. preprocessLinks: scans the source with a real parser (handles balanced
+//     parens in URLs, empty alt text, nested image-in-link markup) and wraps
+//     the visible portion of each link in linkOpenSentinel / linkCloseSentinel.
+//  2. editor.HighlightLine then sees only sentinels — no `[` chars to confuse
+//     its own link regex, no `\x1b` chars to bait other inline rules.
+//  3. wordWrap passes sentinels through untouched (RuneWidth treats control
+//     chars as width 0).
+//  4. finalizeLinkSentinels translates sentinels to ANSI as a final pass,
+//     tracking depth across the soft-wrapped lines so a link that crosses a
+//     wrap point is closed on the left line and reopened on the right.
 //
 // The close uses the targeted reset `\x1b[39m\x1b[24m` (fg default + underline
 // off) rather than a full reset, so an ambient header background or bold
@@ -67,8 +68,8 @@ const (
 	// strips the URL out and records it as the link's span URL.
 	linkURLStartSentinel = ''
 	linkURLEndSentinel   = ''
-	linkAnsiOpen      = "\x1b[35;4m"
-	linkAnsiClose     = "\x1b[39m\x1b[24m"
+	linkAnsiOpen         = "\x1b[35;4m"
+	linkAnsiClose        = "\x1b[39m\x1b[24m"
 )
 
 // linkSpan locates a rendered link within a pageLine's display: rune offsets

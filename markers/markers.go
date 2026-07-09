@@ -20,10 +20,10 @@ import (
 type Kind int
 
 const (
-	KindWriteScope Kind = iota // @>><<@
-	KindExclude                // %>><<%
-	KindIncludeOnly            // !>><<!
-	KindReadOnly               // $>><<$
+	KindWriteScope  Kind = iota // @>><<@
+	KindExclude                 // %>><<%
+	KindIncludeOnly             // !>><<!
+	KindReadOnly                // $>><<$
 )
 
 func (k Kind) String() string {
@@ -159,7 +159,7 @@ const elidedPlaceholder = "<!-- elided -->"
 // Scan walks text and produces matched marker spans. Unclosed/unmatched
 // tokens are surfaced as warnings; only properly-matched spans appear in
 // Spans. Tokens are skipped (treated as literal text) when preceded by '\'
-// or fully enclosed in matching '"' / '\'' quotes.
+// or fully enclosed in matching '"' / '\” quotes.
 func Scan(text string) Parse {
 	p := Parse{Text: text}
 	var stack []int

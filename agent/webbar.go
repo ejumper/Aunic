@@ -77,8 +77,9 @@ const (
 )
 
 // pagerCursor identifies a position in the page pager.
-//   line = index into pageLines
-//   col  = rune offset into the stripped (no-ANSI) display of pageLines[line]
+//
+//	line = index into pageLines
+//	col  = rune offset into the stripped (no-ANSI) display of pageLines[line]
 type pagerCursor struct {
 	line int
 	col  int
@@ -94,15 +95,15 @@ type pagerSelection struct {
 // WebBar is the UI component that replaces the prompt box when @web is active.
 // It has two user-facing modes: a scrollable result list and a page pager.
 type WebBar struct {
-	state      wbState
-	loadMsg    string
-	results    []web.Result
-	cursor     int
-	topResult  int          // index of first visible result (for scrolling)
-	expanded   map[int]bool // result indices with expanded snippet
-	page       *web.Page
-	pageLines  []pageLine // page markdown rendered (highlighted + tables + wrapped)
-	pageScroll int
+	state       wbState
+	loadMsg     string
+	results     []web.Result
+	cursor      int
+	topResult   int          // index of first visible result (for scrolling)
+	expanded    map[int]bool // result indices with expanded snippet
+	page        *web.Page
+	pageLines   []pageLine // page markdown rendered (highlighted + tables + wrapped)
+	pageScroll  int
 	maxRows     int // computed default — 2/3 termH - 3
 	userMaxRows int // user-set override via top-border drag; 0 means none
 	innerWidth  int // pane inner width (terminal width - 2 for borders)

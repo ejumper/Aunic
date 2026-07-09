@@ -89,10 +89,10 @@ func TestHighlightLineInlineTokensNoFalsePositives(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"intraword asterisk", "foo*bar*baz"},   // no \W around markers
-		{"empty bold", "** **"},                  // content can't be empty/space
-		{"single asterisk", "alone *"},           // no closing marker
-		{"unmatched bold", "**unclosed"},         // no closing marker
+		{"intraword asterisk", "foo*bar*baz"},             // no \W around markers
+		{"empty bold", "** **"},                           // content can't be empty/space
+		{"single asterisk", "alone *"},                    // no closing marker
+		{"unmatched bold", "**unclosed"},                  // no closing marker
 		{"asterisk with leading space inside", "*  bad*"}, // content starts with space
 	}
 	for _, tt := range tests {

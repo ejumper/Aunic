@@ -11,10 +11,10 @@ import (
 // raw strings for permissive parsing; callers validate values and fall back
 // to defaults on unrecognized input.
 type State struct {
-	Mode       string `json:"mode"`             // "note" | "chat"
-	Agent      string `json:"agent"`            // "off" | "read" | "work"
-	Model      string `json:"model"`            // "<provider>/<model>" (matches llm config keys)
-	Transcript string `json:"transcript"`       // "closed" | "open:partial" | "open:full"
+	Mode       string `json:"mode"`            // "note" | "chat"
+	Agent      string `json:"agent"`           // "off" | "read" | "work"
+	Model      string `json:"model"`           // "<provider>/<model>" (matches llm config keys)
+	Transcript string `json:"transcript"`      // "closed" | "open:partial" | "open:full"
 	Voice      string `json:"voice,omitempty"` // "on" | "off" (omitted when off)
 }
 

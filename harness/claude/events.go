@@ -90,10 +90,10 @@ type ToolResultMessage struct {
 	Message struct {
 		Role    string `json:"role"`
 		Content []struct {
-			Type       string `json:"type"` // "tool_result"
-			ToolUseID  string `json:"tool_use_id"`
-			Content    any    `json:"content"`
-			IsError    bool   `json:"is_error"`
+			Type      string `json:"type"` // "tool_result"
+			ToolUseID string `json:"tool_use_id"`
+			Content   any    `json:"content"`
+			IsError   bool   `json:"is_error"`
 		} `json:"content"`
 	} `json:"message"`
 	ToolUseResult struct {

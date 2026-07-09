@@ -5,32 +5,32 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ejumper/aunic/agent"
 	"github.com/ejumper/aunic/tasks"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // taskOverlayMode controls what the task overlay is displaying.
 type taskOverlayMode int
 
 const (
-	taskModePicker  taskOverlayMode = iota // list-of-lists picker
-	taskModeList                           // showing tasks in one list
-	taskModeAdd                            // inline add-task input
+	taskModePicker taskOverlayMode = iota // list-of-lists picker
+	taskModeList                          // showing tasks in one list
+	taskModeAdd                           // inline add-task input
 )
 
 // taskOverlayState holds all overlay display state.
 type taskOverlayState struct {
 	open    bool
 	mode    taskOverlayMode
-	lists   []tasks.ListConfig   // all configured lists
-	sorted  []tasks.ListConfig   // sorted by mtime for picker
-	list    tasks.ListConfig     // active list (taskModeList / taskModeAdd)
-	entries []tasks.TaskEntry    // tasks for active list
-	cursor  int                  // current row index
-	input   string               // new task text (taskModeAdd)
-	index   *tasks.TaskIndex     // shared index
-	err     string               // last write error message
+	lists   []tasks.ListConfig // all configured lists
+	sorted  []tasks.ListConfig // sorted by mtime for picker
+	list    tasks.ListConfig   // active list (taskModeList / taskModeAdd)
+	entries []tasks.TaskEntry  // tasks for active list
+	cursor  int                // current row index
+	input   string             // new task text (taskModeAdd)
+	index   *tasks.TaskIndex   // shared index
+	err     string             // last write error message
 }
 
 // openTaskOverlay initialises and opens the task overlay for the given note

@@ -31,8 +31,8 @@ const (
 
 type cmdEntry struct {
 	display    string
-	token      string      // e.g. "/find /replace"
-	desc       string      // e.g. ": search for text and replace it ..."
+	token      string // e.g. "/find /replace"
+	desc       string // e.g. ": search for text and replace it ..."
 	category   cmdCategory
 	execKind   CmdExecKind
 	slashKind  SlashCmdKind // valid when execKind == CmdExecSlash
@@ -401,7 +401,7 @@ func colorDescInline(desc string) string {
 				i++
 			}
 			b.WriteString("\x1b[39m\x1b[2m") // default color, back to faint
-			i-- // outer loop will increment
+			i--                              // outer loop will increment
 		} else {
 			b.WriteRune(r)
 		}
