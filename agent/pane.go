@@ -107,7 +107,7 @@ func (p Pane) IsCmdMode() bool { return p.cmdBar != nil }
 
 // OpenWebQueryBar activates the web search query input, replacing the prompt box.
 func (p Pane) OpenWebQueryBar() Pane {
-	wb := NewWebQueryBar()
+	wb := NewWebQueryBar(p.width - 2)
 	p.webQueryBar = &wb
 	p.findBar = nil
 	p.gotoBar = nil
@@ -220,6 +220,12 @@ func (p *Pane) SetWidth(width int) {
 	if p.modelBar != nil {
 		p.modelBar.innerWidth = innerWidth
 	}
+	if p.gotoBar != nil {
+		p.gotoBar.innerWidth = innerWidth
+	}
+	if p.webQueryBar != nil {
+		p.webQueryBar.innerWidth = innerWidth
+	}
 	if p.cmdBar != nil {
 		p.cmdBar.innerWidth = innerWidth
 		layout := computeCmdLayout(p.cmdBar.filtered, innerWidth)
@@ -317,7 +323,7 @@ func (p Pane) OpenFindCmd(sc *SlashCmdResult) Pane {
 
 // OpenGoto activates goto mode, replacing the prompt box with a goto bar.
 func (p Pane) OpenGoto() Pane {
-	gb := NewGotoBar()
+	gb := NewGotoBar(p.width - 2)
 	p.gotoBar = &gb
 	p.findBar = nil
 	p.webBar = nil

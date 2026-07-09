@@ -19,11 +19,14 @@ type GotoBar struct {
 	innerWidth int
 }
 
-func NewGotoBar() GotoBar {
+// NewGotoBar creates a GotoBar sized to the pane's inner width. The width is
+// stored on the struct (and refreshed by Pane.SetWidth) because Update's
+// close-button hit test needs it — View's value receiver can't persist it.
+func NewGotoBar(innerWidth int) GotoBar {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.Focus()
-	return GotoBar{input: ti}
+	return GotoBar{input: ti, innerWidth: innerWidth}
 }
 
 func (gb GotoBar) Update(msg tea.Msg) (GotoBar, tea.Cmd) {
@@ -67,7 +70,6 @@ func (gb GotoBar) Height() int { return 1 }
 
 // View renders Height() lines each exactly innerWidth cells wide.
 func (gb GotoBar) View(innerWidth int) []string {
-	gb.innerWidth = innerWidth
 	label := "Go to line: "
 	gb.input.Width = innerWidth - visualWidth(label) - closeButtonW
 	if gb.input.Width < 1 {

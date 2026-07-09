@@ -42,7 +42,6 @@ type TodoBar struct {
 	rowIdx int // 0..len(todoInputs)-1 when zone == todoZoneTodos
 	btnIdx int // 0=[+], 1=[x] when zone == todoZoneButtons
 
-	innerWidth int
 }
 
 // NewTodoBar constructs a TodoBar pre-populated from existing. When existing
@@ -263,7 +262,6 @@ func (tb TodoBar) forwardKey(m tea.KeyMsg) (TodoBar, tea.Cmd) {
 
 // View renders Height() lines each exactly innerWidth cells wide.
 func (tb TodoBar) View(innerWidth int) []string {
-	tb.innerWidth = innerWidth
 	if innerWidth < 1 {
 		innerWidth = 1
 	}

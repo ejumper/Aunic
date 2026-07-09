@@ -17,11 +17,15 @@ type WebQueryBar struct {
 	innerWidth int
 }
 
-func NewWebQueryBar() WebQueryBar {
+// NewWebQueryBar creates a WebQueryBar sized to the pane's inner width. The
+// width is stored on the struct (and refreshed by Pane.SetWidth) because
+// Update's close-button hit test needs it — View's value receiver can't
+// persist it.
+func NewWebQueryBar(innerWidth int) WebQueryBar {
 	ti := textinput.New()
 	ti.Prompt = ""
 	ti.Focus()
-	return WebQueryBar{input: ti}
+	return WebQueryBar{input: ti, innerWidth: innerWidth}
 }
 
 func (wb WebQueryBar) Update(msg tea.Msg) (WebQueryBar, tea.Cmd) {
@@ -56,7 +60,6 @@ func (wb WebQueryBar) Height() int { return 1 }
 
 // View renders Height() lines each exactly innerWidth cells wide.
 func (wb WebQueryBar) View(innerWidth int) []string {
-	wb.innerWidth = innerWidth
 	label := "web search: "
 	wb.input.Width = innerWidth - visualWidth(label) - closeButtonW
 	if wb.input.Width < 1 {
