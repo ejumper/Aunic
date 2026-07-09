@@ -1,5 +1,6 @@
 # Compiled binaries
 aunic
+aunic_bin
 *.exe
 *.test
 
@@ -11,5 +12,5 @@ go.work.sum
 test*.md
 test*.txt
 
-# Node / bridge dependencies
-bridge/node_modules/
+# Runtime logs (real logs live in ~/.local/share/aunic/logs/)
+aunic-logging/
