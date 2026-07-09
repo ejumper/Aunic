@@ -116,9 +116,6 @@ func (m Model) Value() string { return m.textarea.Value() }
 // SetFocused controls whether the cursor is rendered in View.
 func (m *Model) SetFocused(v bool) { m.focused = v }
 
-// HasActiveSelection reports whether a text selection is currently active.
-func (m Model) HasActiveSelection() bool { return m.selection.active }
-
 // SelectionRows returns the inclusive logical-line range of the active
 // selection. If no selection is active, hasSelection is false.
 func (m Model) SelectionRows() (startRow, endRow int, hasSelection bool) {
@@ -845,36 +842,6 @@ func (m *Model) moveVisualEnd() {
 	}
 	newRuneCol := len([]rune(line[:end]))
 	m.textarea.SetCursor(newRuneCol)
-}
-
-func (m *Model) movePage(offset int) {
-	total := m.viewport.TotalLineCount()
-	h := m.viewport.Height
-	if total <= h {
-		return
-	}
-
-	cursorRow, cursorCol := m.cursorAbsolutePos()
-	cursorViewRow := cursorRow - m.viewport.YOffset
-
-	delta := offset // +1 or -1
-	m.viewport.YOffset += delta
-	if m.viewport.YOffset < 0 {
-		m.viewport.YOffset = 0
-	}
-	maxOff := total - h
-	if m.viewport.YOffset > maxOff {
-		m.viewport.YOffset = maxOff
-	}
-
-	targetVisualRow := cursorViewRow + delta
-	if targetVisualRow < 0 {
-		targetVisualRow = 0
-	}
-	if targetVisualRow >= h {
-		targetVisualRow = h - 1
-	}
-	m.setCursorAtVisual(m.viewport.YOffset+targetVisualRow, cursorCol)
 }
 
 func (m *Model) movePagePreserve(offset int) {

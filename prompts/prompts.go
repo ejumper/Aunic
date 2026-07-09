@@ -8,14 +8,5 @@ import _ "embed"
 //go:embed pi_system.md
 var PiSystem string
 
-//go:embed pi_note_mode.md
-var PiNoteMode string
-
-//go:embed pi_read_mode.md
-var PiReadMode string
-
-//go:embed pi_off_mode.md
-var PiOffMode string
-
 //go:embed claude_system.md
 var ClaudeSystem string

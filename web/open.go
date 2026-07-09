@@ -2,7 +2,6 @@ package web
 
 import (
 	"fmt"
-	"net/url"
 	"os/exec"
 	"runtime"
 )
@@ -23,10 +22,4 @@ func Open(rawURL string) error {
 		return fmt.Errorf("open: unsupported platform %s", runtime.GOOS)
 	}
 	return cmd.Start()
-}
-
-// SearchURL builds a DuckDuckGo search URL for query. Used to "open in browser"
-// for transcript search-query cells.
-func SearchURL(query string) string {
-	return "https://duckduckgo.com/?q=" + url.QueryEscape(query)
 }

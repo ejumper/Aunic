@@ -162,8 +162,7 @@ func (m *Model) ClearSearch() {
 	m.searchCurrent = -1
 }
 
-func (m Model) SearchMatchCount() int   { return len(m.searchMatches) }
-func (m Model) SearchCurrentIndex() int { return m.searchCurrent }
+func (m Model) SearchMatchCount() int { return len(m.searchMatches) }
 
 func (m *Model) scrollToCurrentMatch() {
 	if m.searchCurrent < 0 || m.searchCurrent >= len(m.searchMatches) {
