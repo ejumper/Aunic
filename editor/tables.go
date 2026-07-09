@@ -148,12 +148,8 @@ func parseRow(s string) []string {
 
 func splitCells(s string) []string {
 	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "|") {
-		s = s[1:]
-	}
-	if strings.HasSuffix(s, "|") {
-		s = s[:len(s)-1]
-	}
+	s = strings.TrimPrefix(s, "|")
+	s = strings.TrimSuffix(s, "|")
 	parts := strings.Split(s, "|")
 	cells := make([]string, len(parts))
 	for i, p := range parts {

@@ -1838,13 +1838,9 @@ func (m appModel) View() string {
 		parts = append(parts, renderSeparator(m.width))
 	}
 	if m.taskOverlay.open {
-		for _, ln := range m.viewTaskOverlay(m.width, m.transcriptH) {
-			parts = append(parts, ln)
-		}
+		parts = append(parts, m.viewTaskOverlay(m.width, m.transcriptH)...)
 	} else {
-		for _, ln := range m.transcriptBar.View(m.width) {
-			parts = append(parts, ln)
-		}
+		parts = append(parts, m.transcriptBar.View(m.width)...)
 	}
 	parts = append(parts, m.ag.View())
 	return strings.Join(parts, "\n")
