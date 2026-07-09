@@ -473,13 +473,6 @@ func (m appModel) synthesizeSessionFromTranscript() (appModel, tea.Cmd) {
 	return m, m.ag.Indicator.StaleCmd()
 }
 
-// respawnPi closes the current Pi process and opens a new one using the
-// given config. Includes a new waitForPiOutput goroutine in the return cmd.
-func (m appModel) respawnPi(newCfg llm.Config) (appModel, tea.Cmd) {
-	m.llmCfg = newCfg
-	return m.respawnPiOpts()
-}
-
 // respawnPiOpts closes the current Pi process and opens a new one using the
 // current model state (llmCfg + agentMode). Used after agent mode changes.
 func (m appModel) respawnPiOpts() (appModel, tea.Cmd) {

@@ -11,7 +11,6 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	claude "github.com/ejumper/aunic/harness/claude"
-	"github.com/ejumper/aunic/llm"
 	"github.com/ejumper/aunic/markers"
 	"github.com/ejumper/aunic/prompts"
 	"github.com/ejumper/aunic/transcript"
@@ -400,13 +399,6 @@ func (m appModel) handleClaudeResult(_ []byte) (appModel, tea.Cmd) {
 
 	_ = m.writeNote()
 	return m, m.ag.Indicator.StaleCmd()
-}
-
-// respawnClaude closes the current Claude process and opens a new one using
-// the given config.
-func (m appModel) respawnClaude(newCfg llm.Config) (appModel, tea.Cmd) {
-	m.llmCfg = newCfg
-	return m.respawnClaudeOpts()
 }
 
 // respawnClaudeOpts closes the current Claude process and opens a new one

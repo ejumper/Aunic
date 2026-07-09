@@ -577,36 +577,6 @@ func displayRuneCount(display string) int {
 	return n
 }
 
-// runeOffsetToVisualCol returns the visual column at the given rune offset
-// within display. Visual width per rune comes from runewidth (wide chars = 2).
-func runeOffsetToVisualCol(display string, runeOffset int) int {
-	col := 0
-	seen := 0
-	inEsc := false
-	for _, r := range display {
-		if r == '\x1b' {
-			inEsc = true
-			continue
-		}
-		if inEsc {
-			if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
-				inEsc = false
-			}
-			continue
-		}
-		if seen >= runeOffset {
-			return col
-		}
-		w := runewidth.RuneWidth(r)
-		if r == '\t' {
-			w = tabWidth
-		}
-		col += w
-		seen++
-	}
-	return col
-}
-
 // visualColToRuneOffset returns the rune offset closest to visualCol in
 // display's stripped form. Clamps to [0, displayRuneCount].
 func visualColToRuneOffset(display string, visualCol int) int {

@@ -77,20 +77,6 @@ const (
 	FilterTools
 )
 
-func (f FilterMode) label() string {
-	switch f {
-	case FilterAll:
-		return "all"
-	case FilterChat:
-		return "chat"
-	case FilterSearch:
-		return "search"
-	case FilterTools:
-		return "tools"
-	}
-	return "?"
-}
-
 // ── State ───────────────────────────────────────────────────────────────────
 
 // TranscriptBar is the UI area above the editor that displays parsed

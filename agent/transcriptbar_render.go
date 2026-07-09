@@ -183,7 +183,6 @@ func (tb TranscriptBar) viewWithCellMap(innerWidth int) ([]string, map[int][]hit
 }
 
 func (tb TranscriptBar) renderCollapsedBar(width int) (string, []hitRange) {
-	const label = "[^] Open transcript"
 	cells := tb.cells()
 	var hr []hitRange
 	if len(cells) > 0 {
@@ -212,7 +211,6 @@ func (tb TranscriptBar) renderTopBar(width int) (string, []hitRange) {
 
 	type btn struct {
 		label   string
-		focused bool
 		active  bool
 		cellIdx int
 	}

@@ -134,7 +134,6 @@ type appModel struct {
 
 	// Voice I/O state.
 	voiceEnabled     bool          // true when 🔈 is active
-	ttsCmd           *exec.Cmd     // in-flight mpv process; nil when idle
 	voicePipeCh      <-chan string // receives lines from the STT pipe; nil when off
 	voicePipeRelease func()        // closes the pipe + clears the symlink; nil when off
 
@@ -333,67 +332,9 @@ func (m appModel) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// setInsertHighlight computes the byte range in `next` that differs from
-// `prev` (common prefix + common suffix diff, snapped to rune boundaries)
-// and stores it as the editor's insert overlay. The range stays in place
-// until clearInsertHighlight is called or the user changes the buffer.
-func (m *appModel) setInsertHighlight(prev, next string) {
-	if prev == next {
-		m.editor.SetInsertHighlight(nil)
-		return
-	}
-	start, end := diffRange(prev, next)
-	start, end = snapToRuneBoundaries(next, start, end)
-	if start >= end {
-		m.editor.SetInsertHighlight(nil)
-		return
-	}
-	m.editor.SetInsertHighlight([]editor.InsertSpan{{Start: start, End: end}})
-}
-
 // clearInsertHighlight removes any active insert highlight.
 func (m *appModel) clearInsertHighlight() {
 	m.editor.SetInsertHighlight(nil)
-}
-
-// diffRange returns the byte range [start, end) within `next` that differs
-// from `prev`. (0, 0) when identical or when only a deletion occurred (no
-// new bytes to highlight).
-func diffRange(prev, next string) (start, end int) {
-	p, n := len(prev), len(next)
-	minLen := p
-	if n < p {
-		minLen = n
-	}
-	i := 0
-	for i < minLen && prev[i] == next[i] {
-		i++
-	}
-	j := 0
-	maxJ := n - i
-	if p-i < maxJ {
-		maxJ = p - i
-	}
-	for j < maxJ && prev[p-1-j] == next[n-1-j] {
-		j++
-	}
-	return i, n - j
-}
-
-// snapToRuneBoundaries widens [start, end) outward until both edges sit on
-// UTF-8 rune-start bytes. Prevents the diff from splitting a multi-byte rune.
-func snapToRuneBoundaries(s string, start, end int) (int, int) {
-	for start > 0 && !isRuneStart(s[start]) {
-		start--
-	}
-	for end < len(s) && !isRuneStart(s[end]) {
-		end++
-	}
-	return start, end
-}
-
-func isRuneStart(b byte) bool {
-	return b < 0x80 || b >= 0xC0
 }
 
 // refreshMarkerHighlight recomputes the marker syntax-highlight spans from the
@@ -1791,11 +1732,6 @@ func (m appModel) resizeWebTo(mouseY int) (tea.Model, tea.Cmd) {
 	em, cmd := m.editor.Update(tea.WindowSizeMsg{Width: m.width, Height: m.editorH})
 	m.editor = em.(editor.Model)
 	return m, cmd
-}
-
-func gutterLine(gutterW int) string {
-
-	return strings.Repeat(" ", gutterW-1) + "\x1b[34m▏\x1b[0m"
 }
 
 // renderSeparator returns a full-width thin horizontal rule in ANSI color 8

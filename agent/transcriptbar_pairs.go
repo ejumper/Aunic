@@ -114,20 +114,6 @@ func (tb TranscriptBar) items() []item {
 	return out
 }
 
-func (tb TranscriptBar) passesFilter(p pair) bool {
-	switch tb.filter {
-	case FilterAll:
-		return true
-	case FilterChat:
-		return false // chat rows aren't pairs
-	case FilterSearch:
-		return p.tool == transcript.ToolWebSearch || p.tool == transcript.ToolWebFetch
-	case FilterTools:
-		return p.tool != transcript.ToolWebSearch && p.tool != transcript.ToolWebFetch
-	}
-	return true
-}
-
 func (tb TranscriptBar) passesFilterItem(it item) bool {
 	switch tb.filter {
 	case FilterAll:
