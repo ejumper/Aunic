@@ -402,7 +402,7 @@ func (m appModel) handleAgentEnd(_ []byte) (appModel, tea.Cmd) {
 	m.piRunActive = false
 	m.ag.Indicator.Set("")
 
-	if m.mode == "note" && !m.piNoteEditedInRun && !m.piFollowUpSent && m.piProc != nil {
+	if m.mode == modeNote && !m.piNoteEditedInRun && !m.piFollowUpSent && m.piProc != nil {
 		followUp := fmt.Sprintf(
 			"Before finishing: does the note at %s need to be updated with anything "+
 				"important from this conversation? If so, use your edit tool to update it. "+
@@ -586,14 +586,13 @@ func sessionIDForPath(absPath string) string {
 	return hex.EncodeToString(h[:])[:16]
 }
 
-// aunicSessionDir returns ~/.local/share/aunic/sessions/, creating it if needed.
 // toolsForAgentMode returns the tool list for the given agent mode.
 // "off" → empty slice (--no-tools); "read" → read-only subset; "work" → nil (all tools).
 func toolsForAgentMode(mode string) []string {
 	switch mode {
-	case "off":
+	case agentModeOff:
 		return []string{}
-	case "read":
+	case agentModeRead:
 		return []string{"read", "grep", "glob", "find"}
 	default:
 		return nil

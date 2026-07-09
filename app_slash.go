@@ -104,9 +104,9 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.SlashNote, agent.SlashChat:
-		target := "note"
+		target := modeNote
 		if cmd.Kind == agent.SlashChat {
-			target = "chat"
+			target = modeChat
 		}
 		if cmd.CopyText != "" {
 			m.ag.PromptBox.SetValue(cmd.CopyText)
@@ -120,11 +120,11 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 	case agent.SlashWork, agent.SlashRead, agent.SlashAgentOff:
 		switch cmd.Kind {
 		case agent.SlashWork:
-			m.agentMode = "work"
+			m.agentMode = agentModeWork
 		case agent.SlashRead:
-			m.agentMode = "read"
+			m.agentMode = agentModeRead
 		default:
-			m.agentMode = "off"
+			m.agentMode = agentModeOff
 		}
 		if cmd.CopyText != "" {
 			m.ag.PromptBox.SetValue(cmd.CopyText)
@@ -141,7 +141,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		return m.openWebQueryBar()
 
 	case agent.SlashTodo:
-		if m.agentMode == "off" {
+		if m.agentMode == agentModeOff {
 			m.ag.Indicator.SetError(`Error: /todo not available in "agent: off" mode`)
 			return m, m.ag.Indicator.StaleCmd()
 		}

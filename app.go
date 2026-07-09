@@ -95,13 +95,14 @@ type appModel struct {
 	// record the search in the transcript when WebSearchDoneMsg arrives.
 	lastWebQuery string
 
-	// mode is "note" (default) or "chat". In chat mode the model ends runs with
-	// a plain-text reply (recorded as a transcript message row) instead of a
-	// note_edit/note_write tool call.
+	// mode is modeNote (default) or modeChat. In chat mode the model ends
+	// runs with a plain-text reply (recorded as a transcript message row)
+	// instead of editing the note.
 	mode string
 
-	// agentMode is "off" (default), "read", or "work". Controls which filesystem
-	// tools are included in the model's tool list for the run.
+	// agentMode is agentModeOff (default), agentModeRead, or agentModeWork.
+	// Controls which filesystem tools are included in the model's tool list
+	// for the run.
 	agentMode string
 
 	// pendingImages holds raw image bytes (PNG or JPEG) pasted from the clipboard
@@ -160,6 +161,19 @@ type appModel struct {
 	taskOverlay taskOverlayState
 }
 
+// appModel.mode values.
+const (
+	modeNote = "note"
+	modeChat = "chat"
+)
+
+// appModel.agentMode values.
+const (
+	agentModeOff  = "off"
+	agentModeRead = "read"
+	agentModeWork = "work"
+)
+
 func newApp(fp, content string, cfg llm.Config) appModel {
 	// Strip any per-file state line (backward compat — old files embed state).
 	content, perFileState, hadFileState := transcript.ExtractState(content)
@@ -183,12 +197,12 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 
 	// Apply persisted state with validation. Unknown values fall back to
 	// defaults silently.
-	mode := "note"
-	if savedState.Mode == "chat" || savedState.Mode == "note" {
+	mode := modeNote
+	if savedState.Mode == modeChat || savedState.Mode == modeNote {
 		mode = savedState.Mode
 	}
-	agentMode := "off"
-	if savedState.Agent == "read" || savedState.Agent == "work" || savedState.Agent == "off" {
+	agentMode := agentModeOff
+	if savedState.Agent == agentModeRead || savedState.Agent == agentModeWork || savedState.Agent == agentModeOff {
 		agentMode = savedState.Agent
 	}
 	appliedCfg := cfg

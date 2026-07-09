@@ -379,7 +379,7 @@ func (m appModel) handleClaudeResult(_ []byte) (appModel, tea.Cmd) {
 	m.claudeRunActive = false
 	m.ag.Indicator.Set("")
 
-	if m.mode == "note" && !m.claudeNoteEditedInRun && !m.claudeFollowUpSent && m.claudeProc != nil {
+	if m.mode == modeNote && !m.claudeNoteEditedInRun && !m.claudeFollowUpSent && m.claudeProc != nil {
 		followUp := fmt.Sprintf(
 			"Before finishing: does the note at %s need to be updated with anything "+
 				"important from this conversation? If so, use your Edit tool to update it. "+
@@ -517,9 +517,9 @@ func claudeSessionIDForPath(absPath string) string {
 // (no --tools flag, Claude's own default built-in set).
 func claudeToolsForAgentMode(mode string) []string {
 	switch mode {
-	case "off":
+	case agentModeOff:
 		return []string{}
-	case "read":
+	case agentModeRead:
 		return []string{"Read", "Grep", "Glob"}
 	default:
 		return nil

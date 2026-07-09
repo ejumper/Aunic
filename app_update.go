@@ -368,12 +368,12 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case agent.AgentModeCyclePressMsg:
 		switch m.agentMode {
-		case "off":
-			m.agentMode = "read"
-		case "read":
-			m.agentMode = "work"
+		case agentModeOff:
+			m.agentMode = agentModeRead
+		case agentModeRead:
+			m.agentMode = agentModeWork
 		default:
-			m.agentMode = "off"
+			m.agentMode = agentModeOff
 		}
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
@@ -381,10 +381,10 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.respawnActiveHarness()
 
 	case agent.ModeTogglePressMsg:
-		if m.mode == "chat" {
-			m.mode = "note"
+		if m.mode == modeChat {
+			m.mode = modeNote
 		} else {
-			m.mode = "chat"
+			m.mode = modeChat
 		}
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
