@@ -141,7 +141,7 @@ func (m appModel) startPiRun(prompt string) (appModel, tea.Cmd) {
 		m.ag.Indicator.SetError("snapshot: " + injectErr.Error())
 		return m, m.ag.Indicator.StaleCmd()
 	}
-	m.noteSnapshotHash = newHash
+	m.piNoteSnapshotHash = newHash
 
 	// 5. Prepend pending web search results, then clear the buffer.
 	fullPrompt := prompt
@@ -152,10 +152,10 @@ func (m appModel) startPiRun(prompt string) (appModel, tea.Cmd) {
 
 	// 6. Reset per-run state.
 	m.piRunActive = true
-	m.noteEditedInRun = false
+	m.piNoteEditedInRun = false
 	m.piFollowUpSent = false
-	m.inProgressRow = -1
-	m.activeToolRows = make(map[string]int)
+	m.piInProgressRow = -1
+	m.piActiveToolRows = make(map[string]int)
 
 	// 7. Dispatch prompt to Pi.
 	_ = m.piProc.SendPrompt(fullPrompt)
@@ -176,10 +176,10 @@ func (m appModel) handlePiEvent(data []byte) (appModel, tea.Cmd) {
 	switch base.Type {
 	case "agent_start":
 		m.piRunActive = true
-		m.noteEditedInRun = false
-		m.inProgressRow = -1
-		if m.activeToolRows == nil {
-			m.activeToolRows = make(map[string]int)
+		m.piNoteEditedInRun = false
+		m.piInProgressRow = -1
+		if m.piActiveToolRows == nil {
+			m.piActiveToolRows = make(map[string]int)
 		}
 		m.ag.Indicator.Set("running…")
 		return m, m.ag.Indicator.StaleCmd()
@@ -207,7 +207,7 @@ func (m appModel) handlePiEvent(data []byte) (appModel, tea.Cmd) {
 		return m, m.ag.Indicator.StaleCmd()
 
 	case "compaction_end":
-		m.noteSnapshotHash = "" // force re-injection after compaction
+		m.piNoteSnapshotHash = "" // force re-injection after compaction
 		m.ag.Indicator.Set("compaction done")
 		return m, m.ag.Indicator.StaleCmd()
 
@@ -272,14 +272,14 @@ func (m appModel) handleMessageUpdate(data []byte) (appModel, tea.Cmd) {
 			Type:    transcript.TypeMessage,
 			Content: transcript.EncodeMessage(""),
 		})
-		m.inProgressRow = len(m.transcriptRows) - 1
+		m.piInProgressRow = len(m.transcriptRows) - 1
 		m.transcriptBar.SetRows(m.transcriptRows)
 
 	case "text_delta":
-		if m.inProgressRow >= 0 && m.inProgressRow < len(m.transcriptRows) {
-			c, _ := transcript.DecodeMessage(m.transcriptRows[m.inProgressRow].Content)
+		if m.piInProgressRow >= 0 && m.piInProgressRow < len(m.transcriptRows) {
+			c, _ := transcript.DecodeMessage(m.transcriptRows[m.piInProgressRow].Content)
 			c.Text += ae.Delta
-			m.transcriptRows[m.inProgressRow].Content = transcript.EncodeMessage(c.Text)
+			m.transcriptRows[m.piInProgressRow].Content = transcript.EncodeMessage(c.Text)
 			m.transcriptBar.SetRows(m.transcriptRows)
 		}
 
@@ -288,7 +288,7 @@ func (m appModel) handleMessageUpdate(data []byte) (appModel, tea.Cmd) {
 		return m, m.ag.Indicator.StaleCmd()
 
 	case "toolcall_end":
-		m.inProgressRow = -1
+		m.piInProgressRow = -1
 		if ae.ToolCall != nil {
 			m = m.appendToolCallRow(*ae.ToolCall)
 		}
@@ -298,7 +298,7 @@ func (m appModel) handleMessageUpdate(data []byte) (appModel, tea.Cmd) {
 }
 
 // appendToolCallRow maps a Pi tool call to a transcript tool_call row and
-// stores the row index in activeToolRows for later lookup by tool result.
+// stores the row index in piActiveToolRows for later lookup by tool result.
 func (m appModel) appendToolCallRow(tc pi.ToolCallObj) appModel {
 	var content json.RawMessage
 	switch tc.Name {
@@ -337,7 +337,7 @@ func (m appModel) appendToolCallRow(tc pi.ToolCallObj) appModel {
 		Content: content,
 	}
 	m.transcriptRows = append(m.transcriptRows, row)
-	m.activeToolRows[tc.ID] = len(m.transcriptRows) - 1
+	m.piActiveToolRows[tc.ID] = len(m.transcriptRows) - 1
 	m.transcriptBar.SetRows(m.transcriptRows)
 	return m
 }
@@ -385,8 +385,8 @@ func (m appModel) handleToolExecEnd(data []byte) (appModel, tea.Cmd) {
 	// editor reflects Pi's changes. writeNote() below restores the transcript
 	// section if Pi's write inadvertently wiped it.
 	if (ev.ToolName == "edit" || ev.ToolName == "write") && m.toolTouchedNoteFile(ev) {
-		m.noteEditedInRun = true
-		m.noteSnapshotHash = "" // force re-injection on next run
+		m.piNoteEditedInRun = true
+		m.piNoteSnapshotHash = "" // force re-injection on next run
 		if raw, err := os.ReadFile(m.filepath); err == nil {
 			noteBody, _ := transcript.Split(string(raw))
 			m.editor.SetContent(noteBody)
@@ -408,7 +408,7 @@ func (m appModel) handleAgentEnd(_ []byte) (appModel, tea.Cmd) {
 	m.piRunActive = false
 	m.ag.Indicator.Set("")
 
-	if m.mode == "note" && !m.noteEditedInRun && !m.piFollowUpSent && m.piProc != nil {
+	if m.mode == "note" && !m.piNoteEditedInRun && !m.piFollowUpSent && m.piProc != nil {
 		followUp := fmt.Sprintf(
 			"Before finishing: does the note at %s need to be updated with anything "+
 				"important from this conversation? If so, use your edit tool to update it. "+
@@ -481,7 +481,7 @@ func (m appModel) respawnPiOpts() (appModel, tea.Cmd) {
 		m.piProc = nil
 	}
 	m.piRunActive = false
-	m.noteSnapshotHash = ""
+	m.piNoteSnapshotHash = ""
 
 	opts := m.piOpts()
 	proc, err := pi.Open(opts)
@@ -528,16 +528,16 @@ func (m appModel) injectSnapshotIfStale(parsed markers.Parse, absNotePath string
 	snap := parsed.BuildSnapshot()
 	h := fnv64(snap.Visible)
 	key := fmt.Sprintf("%d:%x", len(snap.Visible), h)
-	if m.noteSnapshotHash == key {
+	if m.piNoteSnapshotHash == key {
 		return key, nil
 	}
 
 	tmpPath := snapshotTempPath(absNotePath)
 	if err := os.WriteFile(tmpPath, []byte(snap.Visible), 0600); err != nil {
-		return m.noteSnapshotHash, err
+		return m.piNoteSnapshotHash, err
 	}
 	if err := m.piProc.SendBash("cat " + tmpPath); err != nil {
-		return m.noteSnapshotHash, err
+		return m.piNoteSnapshotHash, err
 	}
 	return key, nil
 }
@@ -545,7 +545,7 @@ func (m appModel) injectSnapshotIfStale(parsed markers.Parse, absNotePath string
 // toolTouchedNoteFile returns true when the tool call associated with ev
 // targeted the note file. Used to detect when Pi has edited the note.
 func (m appModel) toolTouchedNoteFile(ev pi.ToolExecEndEvent) bool {
-	idx, ok := m.activeToolRows[ev.ToolCallID]
+	idx, ok := m.piActiveToolRows[ev.ToolCallID]
 	if !ok {
 		return false
 	}

@@ -136,14 +136,14 @@ type appModel struct {
 	voicePipeRelease func()        // closes the pipe + clears the symlink; nil when off
 
 	// Pi harness state.
-	piProc           *pi.Process    // nil when harness is not Pi or Pi failed to start
-	piRunActive      bool           // true while Pi is processing a prompt
-	noteSnapshotHash string         // fingerprint of the last snapshot injected into Pi
-	noteEditedInRun  bool           // true if Pi touched the note file during this run
-	piFollowUpSent   bool           // true if a follow-up was already sent this agent cycle
-	pendingWebCtx    string         // formatted web search results; prepended on next run (shared across harnesses)
-	inProgressRow    int            // index into transcriptRows for the streaming assistant row; -1 if none
-	activeToolRows   map[string]int // toolCallId → transcriptRows index
+	piProc             *pi.Process    // nil when harness is not Pi or Pi failed to start
+	piRunActive        bool           // true while Pi is processing a prompt
+	piNoteSnapshotHash string         // fingerprint of the last snapshot injected into Pi
+	piNoteEditedInRun  bool           // true if Pi touched the note file during this run
+	piFollowUpSent     bool           // true if a follow-up was already sent this agent cycle
+	pendingWebCtx      string         // formatted web search results; prepended on next run (shared across harnesses)
+	piInProgressRow    int            // index into transcriptRows for the streaming assistant row; -1 if none
+	piActiveToolRows   map[string]int // toolCallId → transcriptRows index
 
 	// Claude harness state.
 	claudeProc             *claude.Process            // nil when harness is not Claude or Claude failed to start
@@ -214,8 +214,8 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 		agentMode:            agentMode,
 		homeDir:              home,
 		cwd:                  wd,
-		inProgressRow:        -1,
-		activeToolRows:       make(map[string]int),
+		piInProgressRow:      -1,
+		piActiveToolRows:     make(map[string]int),
 		claudeInProgressRow:  -1,
 		claudeActiveToolRows: make(map[string]int),
 	}
