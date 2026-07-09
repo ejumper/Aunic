@@ -30,7 +30,6 @@ type Pane struct {
 	gotoBar     *GotoBar     // non-nil when goto mode is active
 	webBar      *WebBar      // non-nil when @web mode is active
 	modelBar    *ModelBar    // non-nil when model picker is active
-	conflictBar *ConflictBar // non-nil when conflict resolution UI is active
 	cmdBar      *CmdBar      // non-nil when command picker is active
 	webQueryBar *WebQueryBar // non-nil when web-search query input is active
 	todoBar     *TodoBar     // non-nil when /todo authoring modal is active
@@ -83,28 +82,6 @@ func (p Pane) CloseModel() Pane {
 
 // IsModelMode reports whether the model picker is currently active.
 func (p Pane) IsModelMode() bool { return p.modelBar != nil }
-
-// OpenConflict activates the conflict resolution bar, replacing the prompt box.
-func (p Pane) OpenConflict() Pane {
-	cb := NewConflictBar(p.width - 2)
-	p.conflictBar = &cb
-	p.findBar = nil
-	p.gotoBar = nil
-	p.webBar = nil
-	p.modelBar = nil
-	p.buttonFocus = false
-	p.PromptBox.Blur()
-	return p
-}
-
-// CloseConflict deactivates the conflict resolution bar.
-func (p Pane) CloseConflict() Pane {
-	p.conflictBar = nil
-	return p
-}
-
-// IsConflictMode reports whether the conflict resolution bar is active.
-func (p Pane) IsConflictMode() bool { return p.conflictBar != nil }
 
 // OpenCmdBar activates the command picker, replacing the prompt box.
 func (p Pane) OpenCmdBar() Pane {
@@ -242,9 +219,6 @@ func (p *Pane) SetWidth(width int) {
 	p.PromptBox.SetWidth(innerWidth)
 	if p.modelBar != nil {
 		p.modelBar.innerWidth = innerWidth
-	}
-	if p.conflictBar != nil {
-		p.conflictBar.innerWidth = innerWidth
 	}
 	if p.cmdBar != nil {
 		p.cmdBar.innerWidth = innerWidth
@@ -511,9 +485,6 @@ func (p Pane) Height() int {
 	if p.modelBar != nil {
 		return 3 + p.modelBar.Height()
 	}
-	if p.conflictBar != nil {
-		return 3 + p.conflictBar.Height()
-	}
 	if p.cmdBar != nil {
 		return 3 + p.cmdBar.Height()
 	}
@@ -548,11 +519,6 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 	if p.modelBar != nil {
 		mb, cmd := p.modelBar.Update(msg)
 		p.modelBar = &mb
-		return p, cmd
-	}
-	if p.conflictBar != nil {
-		cb, cmd := p.conflictBar.Update(msg)
-		p.conflictBar = &cb
 		return p, cmd
 	}
 	if p.cmdBar != nil {
@@ -737,13 +703,6 @@ func (p Pane) View() string {
 		}
 	} else if p.modelBar != nil {
 		for _, line := range p.modelBar.View(innerWidth) {
-			b.WriteString("│")
-			b.WriteString(line)
-			b.WriteString("│")
-			b.WriteByte('\n')
-		}
-	} else if p.conflictBar != nil {
-		for _, line := range p.conflictBar.View(innerWidth) {
 			b.WriteString("│")
 			b.WriteString(line)
 			b.WriteString("│")
