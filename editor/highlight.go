@@ -240,8 +240,7 @@ func cachedHighlight(content string, cache map[string]string) string {
 }
 
 // chromaStyle is the Chroma style used for code block syntax highlighting.
-// monokai works well in terminals and maps cleanly to the 16-color palette.
-var chromaStyle = styles.Get("friendly")
+var chromaStyle = styles.Get("modus-vivendi")
 
 // highlightCodeBlock runs Chroma syntax highlighting on a multi-line code body
 // using the terminal16 formatter. Returns the output split into per-line
@@ -265,7 +264,7 @@ func highlightCodeBlock(lang, body string) []string {
 	}
 
 	var buf bytes.Buffer
-	if err := formatters.TTY16.Format(&buf, chromaStyle, iterator); err != nil {
+	if err := formatters.TTY16m.Format(&buf, chromaStyle, iterator); err != nil {
 		return strings.Split(body, "\n")
 	}
 
@@ -295,7 +294,7 @@ func highlightWholeFile(filepath string, lines []string, cache map[string]string
 			return nil
 		}
 		var buf bytes.Buffer
-		if err := formatters.TTY16.Format(&buf, chromaStyle, iterator); err != nil {
+		if err := formatters.TTY16m.Format(&buf, chromaStyle, iterator); err != nil {
 			return nil
 		}
 		out := strings.TrimSuffix(buf.String(), "\n")
@@ -314,14 +313,14 @@ func highlightWholeFile(filepath string, lines []string, cache map[string]string
 	return result
 }
 
-// parseCodeBlockRanges scans lines for fenced code blocks (``` delimited) and
+// ParseCodeBlockRanges scans lines for fenced code blocks (``` delimited) and
 // returns a map[lineIndex]highlightedContent for every line that belongs to a
 // code block. Fence lines themselves are mapped to a dimmed rendition of their
 // raw content. Body lines are mapped to Chroma-highlighted content.
 //
-// The returned map is consulted by buildView; lines absent from the map are
-// highlighted with the normal per-line markdown rules.
-func parseCodeBlockRanges(lines []string, cache map[string]string) map[int]string {
+// Lines absent from the returned map should be highlighted with the normal
+// per-line markdown rules. cache may be nil (disables Chroma result caching).
+func ParseCodeBlockRanges(lines []string, cache map[string]string) map[int]string {
 	result := make(map[int]string)
 	inBlock := false
 	var lang string

@@ -223,6 +223,7 @@ func (tb TranscriptBar) renderTopBar(width int) (string, []hitRange) {
 		{label: "[chat]", active: tb.filter == FilterChat, cellIdx: tb.cellIdx(cellFilterChat, 0, -1)},
 		{label: "[search]", active: tb.filter == FilterSearch, cellIdx: tb.cellIdx(cellFilterSearch, 0, -1)},
 		{label: "[tools]", active: tb.filter == FilterTools, cellIdx: tb.cellIdx(cellFilterTools, 0, -1)},
+		{label: "[tasks]", cellIdx: tb.cellIdx(cellTasksButton, 0, -1)},
 	}
 	var b strings.Builder
 	var hrs []hitRange

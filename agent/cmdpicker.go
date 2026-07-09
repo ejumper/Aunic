@@ -138,6 +138,14 @@ var allCmdEntries = []cmdEntry{
 		execKind:   CmdExecPrompt,
 		promptText: "/chat2note ",
 	},
+	{
+		display:    "Local Delegation",
+		token:      "/local",
+		desc:       ": set local model delegation mode (off / min / max)",
+		category:   catTools,
+		execKind:   CmdExecPrompt,
+		promptText: "/local ",
+	},
 	// Agent
 	{
 		display:   "Agent Off",

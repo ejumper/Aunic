@@ -38,6 +38,8 @@ const (
 	cellTodoClear      // [x] clear-all on summary row
 	cellTodoItemToggle // [✔]/[ ] per-expanded-item (hitIdx = todo.ID)
 	cellTodoItemDelete // [x] per-expanded-item (hitIdx = todo.ID)
+
+	cellTasksButton // [tasks] — opens task overlay
 )
 
 type cell struct {
@@ -65,6 +67,7 @@ func (tb TranscriptBar) cells() []cell {
 		{kind: cellFilterChat, hitIdx: -1},
 		{kind: cellFilterSearch, hitIdx: -1},
 		{kind: cellFilterTools, hitIdx: -1},
+		{kind: cellTasksButton, hitIdx: -1},
 	}
 	// Todo summary row sits between the top bar and the first transcript item
 	// when there is at least one active todo. The sentinel rowNum=0 keys both

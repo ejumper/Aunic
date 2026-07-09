@@ -1,0 +1,33 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-01 20:34:46  |  claude-sonnet-4-6 (agent-sdk)  |  note
+════════════════════════════════════════════════════════════════
+
+<USER>
+  give me background on how spanning tree protocol works
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user wants background on how Spanning Tree Protocol (STP) works. This is a networking topic I can answer from my knowledge. Let me provide a comprehensive explanation and then update the note.
+  </THINKING>
+
+  <TOOL note_edit>
+    {
+      "new_string": "# STP — Spanning Tree Protocol\n\n## Overview\nSTP eliminates Layer 2 loops in redundant switched networks by building a loop-free logical tree, selectively blocking redundant ports while keeping them available for failover.\n\n## How It Works\n1. **Elect Root Bridge** — switches exchange BPDUs; lowest Bridge ID (priority + MAC) wins\n2. **Root Ports** — each non-root switch picks one port with the lowest-cost path to root\n3. **Designated Ports** — one port per segment elected as best path toward root\n4. **Block the rest** — non-root, non-designated ports go into Blocking state (receive BPDUs only)\n\n## Port States (Classic 802.1D)\n| State | Forwards? | Learns MACs? |\n|---|---|---|\n| Blocking | No | No |\n| Listening | No | No |\n| Learning | No | Yes |\n| Forwarding | Yes | Yes |\n\n## Key Timers\n- **Hello:** 2s — how often BPDUs are sent\n- **Forward Delay:** 15s — time spent in Listening + Learning each\n- **Max Age:** 20s — BPDU expiry\n- **Total convergence:** up to ~50s (major downside of classic STP)\n\n## Key Terms\n- **BPDU** — Bridge Protocol Data Unit; control frames for topology negotiation\n- **Root Port** — switch's best port toward root bridge\n- **Designated Port** — best port on a segment toward root\n- **TCN** — Topology Change Notification; flushes stale MAC tables on link change\n\n## Variants\n| Protocol | Standard | Convergence |\n|---|---|---|\n| STP | 802.1D | ~30–50s |\n| RSTP | 802.1w | ~1–6s (negotiation-based, not timer-based) |\n| MSTP | 802.1s | Groups VLANs into instances |\n| PVST+ / Rapid PVST+ | Cisco proprietary | Per-VLAN STP / Rapid per-VLAN |\n\n**RSTP** is the modern standard — uses neighbor handshake instead of timers for near-instant convergence.",
+      "old_string": "# STP"
+    }
+  </TOOL note_edit>
+
+  <RESULT note_edit>
+    ok: note edited
+  </RESULT note_edit>
+
+  <RESULT >
+    ok: {"applied":1,"new_string":"# STP — Spanning Tree Protocol\n\n## Overview\nSTP eliminates Layer 2 loops in redundant switched networks by building a loop-free logical tree, selectively blocking redunda…
+  </RESULT >
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  10 in  25 out  |  30.3s  |  edit
+════════════════════════════════════════════════════════════════
+

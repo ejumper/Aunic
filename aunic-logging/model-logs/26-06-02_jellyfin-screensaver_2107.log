@@ -1,0 +1,524 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 18:23:37  |  local  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  here is the api key:a1fd400577d44b39a82f89471d2e7e92 place it where it needs to go and do whatever setup steps remain, get the markdown note filled with the appropriate context for this project
+  
+  <note_reference>
+  Read jellyfin-screensaver.md for task context if relevant. This file is a markdown note — read only the content above the "<!-- transcript -->" line. Skip the read if the query is self-contained and doesn't need project context.
+  </note_reference>
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user wants to implement the "Jellyfin Screensaver" project based on the discussed specifications.
+    
+    `a1fd400577d44b39a82f89471d2e7e92`
+    `~/Scripts-Apps-Plugins/Scripts/lock-screen.bash`
+    `~/.local/share/jellyfin-wallpapers/`
+    
+        *   Bash script (Option 1).
+        *   Components:
+            1.  `lock-screen-tracker.sh` (or similar): A background service using `dbus-monitor` to track lock/unlock events and update a JSON state file.
+            2.  `lock-screen-sync.sh`: The main logic script that handles downloading/deleting based on the state file.
+            3.  Systemd User Services:
+                *   `jellyfin-wallpaper-tracker.service` (long-running).
+                *   `jellyfin-wallpaper-sync.timer` (periodic).
+                *   `jellyfin-wallpaper-sync.service` (the actual sync).
+    
+        *   Initial seed: 50 images.
+        *   Growth: +1 image per 10 min locked.
+        *   Shrink: -2 images/inactive day (if 0 lock minutes).
+        *   Cap: 15GB folder size -> daily deletion becomes -5.
+        *   Floor: 25 images.
+        *   Sources: Movie, Series, MusicArtist (all backdrops).
+        *   Resolution: Full.
+        *   Filename: `{itemId}_backdrop_{index}.jpg`.
+    
+        *   I need to create the directories.
+        *   I need to create the script files.
+        *   I need to create the systemd user service files.
+        *   I need to update the markdown note with the project context.
+    
+        *   `dbus-monitor` is needed.
+        *   `jq` is needed for JSON processing in Bash.
+        *   `curl` is needed for API calls.
+        *   `bc` might be needed for math? Or just use integer math in shell.
+    
+        *   *State file structure:*
+            ```json
+            {
+              "locked_minutes_accumulated": 0,
+              "last_active_date": "2023-10-27",
+              "lock_started_at": null,
+              "image_count": 50
+            }
+            ```
+    
+        *   *Tracker Logic:*
+            - Watch `org.freedesktop.ScreenSaver` or `org.gnome.ScreenSaver` or `org.kde.screensaver`?
+            - For KDE, it's usually `org.freedesktop.ScreenSaver` or looking at `org.kde.kscreenlocker`.
+            - Actually, `org.freedesktop.login1` signals for `Lock` and `Unlock` are more universal across sessions.
+            - Let's use `dbus-monitor --system` or `--session` to listen for `org.freedesktop.login1.Session` signals.
+    
+        *   *Sync Logic:*
+            - Read state.
+            - Check folder size (`du -sb`).
+            - Check `last_active_date`.
+            - If `accumulated_minutes >= 10`: download images, reset counter.
+            - If `today > last_active_date` and `accumulated_minutes == 0`: delete 2 (or 5 if cap hit) images.
+            - If `first_run`: download 50.
+    
+        *   *The API call:*
+            `GET /Items?IncludeItemTypes=Movie,Series,MusicArtist&ImageTypes=Backdrop&Recursive=true&api_key=...`
+            Wait, the user wants *all* backdrop images.
+            The `Items` endpoint gives a list of items.
+            For each item, we need to see how many backdrops it has.
+            The `BackdropImageTags` field in the response tells us how many.
+            Then we download `Items/{id}/Images/Backdrop/{index}`.
+    
+        *   *Step 1: Create directories.*
+        *   *Step 2: Write the tracker script.*
+        *   *Step 3: Write the sync script.*
+        *   *Step 4: Write the systemd units.*
+        *   *Step 5: Update the note.*
+    
+        *Self-Correction on Tracker:* `dbus-monitor` on `org.freedesktop.login1` is quite reliable.
+    
+        *Let's plan the script content.*
+    
+        *Tracker (`lock-screen-tracker.sh`):*
+        - Loop `dbus-monitor`.
+        - Parse "Lock" / "Unlock".
+        - Update JSON.
+    
+        *Sync (`lock-screen-sync.sh`):*
+        - Use `jq` to read/write JSON.
+        - Use `curl` for API.
+        - Use `du` for size.
+        - Use `find` + `sort` + `head` for deletion.
+    
+        *Systemd:*
+        - `~/.config/systemd/user/jellyfin-wallpaper-tracker.service`
+        - `~/.config/systemd/user/jellyfin-wallpaper-sync.service`
+        - `~/.config/systemd/user/jellyfin-wallpaper-sync.timer`
+    
+        *Note update:* I will create the note content based on the user's request.
+    
+        *Wait, I cannot write to the note directly using `note_edit` or `note_write`?*
+        The prompt says: "Reply with a plain-text message — do not call note_edit or note_write (they are not available)."
+        Ah, the instructions say "do not call note_edit or note_write (they are not available)". This means I can't actually edit the file. I must provide the content in my reply.
+    
+        *Actually, looking at the prompt again:* "get the markdown note filled with the appropriate context for this project".
+        Since I can't edit, I will provide the full content of the note in the response.
+    
+        *Wait, I have `Bash` tool?* No, I don't have a bash tool. I only have `Read`, `Grep`, `Glob`, `Web_search`, `Web_fetch`.
+        I cannot actually *create* the files on the user's system. I can only *propose* them.
+        The user asked me to "do whatever setup steps remain". This usually implies I should provide the code and instructions.
+    
+        *Wait, I am an AI assistant. I cannot execute shell commands on the user's machine.*
+        I will provide the complete code blocks and the exact commands the user needs to run to set everything up.
+    
+        *Refining the Sync Script Logic:*
+        - To get "all backdrops", I'll fetch items.
+        - For each item, I'll look at `BackdropImageTags`.
+        - If `BackdropImageTags` is an array, I loop through its length.
+        - Download `.../Images/Backdrop/0`, `.../Images/Backdrop/1`, etc.
+    
+        *Refining the Tracker Logic:*
+        - `dbus-monitor` output can be tricky to parse.
+        - A simpler way: `loginctl lock-session` / `unlock-session` signals.
+        - Actually, `dbus-monitor` on `org.freedesktop.login1` for `Lock` and `Unlock` signals is the standard way.
+    
+        *Let's write the code.*
+    
+        *Files to provide:*
+        1. `~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh`
+        2. `~/Scripts-Apps-Plugins/Scripts/lock-screen.bash` (the sync script)
+        3. `~/.config/systemd/user/jellyfin-wallpaper-tracker.service`
+        4. `~/.config/systemd/user/jellyfin-wallpaper-sync.service`
+        5. `~/.config/systemd/user/jellyfin-wallpaper-sync.timer`
+        6. A setup script/command block.
+    
+        *Wait, I should check if `jq` is installed.* I'll assume it is, or mention it.
+    
+        *Folder size check:* `du -sb ~/.local/share/jellyfin-wallpapers/ | cut -f1`
+    
+        *Deletion logic:*
+        `find "$DIR" -type f | sort -r | head -n "$NUM" | xargs rm` (to delete oldest/random? User said "delete two oldest images" or "5 oldest").
+        Actually, `find ... -printf '%T+ %p\n' | sort | head -n 2` is better for oldest.
+    
+        *Let's double check the "1 image for every 10 minutes" rule.*
+        If `accumulated_minutes = 25`, `floor(25/10) = 2`. So download 2 images.
+    
+        *Let's refine the "All backdrops" part.*
+        The API response for an item:
+        `"BackdropImageTags": [0, 1, 2]`
+        This means there are 3 backdrops.
+    
+        *One detail:* The user wants "all backdrop images". If an item has 5 backdrops, I download 5. If I'm downloading "1 image for every 10 minutes", does that mean 1 *item* or 1 *image*?
+        The user said: "download 1 image for every 10 minutes it spends locked".
+        I will interpret this as: "Download 1 *item's worth* of backdrops for every 10 minutes". This is safer for the "all backdrops" requirement.
+    
+        *Wait, I'll stick to the literal: "1 image for every 10 minutes".*
+        If I pick an item and it has 3 backdrops, I'll just download them one by one until I hit the quota. That's more precise.
+    
+        *Let's write the scripts.*
+    
+        *Script 1: Tracker*
+        ```bash
+        #!/bin/bash
+        # ~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh
+        STATE_FILE="$HOME/.local/share/jellyfin-wallpapers/state.json"
+        mkdir -p "$(dirname "$STATE_FILE")"
+    
+        # Initialize state if not exists
+        if [ ! -f "$STATE_FILE" ]; then
+            echo '{"locked_minutes_accumulated": 0, "last_active_date": "'$(date +%Y-%m-%d)'", "lock_started_at": null, "image_count": 0}' > "$STATE_FILE"
+        fi
+    
+        dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Session',member='Lock'" | while read line; do
+            # Logic to update lock_started_at
+        done
+        ```
+        Wait, `dbus-monitor` is blocking. I need to run it in a loop or use a more robust method.
+        Actually, `dbus-monitor` is fine.
+    
+        *Wait, I'll provide a single "Setup" block.*
+    
+        *Let's refine the Sync logic for the "15GB cap" and "Delete 5".*
+        `SIZE=$(du -sb "$DIR" | cut -f1)`
+        `CAP=$((15 * 1024 * 1024 * 1024))`
+        `if [ $SIZE -gt $CAP ]; then DEL_COUNT=5; else DEL_COUNT=2; fi`
+    
+        *Let's refine the "Initial Seed" (50 images).*
+        If `image_count` in state is 0, download 50.
+    
+        *Final plan for the response:*
+        1. Acknowledge the API key.
+        2. Provide the "Project Context" (the updated markdown note content).
+        3. Provide the "Implementation" (the scripts and systemd units).
+        4. Provide the "Setup Instructions" (the commands to run).
+    
+        *Wait, I'll write the scripts as robustly as possible in one go.*
+    
+        *Tracker script (more robust):*
+        ```bash
+        #!/bin/bash
+        # ~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh
+        STATE_FILE="$HOME/.local/share/jellyfin-wallpapers/state.json"
+        mkdir -p "$(dirname "$STATE_FILE")"
+    
+        init_state() {
+            echo "{\"locked_minutes_accumulated\": 0, \"last_active_date\": \"$(date +%Y-%m-%d)\", \"lock_started_at\": null, \"image_count\": 0}" > "$STATE_FILE"
+        }
+    
+        [ ! -f "$STATE_FILE" ] && init_state
+    
+        # Listen for Lock/Unlock via dbus-monitor
+        # We use --system because login1 is a system bus service
+        dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Session',member='Lock'" | while read -r line; do
+            if echo "$line" | grep -q "member='Lock'"; then
+                # Record lock time
+                jq --arg ts "$(date +%s)" '.lock_started_at = ($ts|tonumber)' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+            fi
+        done &
+    
+        dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Session',member='Unlock'" | while read -r line; do
+            if echo "$line" | grep -q "member='Unlock'"; then
+                # Calculate elapsed and add to accumulated
+                START_TS=$(jq '.lock_started_at' "$STATE_FILE")
+                if [ "$START_TS" != "null" ]; then
+                    END_TS=$(date +%s)
+                    DIFF=$(( (END_TS - START_TS) / 60 ))
+                    jq --arg diff "$DIFF" '.locked_minutes_accumulated += ($diff|tonumber) | .lock_started_at = null' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+                fi
+            fi
+        done
+        ```
+    
+        *Sync script (`lock-screen.bash`):*
+        - Needs `jq`, `curl`, `bc`.
+        - Uses `JELLYFIN_API_KEY`.
+        - Handles the logic.
+    
+        *Wait, I'll combine the tracker and sync into a single coherent response.*
+    
+        *One detail: The user wants "all backdrop images".*
+        If I download 1 image for every 10 mins, and an item has 3 backdrops, I will download them one by one.
+        I'll use a loop:
+        ```bash
+        for (( i=0; i<REQUIRED_IMAGES; i++ )); do
+           # 1. Get random item
+           # 2. Get its backdrop count
+           # 3. Download backdrop index 0, 1, 2...
+           # 4. Increment i for each image downloaded
+        done
+        ```
+    
+        *Wait, the user said "Starting with 50 images".*
+        The first time the sync script runs, if the count is 0, it should download 50.
+    
+        *Let's write the full sync script.*
+    
+        *Wait, I should check the Jellyfin API for "random" items.*
+        There isn't a "random" endpoint. I'll have to:
+        1. Get all items.
+        2. Pick a random index from the list.
+    
+        *API URL for items:* `https://media.halfab.net/Items?IncludeItemTypes=Movie,Series,MusicArtist&Recursive=true&api_key=...`
+    
+        *Final check on the "Delete" logic:*
+        "delete two image every day it spends not on the lock screen"
+        If `last_active_date` < `today` AND `locked_minutes_accumulated == 0`.
+        This means if you didn't use the screensaver today, it cleans up.
+    
+        *Let's prepare the response.*
+  </THINKING>
+
+  <RESPONSE>
+    Since I cannot directly edit files on your system, I have provided the complete implementation below. You can set this up by copying the blocks into the specified files and running the final setup command.
+    
+    ### 1. Project Context (Update your `jellyfin-screensaver.md` with this)
+    
+    ```markdown
+    # Project: Jellyfin Lock Screen Slideshow (Option 1)
+    
+    ## Overview
+    A system to automatically populate a local folder with Jellyfin backdrop images based on system lock-time usage. The folder is then used by the KDE Plasma "Slideshow" lock screen wallpaper plugin.
+    
+    ## Specifications
+    - **Target Path**: `~/.local/share/jellyfin-wallpapers/`
+    - **Source**: Jellyfin API (`media.halfab.net`)
+    - **Content**: All backdrop images for Movies, Series, and Music Artists.
+    - **Resolution**: Full Resolution.
+    - **Growth Rule**: +1 image for every 10 minutes of accumulated lock time.
+    - **Shrink Rule**: -2 images per day of inactivity (0 lock minutes).
+    - **Cap/Floor**: 
+        - Max Folder Size: 15GB (if exceeded, deletion rate increases to -5 images/day).
+        - Minimum Image Count: 25 images.
+    - **Initial Seed**: 50 images on first run.
+    - **Deduplication**: Filename format `{itemId}_backdrop_{index}.jpg`.
+    
+    ## Components
+    1. **Tracker**: `~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh` (Systemd User Service)
+       - Monitors D-Bus for `org.freedesktop.login1.Session` Lock/Unlock signals.
+       - Maintains `state.json` with accumulated minutes and last active date.
+    2. **Sync**: `~/Scripts-Apps-Plugins/Scripts/lock-screen.bash` (Systemd User Timer/Service)
+       - Performs the API fetching, image downloading, and folder pruning.
+    3. **Systemd Units**: Manages the lifecycle of the tracker and the periodic sync.
+    ```
+    
+    ---
+    
+    ### 2. Implementation Files
+    
+    #### A. The Tracker Script
+    **File**: `~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh`
+    
+    ```bash
+    #!/bin/bash
+    # ~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh
+    
+    STATE_DIR="$HOME/.local/share/jellyfin-wallpapers"
+    STATE_FILE="$STATE_DIR/state.json"
+    mkdir -p "$STATE_DIR"
+    
+    # Initialize state if not exists
+    if [ ! -f "$STATE_FILE" ]; then
+        echo "{\"locked_minutes_accumulated\": 0, \"last_active_date\": \"$(date +%Y-%m-%d)\", \"lock_started_at\": null, \"image_count\": 0}" > "$STATE_FILE"
+    fi
+    
+    echo "Starting Jellyfin Lock Tracker..."
+    
+    # Listen for Lock/Unlock via dbus-monitor
+    # We use --system because login1 is a system bus service
+    dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Session',member='Lock'" | while read -r line; do
+        if echo "$line" | grep -q "member='Lock'"; then
+            jq --arg ts "$(date +%s)" '.lock_started_at = ($ts|tonumber)' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+        fi
+    done &
+    
+    dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Session',member='Unlock'" | while read -r line; do
+        if echo "$line" | grep -q "member='Unlock'"; then
+            START_TS=$(jq '.lock_started_at' "$STATE_FILE")
+            if [ "$START_TS" != "null" ]; then
+                END_TS=$(date +%s)
+                DIFF=$(( (END_TS - START_TS) / 60 ))
+                jq --arg diff "$DIFF" '.locked_minutes_accumulated += ($diff|tonumber) | .lock_started_at = null' "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+            fi
+        fi
+    done
+    
+    wait
+    ```
+    
+    #### B. The Sync Script
+    **File**: `~/Scripts-Apps-Plugins/Scripts/lock-screen.bash`
+    
+    ```bash
+    #!/bin/bash
+    # ~/Scripts-Apps-Plugins/Scripts/lock-screen.bash
+    
+    # --- CONFIGURATION ---
+    API_KEY="a1fd400577d44b39a82f89471d2e7e92"
+    BASE_URL="https://media.halfab.net"
+    DIR="$HOME/.local/share/jellyfin-wallpapers"
+    STATE_FILE="$DIR/state.json"
+    MAX_SIZE_GB=15
+    MIN_IMAGES=25
+    # ---------------------
+    
+    mkdir -p "$DIR"
+    
+    # Load State
+    if [ ! -f "$STATE_FILE" ]; then
+        echo "{\"locked_minutes_accumulated\": 0, \"last_active_date\": \"$(date +%Y-%m-%d)\", \"lock_started_at\": null, \"image_count\": 0}" > "$STATE_FILE"
+    fi
+    
+    get_state() { jq -r "$1" "$STATE_FILE"; }
+    update_state() { jq "$1" "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"; }
+    
+    ACCUMULATED_MIN=$(get_state ".locked_minutes_accumulated")
+    LAST_DATE=$(get_state ".last_active_date")
+    IMG_COUNT=$(get_state ".image_count")
+    TODAY=$(date +%Y-%m-%d)
+    
+    # 1. Handle Shrinkage (Inactive Day)
+    if [ "$LAST_DATE" != "$TODAY" ] && [ "$ACCUMULATED_MIN" -eq 0 ]; then
+        # Determine deletion amount based on size cap
+        DIR_SIZE_BYTES=$(du -sb "$DIR" | cut -f1)
+        CAP_BYTES=$(( MAX_SIZE_GB * 1024 * 1024 * 1024 ))
+        
+        if [ "$DIR_SIZE_BYTES" -gt "$CAP_BYTES" ]; then DEL_COUNT=5; else DEL_COUNT=2; fi
+        
+        # Ensure we don't drop below floor
+        if [ "$IMG_COUNT" -gt "$MIN_IMAGES" ]; then
+            # Delete oldest files
+            find "$DIR" -type f -name "*.jpg" -printf '%T+ %p\n' | sort | head -n "$DEL_COUNT" | cut -d' ' -f2- | xargs rm -f
+            NEW_COUNT=$(( IMG_COUNT - DEL_COUNT ))
+            [ "$NEW_COUNT" -lt "$MIN_IMAGES" ] && NEW_COUNT=$MIN_IMAGES
+            update_state ".image_count = $NEW_COUNT | .last_active_date = \"$TODAY\""
+        else
+            update_state ".last_active_date = \"$TODAY\""
+        fi
+    fi
+    
+    # 2. Handle Growth (Seed or Accumulation)
+    TARGET_DOWNLOADS=0
+    if [ "$IMG_COUNT" -eq 0 ]; then
+        TARGET_DOWNLOADS=50
+    elif [ "$ACCUMULATED_MIN" -ge 10 ]; then
+        TARGET_DOWNLOADS=$(( ACCUMULATED_MIN / 10 ))
+        update_state ".locked_minutes_accumulated = 0"
+    fi
+    
+    if [ "$TARGET_DOWNLOADS" -gt 0 ]; then
+        # Fetch items
+        ITEMS_JSON=$(curl -s "$BASE_URL/Items?IncludeItemTypes=Movie,Series,MusicArtist&ImageTypes=Backdrop&Recursive=true&api_key=$API_KEY")
+        
+        # Get list of IDs and Backdrop counts
+        # We extract ID and the size of the BackdropImageTags array
+        ITEM_DATA=$(echo "$ITEMS_JSON" | jq -c '.Items[] | {id: .Id, tags: (.BackdropImageTags | length)}')
+        
+        DOWNLOADED=0
+        # Shuffle items by converting to array and picking randoms
+        while [ "$DOWNLOADED" -lt "$TARGET_DOWNLOADS" ]; do
+            # Pick a random item from the list
+            RANDOM_ITEM=$(echo "$ITEM_DATA" | shuf -n 1)
+            ID=$(echo "$RANDOM_ITEM" | jq -r '.id')
+            TAG_COUNT=$(echo "$RANDOM_ITEM" | jq -r '.tags')
+    
+            if [ "$TAG_COUNT" -gt 0 ]; then
+                for (( i=0; i<TAG_COUNT; i++ )); do
+                    if [ "$DOWNLOADED" -lt "$TARGET_DOWNLOADS" ]; then
+                        IMG_URL="$BASE_URL/Items/$ID/Images/Backdrop/$i?api_key=$API_KEY"
+                        FILE_NAME="${ID}_backdrop_${i}.jpg"
+                        curl -s "$IMG_URL" -o "$DIR/$FILE_NAME"
+                        ((DOWNLOADED++))
+                    fi
+                done
+            fi
+            
+            # Safety break if we run out of items
+            if [ "$(echo "$ITEM_DATA" | wc -l)" -eq 0 ]; then break; fi
+        done
+        
+        NEW_TOTAL=$(( IMG_COUNT + DOWNLOADED ))
+        update_state ".image_count = $NEW_TOTAL"
+    fi
+    ```
+    
+    #### C. Systemd User Units
+    
+    **File**: `~/.config/systemd/user/jellyfin-wallpaper-tracker.service`
+    ```ini
+    [Unit]
+    Description=Jellyfin Lock Time Tracker
+    
+    [Service]
+    ExecStart=%h/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh
+    Restart=always
+    
+    [Install]
+    WantedBy=default.target
+    ```
+    
+    **File**: `~/.config/systemd/user/jellyfin-wallpaper-sync.service`
+    ```ini
+    [Unit]
+    Description=Jellyfin Wallpaper Sync
+    
+    [Service]
+    ExecStart=%h/Scripts-Apps-Plugins/Scripts/lock-screen.bash
+    ```
+    
+    **File**: `~/.config/systemd/user/jellyfin-wallpaper-sync.timer`
+    ```ini
+    [Unit]
+    Description=Run Jellyfin Wallpaper Sync every 15 minutes
+    
+    [Timer]
+    OnBootSec=1min
+    OnUnitActiveSec=15min
+    
+    [Install]
+    WantedBy=timers.target
+    ```
+    
+    ---
+    
+    ### 3. Setup Instructions
+    
+    Run these commands in your terminal to create the directories, set permissions, and enable the services:
+    
+    ```bash
+    # 1. Create directories
+    mkdir -p ~/Scripts-Apps-Plugins/Scripts/
+    mkdir -p ~/.config/systemd/user/
+    
+    # 2. [USER: You must manually save the code blocks above into the files now]
+    
+    # 3. Set execution permissions
+    chmod +x ~/Scripts-Apps-Plugins/Scripts/lock-screen-tracker.sh
+    chmod +x ~/Scripts-Apps-Plugins/Scripts/lock-screen.bash
+    
+    # 4. Reload systemd and enable services
+    systemctl --user daemon-reload
+    systemctl --user enable --now jellyfin-wallpaper-tracker.service
+    systemctl --user enable --now jellyfin-wallpaper-sync.timer
+    
+    # 5. Verify
+    systemctl --user status jellyfin-wallpaper-tracker.service
+    systemctl --user status jellyfin-wallpaper-sync.timer
+    ```
+    
+    **Final Step**: Go to **System Settings → Screen Locking → Wallpaper** and select **Slideshow**, then point it to `~/.local/share/jellyfin-wallpapers/`.
+  </RESPONSE>
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  6739 in  6383 out  |  178.3s  |  chat
+════════════════════════════════════════════════════════════════
+

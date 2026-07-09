@@ -29,6 +29,7 @@ type PromptBox struct {
 	focused         bool
 	width           int // inner content width (terminal width - 2 for box border)
 	validModelNames map[string]bool // lowercase model names for /model coloring
+	GhostText       string          // displayed dimmed when value is empty; set by app layer
 
 	prevValue string
 	prevLine  int
@@ -230,6 +231,17 @@ func (p PromptBox) handleKey(msg tea.KeyMsg) (PromptBox, tea.Cmd) {
 		p.deleteSelectionIfActive()
 		p.ta.InsertString("\n")
 
+	case keyStr == "right" && p.ta.Value() == "" && p.GhostText != "":
+		ghost := p.GhostText
+		p.GhostText = ""
+		p.ta.SetValue(ghost)
+		p.prevValue = ghost
+		lines := strings.Split(ghost, "\n")
+		last := len(lines) - 1
+		p.moveCursorTo(last, len([]rune(lines[last])))
+		p.refreshAfterChange()
+		return p, nil
+
 	default:
 		if isNavigationKey(keyStr) {
 			p.sel.active = false
@@ -319,11 +331,26 @@ func (p PromptBox) View(innerWidth int) string {
 		visible[i] = ""
 	}
 
-	// Pad each row to innerWidth.
-	for i, row := range visible {
-		vw := visualWidth(row)
-		if vw < innerWidth {
-			visible[i] = row + strings.Repeat(" ", innerWidth-vw)
+	// When the prompt is empty, render ghost text dimmed in the first row.
+	if val == "" && p.GhostText != "" {
+		ghost := p.GhostText
+		// Use only the first line and truncate to fit.
+		if nl := strings.IndexByte(ghost, '\n'); nl >= 0 {
+			ghost = ghost[:nl]
+		}
+		runes := []rune(ghost)
+		if len(runes) > innerWidth {
+			runes = runes[:innerWidth]
+		}
+		padded := string(runes) + strings.Repeat(" ", innerWidth-len(runes))
+		visible[0] = "\x1b[90m" + padded + "\x1b[0m"
+	} else {
+		// Pad each row to innerWidth.
+		for i, row := range visible {
+			vw := visualWidth(row)
+			if vw < innerWidth {
+				visible[i] = row + strings.Repeat(" ", innerWidth-vw)
+			}
 		}
 	}
 

@@ -1,0 +1,147 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 14:42:43  |  local  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  <note_path>jellyfin-screensaver.md</note_path>
+  
+  <note_content>
+  # Project
+  I would like to make a screensaver that pulls images from my jellyfin server and plays them in a slideshow. The jellyfin server is at media.halfab.net
+  
+  ## Guide
+  This should be a QML-based wallpaper plugin that fetches jellyfin images directly vir `XMLHttpRequest` and cycles them. 
+  - should be appliable to either the desktop background, lockscreen and screen saver
+  </note_content>
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user wants to create a QML-based wallpaper plugin that acts as a screensaver/wallpaper/lockscreen.
+    It should fetch images from a Jellyfin server (`media.halfab.net`) using `XMLHttpRequest` and cycle through them in a slideshow.
+    
+    Key requirements:
+    1.  **Technology**: QML.
+    2.  **Functionality**: Slideshow of images from Jellyfin.
+    3.  **Method**: `XMLHttpRequest` to fetch images.
+    4.  **Target**: Desktop background, lockscreen, or screensaver.
+    
+    Since "QML-based wallpaper plugin" is a bit platform-specific (e.g., KDE Plasma uses QML for wallpapers), I should clarify or provide a general approach that works for KDE Plasma, as that's the most common place where QML is used for wallpapers.
+    
+    Plan:
+    1.  Identify how Jellyfin API works for fetching images (e.g., `/Items`, `/Images`).
+    2.  Structure a QML application/plugin.
+    3.  Implement the image fetching logic using `XMLHttpRequest`.
+    4.  Implement the slideshow logic (Timer, Image component).
+    
+    Let's start by researching Jellyfin API for images.
+  </THINKING>
+
+  <RESPONSE>
+    To create a QML-based slideshow that pulls images from your Jellyfin server, you can leverage the Jellyfin API to fetch item metadata (like posters or backdrops) and then use `XMLHttpRequest` to retrieve the image URLs.
+    
+    Since you mentioned a "QML-based wallpaper plugin," this implementation is most compatible with **KDE Plasma**, which uses QML for its wallpaper engine.
+    
+    ### 1. Jellyfin API Strategy
+    To get images, you typically follow these steps:
+    1.  **Authenticate**: Get an `AccessToken` (via `/Users/{userId}/AccessToken` or by providing an API key in headers).
+    2.  **Search Items**: Use `/Items` with `IncludeImages=true` to get a list of media items.
+    3.  **Get Image URL**: The API returns paths or you can construct the URL: `https://media.halfab.net/Items/{ItemId}/Images/Primary`.
+    
+    ### 2. Implementation Concept (QML)
+    
+    Here is a conceptual structure for your QML component.
+    
+    ```qml
+    import QtQuick 2.15
+    import QtQuick.Controls 2.15
+    
+    Item {
+        id: root
+        property string jellyfinUrl: "https://media.halfab.net"
+        property string apiKey: "YOUR_API_KEY"
+        property string userId: "YOUR_USER_ID"
+        
+        property var imageList: []
+        property int currentIndex: 0
+        
+        // The Image component that displays the current slide
+        Image {
+            id: slideshowImage
+            anchors.fill: parent
+            fillMode: Image.PreserveAspectCrop
+            source: ""
+            
+            // Smooth transitions
+            Behavior on opacity { NumberAnimation { duration: 1000 } }
+        }
+    
+        // Timer to cycle images
+        Timer {
+            interval: 10000 // 10 seconds
+            running: true
+            repeat: true
+            onTriggered: {
+                if (imageList.length > 0) {
+                    currentIndex = (currentIndex + 1) % imageList.length
+                    showNextImage()
+                }
+            }
+        }
+    
+        function fetchImageList() {
+            var xhr = new XMLHttpRequest();
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === XMLHttpRequest.DONE) {
+                    if (xhr.status === 200) {
+                        var response = JSON.parse(xhr.responseText);
+                        // Extract image URLs from the Jellyfin response
+                        imageList = response.Items.map(item => {
+                            return jellyfinUrl + "/Items/" + item.Id + "/Images/Primary";
+                        });
+                        if (imageList.length > 0) {
+                            showNextImage();
+                        }
+                    }
+                }
+            }
+            // Example endpoint: Get all movies/shows
+            xhr.open("GET", jellyfinUrl + "/Items?IncludeImages=true&Recursive=true&Fields=PrimaryImageAspectRatio", false);
+            xhr.setRequestHeader("X-Emby-Token", apiKey);
+            xhr.send();
+        }
+    
+        function showNextImage() {
+            slideshowImage.opacity = 0;
+            // Small delay to allow fade out before changing source
+            var delayTimer = Qt.createQmlObject('import QtQuick 2.15; Timer { interval: 500; repeat: false }', slideshowImage);
+            delayTimer.triggered.connect(function() {
+                slideshowImage.source = imageList[currentIndex];
+                slideshowImage.opacity = 1;
+            });
+            delayTimer.start();
+        }
+    
+        Component.onCompleted: fetchImageList()
+    }
+    ```
+    
+    ### 3. Deployment Notes
+    
+    *   **For KDE Plasma Wallpaper**: You would need to wrap this QML in a folder structure containing a `metadata.desktop` file and a `ui/main.qml` file, then install it into `~/.local/share/plasma/wallpapers/`.
+    *   **For Lockscreen/Screensaver**: 
+        *   **Linux (KDE)**: You can use the "Screen Locker" settings to select a custom QML plugin if you develop it as a Plasma component.
+        *   **Standalone**: You could compile this into a tiny application using `qmlscene` or a minimal `QGuiApplication` wrapper.
+    *   **CORS/Security**: Since you are using `XMLHttpRequest` within a QML engine, you won't face standard browser CORS issues, but ensure your Jellyfin server allows the connection.
+    
+    ### Next Steps
+    1.  **Get your API Key**: Go to Jellyfin Dashboard $\rightarrow$ API Keys.
+    2.  **Identify User ID**: Find your User ID in the Jellyfin URL when logged in.
+    3.  **Test locally**: Run the code using `qmlscene yourfile.qml` to verify the image fetching logic before packaging it as a plugin.
+  </RESPONSE>
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  2676 in  1340 out  |  33.4s  |  chat
+════════════════════════════════════════════════════════════════
+

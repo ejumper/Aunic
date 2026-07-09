@@ -8,14 +8,14 @@ import (
 
 // ModelItem is one entry in the model picker.
 type ModelItem struct {
-	ProviderKey string
+	HarnessKey  string
 	ModelKey    string
 	Name        string // display name from aunic.json
 }
 
 // ModelSelectedMsg is emitted when the user selects a model from the picker.
 type ModelSelectedMsg struct {
-	ProviderKey string
+	HarnessKey  string
 	ModelKey    string
 }
 
@@ -88,7 +88,7 @@ func (mb ModelBar) Update(msg tea.Msg) (ModelBar, tea.Cmd) {
 			if mb.cursor >= 0 && mb.cursor < len(mb.items) {
 				item := mb.items[mb.cursor]
 				return mb, func() tea.Msg {
-					return ModelSelectedMsg{ProviderKey: item.ProviderKey, ModelKey: item.ModelKey}
+					return ModelSelectedMsg{HarnessKey: item.HarnessKey, ModelKey: item.ModelKey}
 				}
 			}
 		case "left", "up":
@@ -123,7 +123,7 @@ func (mb ModelBar) Update(msg tea.Msg) (ModelBar, tea.Cmd) {
 			if li.row == contentRow && contentCol >= li.startCol && contentCol < li.endCol {
 				item := mb.items[li.idx]
 				return mb, func() tea.Msg {
-					return ModelSelectedMsg{ProviderKey: item.ProviderKey, ModelKey: item.ModelKey}
+					return ModelSelectedMsg{HarnessKey: item.HarnessKey, ModelKey: item.ModelKey}
 				}
 			}
 		}

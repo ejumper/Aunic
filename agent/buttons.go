@@ -9,13 +9,13 @@ import (
 // and 4 (mode) can be overridden at render time via ButtonRow fields.
 var buttonLabels = [5]string{"+", "/", "kimi k2.6", "agent: off", "mode: note"}
 
-// The send button (index 5) uses a pill style with a blue background.
+// The send button (index 6) uses a pill style with a blue background.
 const (
 	sendLabel       = "↑"
 	sendLabelActive = "■"
 	sendBgColor     = 4
 	sendFgColor     = 15
-	buttonCount     = 6 // 5 bracket buttons + 1 pill button
+	buttonCount     = 7 // 5 bracket buttons + 1 voice button + 1 pill button
 )
 
 // ButtonRow renders the single-line button bar.
@@ -24,6 +24,7 @@ type ButtonRow struct {
 	ModelLabel string // replaces the placeholder label at button index 2 when non-empty
 	AgentLabel string // replaces the placeholder label at button index 3 when non-empty
 	ModeLabel  string // replaces the placeholder label at button index 4 when non-empty
+	VoiceLabel string // 🔇 or 🔈 at button index 5
 }
 
 // bracketButtonColor returns the ANSI foreground color (0–7) for a button
@@ -66,7 +67,8 @@ func bracketWidth(label string) int {
 
 // ButtonXRange returns the [startX, endX) screen X range of left-side button i
 // within the pane inner content (X=1 is first inner col, after the left border).
-func ButtonXRange(i int, modelLabel, agentLabel, modeLabel string) (startX, endX int) {
+// Index 5 is the voice toggle button (🔇/🔈).
+func ButtonXRange(i int, modelLabel, agentLabel, modeLabel, voiceLabel string) (startX, endX int) {
 	labels := buttonLabels
 	if modelLabel != "" {
 		labels[2] = modelLabel
@@ -84,6 +86,15 @@ func ButtonXRange(i int, modelLabel, agentLabel, modeLabel string) (startX, endX
 			return col, col + w
 		}
 		col += w + 1 // +1 for the space between buttons
+	}
+	// Index 5: voice button (follows the 5 bracket buttons)
+	vl := voiceLabel
+	if vl == "" {
+		vl = "🔇"
+	}
+	vw := bracketWidth(vl)
+	if i == 5 {
+		return col, col + vw
 	}
 	return -1, -1
 }
@@ -131,6 +142,14 @@ func (b ButtonRow) View(innerWidth int, focused bool, runActive bool) string {
 	for i, label := range labels {
 		leftParts[i] = bracketButton(label, focused && i == b.focusedIdx)
 	}
+
+	// Voice toggle button (index 5), between [mode] and the send pill.
+	voiceLabel := b.VoiceLabel
+	if voiceLabel == "" {
+		voiceLabel = "🔇"
+	}
+	leftParts = append(leftParts, bracketButton(voiceLabel, focused && b.focusedIdx == 5))
+
 	left := strings.Join(leftParts, " ")
 	label := sendLabel
 	if runActive {
@@ -139,10 +158,10 @@ func (b ButtonRow) View(innerWidth int, focused bool, runActive bool) string {
 	right := pill(label, sendBgColor, sendFgColor, focused && b.focusedIdx == buttonCount-1)
 
 	leftPlain := 0
-	for i, label := range labels {
-		leftPlain += bracketWidth(label)
-		if i < len(labels)-1 {
-			leftPlain++ // space between buttons
+	for i, lbl := range append(labels[:], voiceLabel) {
+		leftPlain += bracketWidth(lbl)
+		if i < len(labels) { // space after each bracket button except before the pill
+			leftPlain++
 		}
 	}
 	rightPlain := pillWidth(label)

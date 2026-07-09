@@ -1,0 +1,143 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 14:02:54  |  local  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  <note_path>jellyfin-screensaver.md</note_path>
+  
+  <note_content>
+  # Project
+  I would like to make a screensaver that pulls images from my jellyfin server and plays them in a slideshow. The jellyfin server is at media.halfab.net
+  
+  ## Guide
+  This should be a QML-based wallpaper plugin that fetches jellyfin images directly vir `XMLHttpRequest` and cycles them. 
+  - should be appliable to either the desktop background, lockscreen and screen saver
+  </note_content>
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user wants to create a QML-based wallpaper plugin that acts as a screensaver.
+    It should:
+    1. Pull images from a Jellyfin server (`media.halfab.net`).
+    2. Play them in a slideshow.
+    3. Use `XMLHttpRequest` to fetch images directly.
+    4. Be applicable to desktop background, lockscreen, and screensaver.
+    
+    Since the user provided a note with a project description, they are likely looking for a starting point, a plan, or some initial code.
+    
+    First, I need to understand how "QML-based wallpaper plugin" works. This usually implies a KDE Plasma wallpaper plugin or something similar for a specific desktop environment. Given the "QML-based wallpaper plugin" terminology, KDE Plasma is the most likely target.
+    
+    Plan:
+    1.  Identify how to create a KDE Plasma wallpaper plugin using QML.
+    2.  Research how to fetch images from Jellyfin using `XMLHttpRequest` in QML. Jellyfin has an API. I'll need to know the endpoints for getting images (e.g., library images, item images).
+    3.  Structure the QML code for a slideshow.
+    4.  Provide a high-level architecture and some initial code snippets.
+    
+    Let's start by researching Jellyfin API for images and KDE Plasma wallpaper plugin structure.
+  </THINKING>
+
+  <RESPONSE>
+    To build a QML-based wallpaper plugin for Jellyfin, you'll likely be targeting **KDE Plasma**, as it is the most prominent desktop environment that uses QML for wallpaper plugins.
+    
+    Here is a technical breakdown and a starting architecture for your project.
+    
+    ### 1. Technical Architecture
+    
+    *   **Environment:** KDE Plasma Wallpaper Plugin (`com.plasma.wallpaper`).
+    *   **Logic Engine:** QML + JavaScript (`XMLHttpRequest`).
+    *   **Data Source:** Jellyfin API (`media.halfab.net`).
+    *   **Core Components:**
+        *   `main.qml`: The entry point for the wallpaper plugin.
+        *   `JellyfinClient.js`: A helper script to handle authentication and API requests.
+        *   `SlideshowTimer.qml`: A timer-based component to cycle through image URLs.
+        *   `ImageDisplay.qml`: A component using `Image` with smooth transitions (e.g., `OpacityAnimator`).
+    
+    ### 2. Jellyfin API Strategy
+    
+    Since you want to use `XMLHttpRequest` directly in QML, you'll need to handle two main steps:
+    1.  **Authentication:** Obtain an API key or an access token. For a personal screensaver, using an **API Key** generated in the Jellyfin Dashboard is the simplest method.
+    2.  **Fetching Images:** 
+        *   **Option A (Direct Item Images):** Fetch a list of items from `/Items` and then construct image URLs using the pattern: `https://media.halfab.net/Items/{ItemId}/Images/Primary`.
+        *   **Option B (Backdrops):** Use the `/Items/{ItemId}/Backdrops` endpoint if you want higher-resolution background art.
+    
+    ### 3. Implementation Roadmap
+    
+    #### Phase 1: The Jellyfin Client (`JellyfinClient.js`)
+    You will need a function that fetches a list of item IDs.
+    
+    ```javascript
+    // Simplified logic concept
+    function fetchImageUrls(apiKey, baseUrl) {
+        var xhr = new XMLHttpRequest();
+        var url = baseUrl + "/Items?IncludeItemTypes=Movie,Show&Recursive=true&Fields=PrimaryImageAspectRatio";
+        
+        xhr.onreadystatechange = function() {
+            if (xhr.readyState === XMLHttpRequest.DONE) {
+                var response = JSON.parse(xhr.responseText);
+                // Extract ItemIds and map to image URLs
+                return response.Items.map(item => baseUrl + "/Items/" + item.Id + "/Images/Primary");
+            }
+        }
+        xhr.open("GET", url);
+        xhr.setRequestHeader("X-Emby-Token", apiKey);
+        xhr.send();
+    }
+    ```
+    
+    #### Phase 2: The QML Slideshow (`main.qml`)
+    You'll use a `Timer` to change the `source` of an `Image` element. To make it look like a professional screensaver, use two `Image` elements and cross-fade them.
+    
+    ```qml
+    import QtQuick 2.15
+    import QtQuick.Controls 2.15
+    
+    Item {
+        id: root
+        
+        property var imageUrls: []
+        property int currentIndex: 0
+    
+        Image {
+            id: imageDisplay
+            anchors.fill: parent
+            source: imageUrls[currentIndex]
+            fillMode: Image.PreserveAspectCrop
+            opacity: 1.0
+            
+            Behavior on opacity {
+                NumberAnimation { duration: 2000 } // Smooth fade
+            }
+        }
+    
+        Timer {
+            interval: 30000 // 30 seconds
+            running: true
+            repeat: true
+            onTriggered: {
+                currentIndex = (currentIndex + 1) % imageUrls.length;
+                imageDisplay.opacity = 0; // Trigger fade out
+                // Logic to trigger fade in after a tiny delay or via property binding
+            }
+        }
+    }
+    ```
+    
+    ### 4. Deployment Considerations
+    
+    *   **Desktop Background:** In KDE, you install this by placing the folder in `~/.local/share/plasma/wallpapers/`.
+    *   **Lockscreen/Screensaver:** 
+        *   **Lockscreen:** KDE's lockscreen is a separate QML module. You can often reuse your logic by creating a separate "Lockscreen Plugin."
+        *   **Screensaver:** True "screensavers" in modern Linux environments are often handled by the session manager (like `kscreenlocker`). If you want a dedicated screensaver that triggers when idle, you might actually want to build a standalone **Qt/QML Application** rather than a wallpaper plugin.
+    
+    ### Next Steps
+    1.  **Verify API Access:** Ensure you can reach `media.halfab.net` via a browser or `curl` using your API key.
+    2.  **Setup Dev Environment:** Install `qt5-declarative` and `plasma-workspace-devel` (on Arch/Fedora/Ubuntu) to test the wallpaper plugin locally.
+    3.  **Start Small:** First, get a single hardcoded image to display as a wallpaper plugin, then add the `XMLHttpRequest` logic.
+  </RESPONSE>
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  2676 in  1400 out  |  35.0s  |  chat
+════════════════════════════════════════════════════════════════
+

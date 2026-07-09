@@ -1,27 +1,84 @@
 package transcript
 
-import "strings"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
-// State is the persistent per-file UI state stored as a single-line HTML
-// comment at the bottom of a note file. Each field is a raw string for
-// permissive parsing; callers validate values and fall back to defaults on
-// unrecognized input rather than rejecting the line.
+// State is the persistent UI state shared across all open files. Fields are
+// raw strings for permissive parsing; callers validate values and fall back
+// to defaults on unrecognized input.
 type State struct {
-	Mode       string // "note" | "chat"
-	Agent      string // "off" | "read" | "work"
-	Model      string // "<provider>/<model>" (matches llm config keys)
-	Transcript string // "closed" | "open:partial" | "open:full"
+	Mode       string `json:"mode"`             // "note" | "chat"
+	Agent      string `json:"agent"`            // "off" | "read" | "work"
+	Model      string `json:"model"`            // "<provider>/<model>" (matches llm config keys)
+	Transcript string `json:"transcript"`       // "closed" | "open:partial" | "open:full"
+	Voice      string `json:"voice,omitempty"` // "on" | "off" (omitted when off)
 }
 
 const (
-	stateLineVersion = "1"
-	stateLineMarker  = "<!-- aunic-state"
+	stateLineMarker = "<!-- aunic-state"
 )
 
+// globalStatePath returns ~/.local/share/aunic/state.json, respecting
+// XDG_DATA_HOME when set.
+func globalStatePath() (string, error) {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, "aunic", "state.json"), nil
+}
+
+// LoadGlobalState reads ~/.local/share/aunic/state.json. Returns a zero State
+// (and no error) when the file does not exist yet.
+func LoadGlobalState() (State, error) {
+	path, err := globalStatePath()
+	if err != nil {
+		return State{}, err
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return State{}, nil
+	}
+	if err != nil {
+		return State{}, err
+	}
+	var s State
+	if err := json.Unmarshal(data, &s); err != nil {
+		return State{}, err
+	}
+	return s, nil
+}
+
+// SaveGlobalState writes s to ~/.local/share/aunic/state.json, creating the
+// directory if needed. Errors are non-fatal; callers may ignore the return.
+func SaveGlobalState(s State) error {
+	path, err := globalStatePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
 // ExtractState peels all aunic-state lines off text. Returns the remainder
-// (with one trailing newline normalized), the parsed state from the LAST
-// such line (later wins), and whether any state line was found. Strips
-// every match so stray orphans don't accumulate across rewrites.
+// (with one trailing newline normalized), the parsed state from the LAST such
+// line (later wins), and whether any state line was found. Used for backward-
+// compatible migration: existing files with embedded state lines are stripped
+// on first read; the state is migrated to the global file instead.
 // Unrecognized keys are silently ignored.
 func ExtractState(text string) (rest string, s State, found bool) {
 	lines := strings.Split(text, "\n")
@@ -57,6 +114,8 @@ func ExtractState(text string) (rest string, s State, found bool) {
 			s.Model = val
 		case "transcript":
 			s.Transcript = val
+		case "voice":
+			s.Voice = val
 		}
 	}
 	rest = strings.Join(out, "\n")
@@ -65,44 +124,4 @@ func ExtractState(text string) (rest string, s State, found bool) {
 		rest += "\n"
 	}
 	return rest, s, true
-}
-
-// RenderState formats a State as the single-line HTML comment. Empty fields
-// are omitted so a minimal state still produces a compact line.
-func RenderState(s State) string {
-	var b strings.Builder
-	b.WriteString(stateLineMarker)
-	b.WriteString(" v=")
-	b.WriteString(stateLineVersion)
-	if s.Mode != "" {
-		b.WriteString(" mode=")
-		b.WriteString(s.Mode)
-	}
-	if s.Agent != "" {
-		b.WriteString(" agent=")
-		b.WriteString(s.Agent)
-	}
-	if s.Model != "" {
-		b.WriteString(" model=")
-		b.WriteString(s.Model)
-	}
-	if s.Transcript != "" {
-		b.WriteString(" transcript=")
-		b.WriteString(s.Transcript)
-	}
-	b.WriteString(" -->")
-	return b.String()
-}
-
-// AppendStateLine returns text with a state line appended at the end.
-// Ensures exactly one newline before the line and one terminating newline.
-func AppendStateLine(text string, s State) string {
-	var b strings.Builder
-	b.WriteString(text)
-	if !strings.HasSuffix(text, "\n") {
-		b.WriteByte('\n')
-	}
-	b.WriteString(RenderState(s))
-	b.WriteByte('\n')
-	return b.String()
 }

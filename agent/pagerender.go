@@ -250,12 +250,18 @@ func finalizeLinkSentinels(s string) (string, [][]linkSpan) {
 // renderMarkdownPage splits markdown into source lines, detects table blocks,
 // and renders each segment to pageLines with ANSI styling via
 // editor.HighlightLine for non-table lines and a custom column-aligned
-// renderer for tables.
+// renderer for tables. Lines inside fenced code blocks use Chroma highlighting
+// instead of HighlightLine, so `# comment` lines are not styled as H1 headings.
 func renderMarkdownPage(markdown string, innerWidth int) []pageLine {
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
 	srcLines := strings.Split(markdown, "\n")
+
+	// Pre-scan for fenced code blocks. Lines in the map bypass renderTextLine
+	// (which applies markdown heading/emphasis rules that are incorrect inside
+	// code blocks — e.g. `# comment` would be styled as an H1).
+	codeLines := editor.ParseCodeBlockRanges(srcLines, nil)
 
 	var out []pageLine
 	i := 0
@@ -263,6 +269,15 @@ func renderMarkdownPage(markdown string, innerWidth int) []pageLine {
 		if tStart, tEnd := detectTableAt(srcLines, i); tStart >= 0 {
 			out = append(out, renderTable(srcLines[tStart:tEnd], tStart, tEnd, innerWidth)...)
 			i = tEnd
+			continue
+		}
+		if hl, ok := codeLines[i]; ok {
+			out = append(out, pageLine{
+				display: padTo(hl, innerWidth),
+				source:  srcLines[i],
+				srcLine: i,
+			})
+			i++
 			continue
 		}
 		out = append(out, renderTextLine(srcLines[i], i, innerWidth)...)

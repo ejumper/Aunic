@@ -71,8 +71,6 @@ func ColorKeywords(s string, sc *SlashCmdResult, validModels map[string]bool) st
 		spans = inlineTokenSpan(trimmed, "/todo")
 	case SlashClear:
 		spans = inlineTokenSpan(trimmed, "/clear")
-	case SlashChat2Note:
-		spans = inlineTokenSpan(trimmed, "/chat2note")
 	}
 
 	var b strings.Builder
@@ -143,10 +141,6 @@ const (
 	SlashMarkerScope
 	SlashMarkerReadOnly
 	SlashMarkerExclude
-	// SlashChat2Note runs the two-step "condense chat into note" workflow.
-	// Optional extra guidance can follow the command (e.g. "/chat2note
-	// focus on the API design").
-	SlashChat2Note
 )
 
 // SlashCmdResult holds the parsed result of a recognized slash command.
@@ -158,8 +152,7 @@ type SlashCmdResult struct {
 	CopyText     string
 	ModelName    string // non-empty for /model <name>
 	WebQuery     string // non-empty for /web <query>
-	ClearTarget  string // "trans"|"chat"|"tool"|"search" for /clear; "" for the bare /clear no-op
-	Chat2NoteExtra string // optional extra guidance appended to /chat2note
+	ClearTarget string // "trans"|"chat"|"tool"|"search" for /clear; "" for the bare /clear no-op
 }
 
 // ParseSlashCmd checks whether s is a recognized slash command and returns
@@ -245,13 +238,6 @@ func ParseSlashCmd(s string) *SlashCmdResult {
 	case s == "/todo":
 		return &SlashCmdResult{Kind: SlashTodo}
 
-	case s == "/chat2note":
-		return &SlashCmdResult{Kind: SlashChat2Note}
-
-	case strings.HasPrefix(s, "/chat2note "):
-		extra := strings.TrimSpace(s[len("/chat2note "):])
-		return &SlashCmdResult{Kind: SlashChat2Note, Chat2NoteExtra: extra}
-
 	case s == "/clear":
 		return &SlashCmdResult{Kind: SlashClear}
 
@@ -294,7 +280,6 @@ func FindInlineCmd(s string) *SlashCmdResult {
 		{"/web", SlashWeb},
 		{"/todo", SlashTodo},
 		{"/clear", SlashClear},
-		{"/chat2note", SlashChat2Note},
 	} {
 		if r := findInlineToken(s, entry.token, entry.kind); r != nil {
 			return r

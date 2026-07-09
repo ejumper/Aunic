@@ -77,6 +77,7 @@ func New(filepath, content string) Model {
 	// alt+ctrl variant (sent by some terminals as \x1b[1;7D).
 	ta.KeyMap.WordBackward.SetKeys("alt+left", "alt+b", "ctrl+left", "alt+ctrl+left")
 	ta.KeyMap.WordForward.SetKeys("alt+right", "alt+f", "ctrl+right", "alt+ctrl+right")
+	ta.KeyMap.DeleteWordForward.SetKeys("alt+d", "ctrl+delete")
 
 	ta.SetValue(content)
 	// SetValue leaves the cursor at the end of inserted content. Walk back to (0,0).
@@ -261,6 +262,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.deleteSelectionIfActive()
 			m.textarea.InsertString("\t")
 		}
+	case keyStr == "enter":
+		m.deleteSelectionIfActive()
+		// Carry the current line's leading whitespace onto the new line.
+		indent := ""
+		lines := strings.Split(m.textarea.Value(), "\n")
+		if row := m.textarea.Line(); row < len(lines) {
+			indent, _ = extractIndent(lines[row])
+		}
+		m.textarea.InsertString("\n" + indent)
 	case keyStr == "shift+enter" || keyStr == "alt+enter":
 		m.deleteSelectionIfActive()
 		m.textarea.InsertString("\n")
@@ -694,7 +704,7 @@ func isExtendKey(s string) bool {
 // Used to guard against double-deletion when a selection was just cleared.
 func isDeleteKey(s string) bool {
 	switch s {
-	case "backspace", "ctrl+h", "delete", "ctrl+d":
+	case "backspace", "ctrl+h", "delete", "ctrl+d", "ctrl+delete":
 		return true
 	}
 	return false

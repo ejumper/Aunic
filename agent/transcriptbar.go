@@ -50,6 +50,10 @@ type TranscriptOpenFileMsg struct {
 	Content string
 }
 
+// TasksOpenMsg is emitted when the user presses [tasks] in the top bar.
+// The app handles it by opening the task overlay.
+type TasksOpenMsg struct{}
+
 // TodoSummaryClearAllMsg is emitted when the user presses the [x] button on
 // the persistent todo summary row, clearing all active todos.
 type TodoSummaryClearAllMsg struct{}

@@ -836,22 +836,24 @@ func buildView(lines []string, contentWidth, gutterW, cursorLine int, hlCache ma
 	// (non-markdown Chroma). A nil map means plain text for all lines.
 	var lineMap map[int]string
 	if isMarkdown {
-		lineMap = parseCodeBlockRanges(lines, hlCache)
+		lineMap = ParseCodeBlockRanges(lines, hlCache)
 	} else {
 		lineMap = highlightWholeFile(filepath, lines, hlCache)
 	}
 
 	for i, line := range lines {
 		indent, content := extractIndent(line)
-		h1 := isMarkdown && isH1(content)
 
 		var highlighted string
+		var h1 bool
 		if hl, ok := lineMap[i]; ok {
 			// Already fully highlighted by Chroma (indent baked in).
+			// h1 stays false — code block lines must not get the H1 underline.
 			highlighted = hl
 			indent = ""
 		} else if isMarkdown {
 			highlighted = cachedHighlight(content, hlCache)
+			h1 = isH1(content)
 		} else {
 			highlighted = content
 		}

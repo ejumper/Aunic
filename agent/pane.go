@@ -196,6 +196,10 @@ type AgentModeCyclePressMsg struct{}
 // app.go flips between "note" and "chat" modes.
 type ModeTogglePressMsg struct{}
 
+// VoiceTogglePressMsg is emitted when the voice button (index 5) is pressed.
+// app.go flips voice mode on/off.
+type VoiceTogglePressMsg struct{}
+
 // AttachPickerPressMsg is emitted when the "+" button (index 0) is pressed.
 // app.go opens the system file picker and inserts the result as an @path token.
 type AttachPickerPressMsg struct{}
@@ -574,30 +578,36 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 		}
 		// Button row is at Y = indicator(1) + top border(1) + prompt content rows.
 		if msg.Y == 2+p.PromptBox.CurrentHeight() {
+			vl := p.Buttons.VoiceLabel
 			// "+" button (index 0): open file picker.
-			plusStartX, plusEndX := ButtonXRange(0, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			plusStartX, plusEndX := ButtonXRange(0, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
 			if msg.X >= plusStartX && msg.X < plusEndX {
 				return p, func() tea.Msg { return AttachPickerPressMsg{} }
 			}
 			// "/" button (index 1): compute its X range from button layout.
-			slashStartX, slashEndX := ButtonXRange(1, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			slashStartX, slashEndX := ButtonXRange(1, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
 			if msg.X >= slashStartX && msg.X < slashEndX {
 				return p, func() tea.Msg { return CmdPickerOpenMsg{} }
 			}
 			// Model button (index 2): open model picker.
-			modelStartX, modelEndX := ButtonXRange(2, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			modelStartX, modelEndX := ButtonXRange(2, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
 			if msg.X >= modelStartX && msg.X < modelEndX {
 				return p, func() tea.Msg { return ModelOpenMsg{} }
 			}
 			// Agent mode button (index 3): cycle off → read → work → off.
-			agentStartX, agentEndX := ButtonXRange(3, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			agentStartX, agentEndX := ButtonXRange(3, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
 			if msg.X >= agentStartX && msg.X < agentEndX {
 				return p, func() tea.Msg { return AgentModeCyclePressMsg{} }
 			}
 			// Mode button (index 4): toggle note/chat mode.
-			modeStartX, modeEndX := ButtonXRange(4, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel)
+			modeStartX, modeEndX := ButtonXRange(4, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
 			if msg.X >= modeStartX && msg.X < modeEndX {
 				return p, func() tea.Msg { return ModeTogglePressMsg{} }
+			}
+			// Voice button (index 5): toggle voice on/off.
+			voiceStartX, voiceEndX := ButtonXRange(5, p.Buttons.ModelLabel, p.Buttons.AgentLabel, p.Buttons.ModeLabel, vl)
+			if msg.X >= voiceStartX && msg.X < voiceEndX {
+				return p, func() tea.Msg { return VoiceTogglePressMsg{} }
 			}
 			// Send pill occupies the last pillWidth columns before the right border.
 			pw := pillWidth(sendLabel)
@@ -648,6 +658,8 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 					return p, func() tea.Msg { return AgentModeCyclePressMsg{} }
 				} else if p.Buttons.focusedIdx == 4 { // mode button
 					return p, func() tea.Msg { return ModeTogglePressMsg{} }
+				} else if p.Buttons.focusedIdx == 5 { // voice button
+					return p, func() tea.Msg { return VoiceTogglePressMsg{} }
 				}
 			}
 			return p, nil

@@ -9,9 +9,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/ejumper/aunic/bridge"
 	"github.com/ejumper/aunic/llm"
-	"github.com/ejumper/aunic/logs"
+	"github.com/ejumper/aunic/voice"
 )
 
 // kittyInputFilter translates kitty keyboard-protocol CSI-u sequences that
@@ -33,12 +32,11 @@ func kittyInputFilter(_ tea.Model, msg tea.Msg) tea.Msg {
 }
 
 func main() {
-	if err := logs.Init(logs.DefaultPath()); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: could not open log file: %v\n", err)
-	} else {
-		defer logs.Close()
-	}
 	slog.Info("aunic start", "args", os.Args[1:])
+
+	if len(os.Args) >= 2 && os.Args[1] == "tasks" {
+		os.Exit(cmdTasks(os.Args[2:]))
+	}
 
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: aunic <file>")
@@ -57,14 +55,10 @@ func main() {
 	}
 
 	cfg := llm.LoadConfig()
-	// If the active model is agent_sdk-backed, the Node bridge is required.
-	// Warn (not fatal) at startup so the user sees the problem before sending.
-	if cfg.ProviderKind == "agent_sdk" {
-		if err := bridge.CheckNode(); err != nil {
-			slog.Warn("bridge_precheck", "error", err.Error())
-			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
-		}
-	}
+	// Clean up any mpv/FIFO orphans left behind by prior sessions before
+	// starting playback in this one.
+	voice.SweepOrphans()
+
 	m := newApp(filepath, string(content), cfg)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithFilter(kittyInputFilter))
 

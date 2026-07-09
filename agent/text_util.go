@@ -15,6 +15,12 @@ import (
 // helper and a stale "import cycle with render.go" comment (same package, no
 // cycle possible). Moved here so it has an obvious home and uses the unicode-
 // aware visualWidth instead of the older ASCII-assuming variant.
+// PadTo is the exported variant of padTo, for use from the main package.
+func PadTo(s string, width int) string { return padTo(s, width) }
+
+// VisualWidth is the exported variant of visualWidth, for use from the main package.
+func VisualWidth(s string) int { return visualWidth(s) }
+
 func padTo(s string, width int) string {
 	w := visualWidth(s)
 	if w < width {

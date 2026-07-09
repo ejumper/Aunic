@@ -1,24 +1,23 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/ejumper/aunic/agent"
 	"github.com/ejumper/aunic/editor"
+	claude "github.com/ejumper/aunic/harness/claude"
+	pi "github.com/ejumper/aunic/harness/pi"
 	"github.com/ejumper/aunic/llm"
 	"github.com/ejumper/aunic/markers"
-	"github.com/ejumper/aunic/runner"
 	"github.com/ejumper/aunic/todos"
 	"github.com/ejumper/aunic/transcript"
+	"github.com/ejumper/aunic/voice"
 	"github.com/ejumper/aunic/web"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -70,19 +69,6 @@ type appModel struct {
 
 	llmCfg llm.Config
 
-	// Model run state.
-	runActive          bool
-	runCancel          context.CancelFunc
-	runStream          *runner.Stream
-	runSnapshotHash    string // sha256 of editor buffer at run start; used for note_write conflict detection
-	runSnapshotContent string // full editor buffer at run start; used for "model wins" revert
-
-	// Conflict resolution state.
-	conflictMode         bool
-	pendingNoteEdit      *runner.NoteEditApplyMsg
-	pendingNoteWrite     *runner.NoteWriteApplyMsg
-	conflictJustResolved bool // suppresses next ToolResultMsg error indicator after "user wins"
-
 	// modelMode is true when the model picker bar is open.
 	modelMode bool
 
@@ -130,13 +116,6 @@ type appModel struct {
 	// writeNote() after every todo_write / todo_done.
 	todos []todos.Todo
 
-	// /chat2note state. chat2noteRowsToClear is the set of transcript Row
-	// numbers that should be removed when the current chat2note step-2 run
-	// finishes successfully. Non-empty implies a chat2note flow is in
-	// progress; an empty slice means a normal run is active.
-	chat2noteRowsToClear []int
-	chat2noteExtra       string
-
 	// homeDir and cwd are cached at startup so renderTitleBar/formatTitlePath
 	// don't issue os.UserHomeDir / os.Getwd syscalls on every render frame.
 	// Empty string means the lookup failed at startup; callers fall back to the
@@ -152,20 +131,63 @@ type appModel struct {
 	markerHashLen int
 	markerHash    uint64
 	markerCached  bool
+
+	// Voice I/O state.
+	voiceEnabled      bool            // true when 🔈 is active
+	ttsCmd            *exec.Cmd       // in-flight mpv process; nil when idle
+	voicePipeCh       <-chan string   // receives lines from the STT pipe; nil when off
+	voicePipeRelease  func()          // closes the pipe + clears the symlink; nil when off
+
+	// Pi harness state.
+	piProc           *pi.Process       // nil when harness is not Pi or Pi failed to start
+	piRunActive      bool              // true while Pi is processing a prompt
+	noteSnapshotHash string            // fingerprint of the last snapshot injected into Pi
+	noteEditedInRun  bool              // true if Pi touched the note file during this run
+	piFollowUpSent   bool              // true if a follow-up was already sent this agent cycle
+	pendingWebCtx    string            // formatted web search results; prepended on next run (shared across harnesses)
+	inProgressRow    int               // index into transcriptRows for the streaming assistant row; -1 if none
+	activeToolRows   map[string]int    // toolCallId → transcriptRows index
+
+	// Claude harness state.
+	claudeProc             *claude.Process        // nil when harness is not Claude or Claude failed to start
+	claudeRunActive        bool                   // true while Claude is processing a prompt
+	claudeNoteSnapshotHash string                 // fingerprint of the last snapshot injected into Claude
+	claudeNoteEditedInRun  bool                   // true if Claude touched the note file during this run
+	claudeFollowUpSent     bool                   // true if a follow-up was already sent this agent cycle
+	claudeInProgressRow    int                    // index into transcriptRows for the streaming assistant row; -1 if none
+	claudeActiveToolRows   map[string]int         // toolUseId → transcriptRows index
+	claudeHistoryInjected  bool                   // true once the cold-start transcript recap has been sent for this process instance
+	claudeToolCallBufs     map[int]*claudeToolCallBuf // content-block index → in-progress tool_use argument buffer
+
+	// Task overlay state.
+	taskOverlay taskOverlayState
 }
 
 func newApp(fp, content string, cfg llm.Config) appModel {
-	content, savedState, _ := transcript.ExtractState(content)
+	// Strip any per-file state line (backward compat — old files embed state).
+	content, perFileState, hadFileState := transcript.ExtractState(content)
 	noteBody, txArea := transcript.Split(content)
 	tableArea, todosArea := transcript.SplitArea(txArea)
 	rows, _ := transcript.Parse(tableArea)
 	todoList := todos.Parse(todosArea)
 
+	// Load global state. When the global file doesn't exist yet, seed it from
+	// the per-file state line (one-time migration) so settings carry over.
+	globalState, _ := transcript.LoadGlobalState()
+	var savedState transcript.State
+	if globalState == (transcript.State{}) {
+		if hadFileState {
+			savedState = perFileState
+			_ = transcript.SaveGlobalState(savedState)
+		}
+	} else {
+		savedState = globalState
+	}
+
 	// Apply persisted state with validation. Unknown values fall back to
-	// defaults silently; the next writeNote will rewrite the state line with
-	// the corrected values.
-	mode := runner.ModeNote
-	if savedState.Mode == runner.ModeChat || savedState.Mode == runner.ModeNote {
+	// defaults silently.
+	mode := "note"
+	if savedState.Mode == "chat" || savedState.Mode == "note" {
 		mode = savedState.Mode
 	}
 	agentMode := "off"
@@ -195,6 +217,10 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 		agentMode:      agentMode,
 		homeDir:        home,
 		cwd:            wd,
+		inProgressRow:  -1,
+		activeToolRows: make(map[string]int),
+		claudeInProgressRow:  -1,
+		claudeActiveToolRows: make(map[string]int),
 	}
 	// nextToolID seeded one past the highest existing row number so newly
 	// appended rows keep ordering monotonic.
@@ -244,11 +270,67 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 	m.ag.SetModelNames(names)
 	m.refreshMarkerHighlight()
 
+	// Voice: restore persisted on/off state and open the pipe if enabled.
+	if savedState.Voice == "on" {
+		ch, release, err := voice.OpenPipe(os.Getpid())
+		if err == nil {
+			m.voiceEnabled = true
+			m.voicePipeCh = ch
+			m.voicePipeRelease = release
+			m.ag.Buttons.VoiceLabel = "🔈"
+		}
+	}
+
+	// Pi harness: spawn the subprocess if the configured provider is "pi".
+	if appliedCfg.Harness == "pi" {
+		proc, err := pi.Open(m.piOpts())
+		if err != nil {
+			m.ag.Indicator.SetError("harness: " + err.Error())
+		} else {
+			m.piProc = proc
+		}
+	}
+
+	// Claude harness: spawn the subprocess if the configured provider is "claude".
+	if appliedCfg.Harness == "claude" {
+		proc, err := claude.Open(m.claudeOpts())
+		if err != nil {
+			m.ag.Indicator.SetError("harness: " + err.Error())
+		} else {
+			m.claudeProc = proc
+		}
+	}
+
 	return m
 }
 
+// voiceInputMsg arrives when voice-input.sh writes a line to the named pipe.
+type voiceInputMsg struct{ text string }
+
+// waitForVoiceInput returns a tea.Cmd that blocks until the next STT line
+// arrives. When the pipe channel is closed (voice disabled) it returns nil.
+func (m appModel) waitForVoiceInput() tea.Cmd {
+	return func() tea.Msg {
+		text, ok := <-m.voicePipeCh
+		if !ok {
+			return nil
+		}
+		return voiceInputMsg{text: text}
+	}
+}
+
 func (m appModel) Init() tea.Cmd {
-	return tea.Batch(m.editor.Init(), m.ag.Indicator.StaleCmd())
+	cmds := []tea.Cmd{m.editor.Init(), m.ag.Indicator.StaleCmd()}
+	if m.voicePipeCh != nil {
+		cmds = append(cmds, m.waitForVoiceInput())
+	}
+	if m.piProc != nil {
+		cmds = append(cmds, m.waitForPiOutput(), m.piStateCheckCmd())
+	}
+	if m.claudeProc != nil {
+		cmds = append(cmds, m.waitForClaudeOutput())
+	}
+	return tea.Batch(cmds...)
 }
 
 // setInsertHighlight computes the byte range in `next` that differs from
@@ -360,14 +442,19 @@ func fnv64(s string) uint64 {
 	return h
 }
 
-// writeNote serializes the editor body + transcript rows + UI state back to
-// disk. The editor's view is the *note body*; transcript rows are appended
-// after a "***\n# Transcript" delimiter when there are any; the persistent
-// UI state is the final line of the file as an HTML comment.
+// writeNote serializes the editor body + transcript rows to disk. State is
+// no longer embedded in the file; it is written to the global state file
+// alongside every save so the settings are shared across all open files.
 func (m *appModel) writeNote() error {
 	full := transcript.Join(m.editor.Value(), m.transcriptRows, todos.Render(m.todos))
-	full = transcript.AppendStateLine(full, m.currentState())
-	return os.WriteFile(m.filepath, []byte(full), 0644)
+	if err := os.WriteFile(m.filepath, []byte(full), 0644); err != nil {
+		return err
+	}
+	_ = transcript.SaveGlobalState(m.currentState())
+	if m.voiceEnabled {
+		_ = voice.ClaimSymlink(os.Getpid())
+	}
+	return nil
 }
 
 // currentState gathers the persistent UI state for serialization. Transcript
@@ -383,14 +470,19 @@ func (m *appModel) currentState() transcript.State {
 		}
 	}
 	model := ""
-	if m.llmCfg.ProviderKey != "" && m.llmCfg.ModelKey != "" {
-		model = m.llmCfg.ProviderKey + "/" + m.llmCfg.ModelKey
+	if m.llmCfg.Harness != "" && m.llmCfg.ModelKey != "" {
+		model = m.llmCfg.Harness + "/" + m.llmCfg.ModelKey
+	}
+	voice := "off"
+	if m.voiceEnabled {
+		voice = "on"
 	}
 	return transcript.State{
 		Mode:       m.mode,
 		Agent:      m.agentMode,
 		Model:      model,
 		Transcript: transcriptVis,
+		Voice:      voice,
 	}
 }
 
@@ -662,6 +754,18 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Record the search in the transcript using the query we stashed when
 		// the bar was opened.
 		txCmd := m.recordSearchInTranscript(m.lastWebQuery, msg.Results)
+		// Build a pending web context block for the next harness run.
+		if m.piProc != nil || m.claudeProc != nil {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("[Web search: %q]\n", m.lastWebQuery))
+			for i, r := range msg.Results {
+				if i >= 10 {
+					break
+				}
+				fmt.Fprintf(&sb, "%d. %s <%s>\n   %s\n", i+1, r.Title, r.URL, r.Abstract)
+			}
+			m.pendingWebCtx = sb.String()
+		}
 		return m, tea.Batch(m.ag.Indicator.StaleCmd(), txCmd, m.maybeResizeEditorCmd())
 
 	case agent.WebFetchDoneMsg:
@@ -759,6 +863,32 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ag.Indicator.Set("Copied")
 		return m, m.ag.Indicator.StaleCmd()
 
+	case piEventMsg:
+		m2, cmd := m.handlePiEvent(msg.data)
+		if m2.piProc != nil {
+			return m2, tea.Batch(cmd, m2.waitForPiOutput())
+		}
+		return m2, cmd
+
+	case piDeadMsg:
+		m.piRunActive = false
+		m.piProc = nil
+		m.ag.Indicator.SetError("pi: process exited")
+		return m, m.ag.Indicator.StaleCmd()
+
+	case claudeEventMsg:
+		m2, cmd := m.handleClaudeEvent(msg.data)
+		if m2.claudeProc != nil {
+			return m2, tea.Batch(cmd, m2.waitForClaudeOutput())
+		}
+		return m2, cmd
+
+	case claudeDeadMsg:
+		m.claudeRunActive = false
+		m.claudeProc = nil
+		m.ag.Indicator.SetError("claude: process exited")
+		return m, m.ag.Indicator.StaleCmd()
+
 	case agent.PromptSubmitMsg:
 		if cmd := agent.ParseSlashCmd(msg.Content); cmd != nil {
 			return m.executeSlashCmd(cmd)
@@ -831,8 +961,8 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.promptFocus = true
 		m.ag = m.ag.SetPromptFocus(true)
 		m.editor.SetFocused(false)
-		// Runner picks up m.todos via RunOptions.Todos.
-		return m.startRun(msg.Prompt)
+		fullPrompt := msg.Prompt + "\n\nTodos:\n" + strings.Join(msg.Todos, "\n")
+		return m.startRun(fullPrompt)
 
 	case agent.TodoBarClosedMsg:
 		m.todoMode = false
@@ -864,18 +994,52 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
 		_ = m.writeNote()
-		return m, m.ag.Indicator.StaleCmd()
+		return m.respawnActiveHarness()
 
 	case agent.ModeTogglePressMsg:
-		if m.mode == runner.ModeChat {
-			m.mode = runner.ModeNote
+		if m.mode == "chat" {
+			m.mode = "note"
 		} else {
-			m.mode = runner.ModeChat
+			m.mode = "chat"
 		}
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
 		_ = m.writeNote()
 		return m, m.ag.Indicator.StaleCmd()
+
+	case agent.VoiceTogglePressMsg:
+		if m.voiceEnabled {
+			// Disable: close pipe+symlink.
+			if m.voicePipeRelease != nil {
+				m.voicePipeRelease()
+				m.voicePipeRelease = nil
+				m.voicePipeCh = nil
+			}
+			m.voiceEnabled = false
+			m.ag.Buttons.VoiceLabel = "🔇"
+		} else {
+			// Enable: open pipe and start watcher.
+			ch, release, err := voice.OpenPipe(os.Getpid())
+			if err != nil {
+				m.ag.Indicator.SetError("voice pipe: " + err.Error())
+				return m, m.ag.Indicator.StaleCmd()
+			}
+			m.voiceEnabled = true
+			m.voicePipeCh = ch
+			m.voicePipeRelease = release
+			m.ag.Buttons.VoiceLabel = "🔈"
+		}
+		_ = m.writeNote()
+		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.waitForVoiceInput())
+
+	case voiceInputMsg:
+		// STT text arrived from voice-input.sh via the named pipe.
+		// Inject into the prompt box and hand focus to the agent pane.
+		m.ag.PromptBox.SetValue(msg.text)
+		m.promptFocus = true
+		m.ag = m.ag.SetPromptFocus(true)
+		m.editor.SetFocused(false)
+		return m, tea.Batch(m.maybeResizeEditorCmd(), m.waitForVoiceInput())
 
 	case agent.AttachPickerPressMsg:
 		return m, openFilePickerCmd()
@@ -922,16 +1086,16 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.modelMode = false
 		m.ag = m.ag.CloseModel()
 		m.editor.SetFocused(true)
-		cfg, err := llm.ConfigForModel(msg.ProviderKey, msg.ModelKey)
-		if err == nil {
-			m.llmCfg = cfg
-			m.ag.SetModelLabel(cfg.ModelName)
-			m.ag.Indicator.Set("Model: " + cfg.ModelName)
-			_ = m.writeNote()
-		} else {
+		cfg, err := llm.ConfigForModel(msg.HarnessKey, msg.ModelKey)
+		if err != nil {
 			m.ag.Indicator.SetError("model error: " + err.Error())
+			return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
 		}
-		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
+		m2, switchCmd, switchErr := m.switchToModel(cfg)
+		if switchErr != "" {
+			m2.ag.Indicator.SetError(switchErr)
+		}
+		return m2, tea.Batch(switchCmd, m2.ag.Indicator.StaleCmd(), m2.maybeResizeEditorCmd())
 
 	case agent.ModelBarClosedMsg:
 		m.modelMode = false
@@ -939,261 +1103,9 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetFocused(true)
 		return m, m.maybeResizeEditorCmd()
 
-	case agent.RunCancelRequestedMsg:
-		if m.runCancel != nil {
-			m.runCancel()
-		}
+	case agent.TasksOpenMsg:
+		m = m.openTaskOverlay()
 		return m, nil
-
-	case runner.RunStartedMsg:
-		m.ag.Indicator.Set("Run started")
-		return m, m.runStream.NextCmd()
-
-	case runner.ToolDispatchedMsg:
-		label := msg.Name
-		if msg.ArgsPreview != "" {
-			label += ": " + msg.ArgsPreview
-		}
-		m.ag.Indicator.Set(label)
-		return m, m.runStream.NextCmd()
-
-	case runner.ToolResultMsg:
-		if m.conflictJustResolved && msg.IsError {
-			// After "user wins", the model sees a tool error; keep the
-			// "copied to clipboard" indicator rather than showing the error.
-			m.conflictJustResolved = false
-			return m, m.runStream.NextCmd()
-		}
-		m.conflictJustResolved = false
-		if msg.IsError {
-			m.ag.Indicator.SetError(msg.Name + " failed: " + msg.Summary)
-			return m, m.runStream.NextCmd()
-		}
-		m.ag.Indicator.Set(msg.Name + " done · " + msg.Summary)
-		recordCmd := m.recordRunnerToolInTranscript(msg.Name, msg.CallJSON, msg.ResultJSON)
-		return m, tea.Batch(m.runStream.NextCmd(), recordCmd)
-
-	case runner.RunFinishedMsg:
-		// If a /chat2note flow is in progress, this RunFinishedMsg marks the
-		// end of step 2 — drop the rows we captured at step-1 invocation.
-		if len(m.chat2noteRowsToClear) > 0 {
-			m.transcriptRows = chat2noteRowFilter(m.transcriptRows, m.chat2noteRowsToClear)
-			m.transcriptBar.SetRows(m.transcriptRows)
-			m.chat2noteRowsToClear = nil
-			m.chat2noteExtra = ""
-			_ = m.writeNote()
-			m.ag.Indicator.Set(fmt.Sprintf(
-				"chat2note done · integrated %s · %d in / %d out · %s",
-				msg.EndedOn, msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
-			))
-		} else {
-			m.ag.Indicator.Set(fmt.Sprintf(
-				"Run finished on %s · %d in / %d out · %s",
-				msg.EndedOn, msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
-			))
-		}
-		next := m.runStream.NextCmd()
-		m = m.finishRun()
-		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
-
-	case runner.ChatFinishedMsg:
-		m.nextToolID++
-		m.transcriptRows = append(m.transcriptRows, transcript.Row{
-			Num:     m.nextToolID,
-			Role:    transcript.RoleAssistant,
-			Type:    transcript.TypeMessage,
-			Content: transcript.EncodeMessage(msg.Text),
-		})
-		m.transcriptBar.SetRows(m.transcriptRows)
-		if err := m.writeNote(); err != nil {
-			m.ag.Indicator.SetError("Save failed: " + err.Error())
-		} else {
-			m.ag.Indicator.Set(fmt.Sprintf(
-				"Chat reply · %d in / %d out · %s",
-				msg.InTok, msg.OutTok, roundDuration(msg.Elapsed),
-			))
-		}
-		next := m.runStream.NextCmd()
-		m = m.finishRun()
-		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
-
-	case runner.VisionUnsupportedMsg:
-		m.ag.Indicator.Set("Images not supported. Only text was sent.")
-		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.runStream.NextCmd())
-
-	case runner.RunErrorMsg:
-		m.ag.Indicator.SetError("Error: " + msg.Message)
-		next := m.runStream.NextCmd()
-		m = m.finishRun()
-		m = m.cancelPendingConflict()
-		// Abort any in-flight /chat2note. Transcript is left untouched.
-		m.chat2noteRowsToClear = nil
-		m.chat2noteExtra = ""
-		return m, tea.Batch(next, m.maybeResizeEditorCmd())
-
-	case runner.RunCancelledMsg:
-		m.ag.Indicator.Set("Run cancelled")
-		next := m.runStream.NextCmd()
-		m = m.finishRun()
-		m = m.cancelPendingConflict()
-		m.chat2noteRowsToClear = nil
-		m.chat2noteExtra = ""
-		return m, tea.Batch(next, m.ag.Indicator.StaleCmd(), m.maybeResizeEditorCmd())
-
-	case runner.RunStreamDoneMsg:
-		m.runStream = nil
-		return m, nil
-
-	case chat2noteStep1DoneMsg:
-		// Structuring step finished. Strip Superfluous + empty sections, then
-		// kick off step 2 as a normal note-mode run whose user-prompt is the
-		// integration directive followed by the cleaned digest. The runner
-		// sees the transcript as it stands now — but since the integration
-		// directive is self-contained, the transcript context is redundant
-		// for step 2; we pass it through unchanged for simplicity.
-		cleaned := runner.CleanChat2NoteIntermediate(msg.Intermediate)
-		if strings.TrimSpace(cleaned) == "" {
-			m.ag.Indicator.SetError("chat2note: structuring step produced nothing usable")
-			m.chat2noteRowsToClear = nil
-			m.chat2noteExtra = ""
-			return m, m.ag.Indicator.StaleCmd()
-		}
-		prompt := runner.Chat2NoteStep2Prompt(cleaned, m.chat2noteExtra)
-		m.ag.Indicator.Set("integrating into note…")
-		// Record the row Num that startRun will assign to the step-2 user
-		// prompt so we can also clear it on success. The next row's Num is
-		// m.nextToolID + 1 because startRun does nextToolID++ before using it.
-		m.chat2noteRowsToClear = append(m.chat2noteRowsToClear, m.nextToolID+1)
-		return m.startRun(prompt)
-
-	case chat2noteStep1ErrMsg:
-		m.ag.Indicator.SetError("chat2note: " + msg.Err.Error())
-		m.chat2noteRowsToClear = nil
-		m.chat2noteExtra = ""
-		return m, m.ag.Indicator.StaleCmd()
-
-	case agent.ConflictUserWinsMsg:
-		return m.resolveConflictUserWins()
-
-	case agent.ConflictModelWinsMsg:
-		return m.resolveConflictModelWins()
-
-	case runner.NoteEditApplyMsg:
-		live := m.editor.Value()
-		liveSnap := markers.Scan(live).BuildSnapshot()
-		if liveSnap.HasShaping {
-			updated, count, conflict := liveSnap.ResolveEdit(msg.Old, msg.New, msg.ReplaceAll)
-			if conflict == markers.EditConflictProtected {
-				m.ag.Indicator.SetError("Edit blocked by $>> <<$ protected range")
-				msg.Reply <- runner.NoteEditApplyReply{ConflictProtected: true, Count: count}
-				return m, tea.Batch(m.runStream.NextCmd(), m.ag.Indicator.StaleCmd())
-			}
-			if conflict != markers.EditConflictNone {
-				label := editConflictLabel(conflict == markers.EditConflictAmbiguous, count)
-				return m.enterEditConflict(&msg, label)
-			}
-			normalized := editor.NormalizeMarkdownTables(updated)
-			m.editor.SetContent(normalized)
-			m.refreshMarkerHighlight()
-			m.setInsertHighlight(live, normalized)
-			if err := m.writeNote(); err == nil {
-				m.savedValue = normalized
-			}
-			msg.Reply <- runner.NoteEditApplyReply{Applied: true, Count: count}
-			return m, m.runStream.NextCmd()
-		}
-
-		prevForInsert := m.editor.Value()
-		res := m.editor.ApplyNoteEdit(msg.Old, msg.New, msg.ReplaceAll)
-		if res.Conflict != editor.ConflictNone {
-			// Open conflict UI — don't fill Reply yet; runner goroutine stays blocked.
-			label := editConflictLabel(res.Conflict == editor.ConflictAmbiguous, res.Count)
-			return m.enterEditConflict(&msg, label)
-		}
-		reply := runner.NoteEditApplyReply{Applied: true, Count: res.Count}
-		content := editor.NormalizeMarkdownTables(m.editor.Value())
-		m.editor.SetContent(content)
-		m.refreshMarkerHighlight()
-		m.setInsertHighlight(prevForInsert, content)
-		if err := m.writeNote(); err == nil {
-			m.savedValue = content
-		}
-		msg.Reply <- reply
-		return m, m.runStream.NextCmd()
-
-	case runner.NoteWriteApplyMsg:
-		if runner.HashContent(m.editor.Value()) != m.runSnapshotHash {
-			// Open conflict UI — don't fill Reply yet.
-			return m.enterWriteConflict(&msg)
-		}
-		prevWrite := m.editor.Value()
-		liveSnap := markers.Scan(prevWrite).BuildSnapshot()
-		resolved, ok := liveSnap.ResolveWrite(msg.Content)
-		if !ok {
-			msg.Reply <- runner.NoteWriteApplyReply{Applied: false}
-			return m, m.runStream.NextCmd()
-		}
-		normalized := editor.NormalizeMarkdownTables(resolved)
-		m.editor.SetContent(normalized)
-		m.refreshMarkerHighlight()
-		m.setInsertHighlight(prevWrite, normalized)
-		if err := m.writeNote(); err == nil {
-			m.savedValue = normalized
-		}
-		msg.Reply <- runner.NoteWriteApplyReply{Applied: true}
-		return m, m.runStream.NextCmd()
-
-	case runner.NoteEditAtApplyMsg:
-		live := m.editor.Value()
-		parsed := markers.Scan(live)
-		updated, applied, err := parsed.ApplyEdits(live, msg.Edits)
-		if err != nil {
-			msg.Reply <- runner.NoteEditAtApplyReply{ValidationError: err.Error()}
-			return m, m.runStream.NextCmd()
-		}
-		if len(applied) > 0 {
-			normalized := editor.NormalizeMarkdownTables(updated)
-			m.editor.SetContent(normalized)
-			m.refreshMarkerHighlight()
-			m.setInsertHighlight(live, normalized)
-			if werr := m.writeNote(); werr == nil {
-				m.savedValue = normalized
-			}
-		}
-		msg.Reply <- runner.NoteEditAtApplyReply{Applied: true, AppliedSlots: applied}
-		return m, m.runStream.NextCmd()
-
-	case runner.TodoWriteApplyMsg:
-		items := todos.AssignIDs(msg.Texts)
-		m.todos = items
-		m.transcriptBar.SetTodos(items)
-		if err := m.writeNote(); err != nil {
-			m.ag.Indicator.SetError("todo write failed: " + err.Error())
-		}
-		msg.Reply <- runner.TodoWriteApplyReply{Applied: true, Items: items}
-		return m, m.runStream.NextCmd()
-
-	case runner.TodoDoneApplyMsg:
-		updated, ok := todos.MarkDone(m.todos, msg.ID)
-		if !ok {
-			msg.Reply <- runner.TodoDoneApplyReply{NotFound: true}
-			return m, m.runStream.NextCmd()
-		}
-		m.todos = updated
-		m.transcriptBar.SetTodos(updated)
-		if err := m.writeNote(); err != nil {
-			m.ag.Indicator.SetError("todo update failed: " + err.Error())
-		}
-		msg.Reply <- runner.TodoDoneApplyReply{Applied: true, Items: updated}
-		return m, m.runStream.NextCmd()
-
-	case runner.TodosClearedMsg:
-		m.todos = nil
-		m.transcriptBar.SetTodos(nil)
-		if err := m.writeNote(); err != nil {
-			m.ag.Indicator.SetError("todo clear failed: " + err.Error())
-		}
-		return m, m.runStream.NextCmd()
 
 	case agent.TodoSummaryClearAllMsg:
 		m.todos = nil
@@ -1245,19 +1157,23 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.maybeQuit()
 	}
 
-	// Escape cancels an in-flight model run.
-	if m.runActive && msg.String() == "esc" {
-		if m.runCancel != nil {
-			m.runCancel()
+	// ESC while a harness is running aborts the agent run.
+	if msg.String() == "esc" {
+		switch {
+		case m.piRunActive && m.piProc != nil:
+			_ = m.piProc.SendAbort()
+			return m, nil
+		case m.claudeRunActive && m.claudeProc != nil:
+			return m.abortClaudeRun()
 		}
-		return m, nil
 	}
 
-	// Conflict resolution bar is open: route all keys to the agent pane.
-	if m.conflictMode {
-		pane, cmd := m.ag.Update(msg)
-		m.ag = pane
-		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
+	// Task overlay is open: route all keys to the overlay handler.
+	if m.taskOverlay.open {
+		m2, cmd, handled := m.handleTaskOverlayKey(msg)
+		if handled {
+			return m2, cmd
+		}
 	}
 
 	// ctrl+l always cycles focus regardless of which modal UI is active,
@@ -1425,6 +1341,9 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editor.SetFocused(false)
 		return m, m.maybeResizeEditorCmd()
 	case "ctrl+s":
+		if m.piRunActive || m.claudeRunActive {
+			return m, nil // harness may be editing the file; skip manual save during run
+		}
 		content := m.editor.Value()
 		if err := m.writeNote(); err != nil {
 			m.ag.Indicator.SetError("Save failed: " + err.Error())
@@ -1532,13 +1451,14 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		if cmd.ModelName != "" {
 			for _, e := range llm.AllModels() {
 				if strings.EqualFold(e.ModelName, cmd.ModelName) {
-					cfg, err := llm.ConfigForModel(e.ProviderKey, e.ModelKey)
+					cfg, err := llm.ConfigForModel(e.HarnessKey, e.ModelKey)
 					if err == nil {
-						m.llmCfg = cfg
-						m.ag.SetModelLabel(cfg.ModelName)
-						m.ag.Indicator.Set("Model: " + cfg.ModelName)
-						_ = m.writeNote()
-						return m, m.ag.Indicator.StaleCmd()
+						m2, switchCmd, switchErr := m.switchToModel(cfg)
+						if switchErr != "" {
+							m2.ag.Indicator.SetError(switchErr)
+							return m2, m2.ag.Indicator.StaleCmd()
+						}
+						return m2, switchCmd
 					}
 				}
 			}
@@ -1568,9 +1488,9 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.SlashNote, agent.SlashChat:
-		target := runner.ModeNote
+		target := "note"
 		if cmd.Kind == agent.SlashChat {
-			target = runner.ModeChat
+			target = "chat"
 		}
 		if cmd.CopyText != "" {
 			m.ag.PromptBox.SetValue(cmd.CopyText)
@@ -1596,7 +1516,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
 		_ = m.writeNote()
-		return m, m.ag.Indicator.StaleCmd()
+		return m.respawnActiveHarness()
 
 	case agent.SlashWeb:
 		if cmd.WebQuery != "" {
@@ -1627,8 +1547,6 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 	case agent.SlashMarkerExclude:
 		return m.executeWrapMarker("%>>", "<<%")
 
-	case agent.SlashChat2Note:
-		return m.executeChat2Note(cmd.Chat2NoteExtra)
 	}
 	return m, nil
 }
@@ -1666,6 +1584,12 @@ func (m appModel) executeClear(target string) (tea.Model, tea.Cmd) {
 
 	if target == "markers" || isMarkerCharTarget(target) {
 		return m.executeClearMarkers(target)
+	}
+
+	// /clear trans clears todos as well — they are part of the transcript area.
+	if target == "trans" {
+		m.todos = nil
+		m.transcriptBar.SetTodos(nil)
 	}
 
 	before := len(m.transcriptRows)
@@ -1977,8 +1901,14 @@ func (m appModel) View() string {
 		parts = append(parts, m.editor.View())
 		parts = append(parts, renderSeparator(m.width))
 	}
-	for _, ln := range m.transcriptBar.View(m.width) {
-		parts = append(parts, ln)
+	if m.taskOverlay.open {
+		for _, ln := range m.viewTaskOverlay(m.width, m.transcriptH) {
+			parts = append(parts, ln)
+		}
+	} else {
+		for _, ln := range m.transcriptBar.View(m.width) {
+			parts = append(parts, ln)
+		}
 	}
 	parts = append(parts, m.ag.View())
 	return strings.Join(parts, "\n")
@@ -1993,146 +1923,12 @@ func buildModelItems() []agent.ModelItem {
 	items := make([]agent.ModelItem, len(entries))
 	for i, e := range entries {
 		items[i] = agent.ModelItem{
-			ProviderKey: e.ProviderKey,
-			ModelKey:    e.ModelKey,
-			Name:        e.ModelName,
+			HarnessKey: e.HarnessKey,
+			ModelKey:   e.ModelKey,
+			Name:       e.ModelName,
 		}
 	}
 	return items
-}
-
-// startRun auto-saves the active note, snapshots its content, and kicks off
-// the runner. The send button swaps to ■ for the duration.
-func (m appModel) startRun(userPrompt string) (tea.Model, tea.Cmd) {
-	if m.runActive {
-		return m, nil
-	}
-	if m.llmCfg.Model == "" {
-		m.ag.Indicator.SetError("No model configured — check ~/.config/aunic/aunic.json")
-		return m, nil
-	}
-
-	content := m.editor.Value()
-
-	modelSnapshot := content
-	scopeCount := 0
-	noteWriteForbidden := false
-	parsed := markers.Scan(content)
-	if vErr := parsed.Validate(); vErr != nil {
-		m.ag.Indicator.SetError(vErr.Message)
-		m.ag.PromptBox.SetValue(userPrompt)
-		return m, m.ag.Indicator.StaleCmd()
-	}
-	snap := parsed.BuildSnapshot()
-	modelSnapshot = snap.Visible
-	if m.mode != runner.ModeChat {
-		scopeCount = len(snap.Slots)
-	}
-	if snap.WritePolicy == markers.WritePolicyForbidden {
-		noteWriteForbidden = true
-	}
-
-	// Snapshot rows for the runner before recording the current user prompt so
-	// the runner sees prior-turn history without the current prompt (which is
-	// sent explicitly via opts.UserPrompt).
-	runRows := m.transcriptRows
-
-	// Record user prompt in the transcript immediately so it precedes the tool
-	// call rows that will be appended during the run.
-	m.nextToolID++
-	m.transcriptRows = append(m.transcriptRows, transcript.Row{
-		Num:     m.nextToolID,
-		Role:    transcript.RoleUser,
-		Type:    transcript.TypeMessage,
-		Content: transcript.EncodeMessage(userPrompt),
-	})
-	m.transcriptBar.SetRows(m.transcriptRows)
-
-	if err := m.writeNote(); err != nil {
-		m.ag.Indicator.SetError("auto-save failed: " + err.Error())
-		return m, m.ag.Indicator.StaleCmd()
-	}
-	m.savedValue = content
-
-	hash := runner.HashContent(content)
-	rc := &runner.RunContext{
-		ActivePath:      m.filepath,
-		SnapshotContent: modelSnapshot,
-		SnapshotHash:    hash,
-	}
-	m.runSnapshotHash = hash
-	m.runSnapshotContent = content
-
-	ctx, cancel := context.WithCancel(context.Background())
-	m.runCancel = cancel
-	m.runActive = true
-	m.ag.SetRunActive(true)
-
-	// Parse @path tokens, load file contents, record transcript rows.
-	var fileAttachments []runner.FileAttachment
-	for _, path := range agent.ParseAtFiles(userPrompt) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			m.ag.Indicator.SetError("Cannot read: " + path)
-			continue
-		}
-		content := string(data)
-		lines := strings.SplitN(content, "\n", 6)
-		if len(lines) > 5 {
-			lines = lines[:5]
-		}
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-		cmd := m.appendTranscriptPair(
-			transcript.ToolRead,
-			transcript.EncodeAgentFileCall(path, "", ""),
-			transcript.EncodeAgentPreviewResult(lines),
-		)
-		if cmd != nil {
-			_ = cmd // transcript rows recorded synchronously via appendTranscriptPair
-		}
-		fileAttachments = append(fileAttachments, runner.FileAttachment{
-			Path:    path,
-			Content: content,
-		})
-	}
-	cleanPrompt := agent.StripAtFiles(userPrompt)
-
-	// Consume pending images for this run.
-	pendingImgs := m.pendingImages
-	m.pendingImages = nil
-
-	opts := runner.RunOptions{
-		Mode:            m.mode,
-		AgentMode:       m.agentMode,
-		UserPrompt:      cleanPrompt,
-		TranscriptRows:  runRows,
-		FileAttachments: fileAttachments,
-		PendingImages:   pendingImgs,
-		Todos:              m.todos,
-		WriteScopeCount:    scopeCount,
-		NoteWriteForbidden: noteWriteForbidden,
-	}
-	stream, first := runner.StartCmd(ctx, m.llmCfg, rc, opts)
-	m.runStream = stream
-	return m, tea.Batch(first, m.maybeResizeEditorCmd())
-}
-
-// finishRun clears run-active state and resets the send button. The stream
-// pointer is left in place until RunStreamDoneMsg drains the channel close.
-func (m appModel) finishRun() appModel {
-	m.runActive = false
-	m.runCancel = nil
-	m.ag.SetRunActive(false)
-	return m
-}
-
-func roundDuration(d time.Duration) time.Duration {
-	if d < time.Second {
-		return d.Round(10 * time.Millisecond)
-	}
-	return d.Round(100 * time.Millisecond)
 }
 
 // attachFileMsg is delivered by openFilePickerCmd when the user selects a file.
@@ -2181,216 +1977,6 @@ func (m *appModel) recordSearchInTranscript(query string, results []web.Result) 
 // web.Result / web.Page values and routes through the same record helpers used
 // by the user-driven @web path. Returns nil for tools we don't persist
 // (note_edit / note_write are applied to the editor buffer instead).
-func (m *appModel) recordRunnerToolInTranscript(name, callJSON, resultJSON string) tea.Cmd {
-	switch name {
-	case "web_search":
-		var args struct {
-			Query string `json:"query"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Query == "" {
-			return nil
-		}
-		var raw []struct {
-			Title    string `json:"title"`
-			URL      string `json:"url"`
-			Domain   string `json:"domain"`
-			Abstract string `json:"abstract"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &raw)
-		results := make([]web.Result, len(raw))
-		for i, r := range raw {
-			results[i] = web.Result{Title: r.Title, URL: r.URL, Domain: r.Domain, Abstract: r.Abstract}
-		}
-		return m.recordSearchInTranscript(args.Query, results)
-	case "web_fetch":
-		var args struct {
-			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.URL == "" {
-			return nil
-		}
-		var page struct {
-			Title    string `json:"title"`
-			URL      string `json:"url"`
-			Markdown string `json:"markdown"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &page)
-		if page.URL == "" {
-			page.URL = args.URL
-		}
-		return m.recordFetchInTranscript(web.Page{Title: page.Title, URL: page.URL, Markdown: page.Markdown})
-
-	case "Read":
-		var args struct {
-			FilePath string `json:"file_path"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
-			return nil
-		}
-		var result struct {
-			Content string `json:"content"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &result)
-		lines := strings.SplitN(result.Content, "\n", 6)
-		if len(lines) > 5 {
-			lines = lines[:5]
-		}
-		// Strip trailing empty line from split
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolRead,
-			transcript.EncodeAgentFileCall(args.FilePath, "", ""),
-			transcript.EncodeAgentPreviewResult(lines),
-		)
-
-	case "Write":
-		var args struct {
-			FilePath string `json:"file_path"`
-			Content  string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
-			return nil
-		}
-		lines := strings.SplitN(args.Content, "\n", 6)
-		if len(lines) > 5 {
-			lines = lines[:5]
-		}
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolWrite,
-			transcript.EncodeAgentFileCall(args.FilePath, "", ""),
-			transcript.EncodeAgentPreviewResult(lines),
-		)
-
-	case "Edit":
-		var args struct {
-			FilePath  string `json:"file_path"`
-			OldString string `json:"old_string"`
-			NewString string `json:"new_string"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.FilePath == "" {
-			return nil
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolEdit,
-			transcript.EncodeAgentFileCall(args.FilePath, args.OldString, args.NewString),
-			transcript.EncodeAgentPreviewResult(nil),
-		)
-
-	case "Bash":
-		var args struct {
-			Command string `json:"command"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Command == "" {
-			return nil
-		}
-		var result struct {
-			Output string `json:"output"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &result)
-		return m.appendTranscriptPair(
-			transcript.ToolBash,
-			transcript.EncodeAgentCmdCall(args.Command),
-			transcript.EncodeAgentOutputResult(result.Output),
-		)
-
-	case "Grep":
-		var args struct {
-			Pattern string `json:"pattern"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Pattern == "" {
-			return nil
-		}
-		var result struct {
-			Mode      string   `json:"mode"`
-			Filenames []string `json:"filenames"`
-			Content   string   `json:"content"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &result)
-		var previewLines []string
-		if result.Mode == "content" {
-			all := strings.SplitN(result.Content, "\n", 6)
-			if len(all) > 5 {
-				all = all[:5]
-			}
-			previewLines = all
-		} else {
-			n := 5
-			if len(result.Filenames) < n {
-				n = len(result.Filenames)
-			}
-			previewLines = result.Filenames[:n]
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolGrep,
-			transcript.EncodeAgentPatternCall(args.Pattern),
-			transcript.EncodeAgentPreviewResult(previewLines),
-		)
-
-	case "Glob":
-		var args struct {
-			Pattern string `json:"pattern"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil || args.Pattern == "" {
-			return nil
-		}
-		var result struct {
-			Filenames []string `json:"filenames"`
-		}
-		_ = json.Unmarshal([]byte(resultJSON), &result)
-		n := 5
-		if len(result.Filenames) < n {
-			n = len(result.Filenames)
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolGlob,
-			transcript.EncodeAgentPatternCall(args.Pattern),
-			transcript.EncodeAgentPreviewResult(result.Filenames[:n]),
-		)
-
-	case "note_edit":
-		var args struct {
-			OldString string `json:"old_string"`
-			NewString string `json:"new_string"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil {
-			return nil
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolNoteEdit,
-			transcript.EncodeAgentFileCall(m.filepath, args.OldString, args.NewString),
-			transcript.EncodeAgentPreviewResult(nil),
-		)
-
-	case "note_write":
-		var args struct {
-			Content string `json:"content"`
-		}
-		if err := json.Unmarshal([]byte(callJSON), &args); err != nil {
-			return nil
-		}
-		lines := strings.SplitN(args.Content, "\n", 6)
-		if len(lines) > 5 {
-			lines = lines[:5]
-		}
-		if len(lines) > 0 && lines[len(lines)-1] == "" {
-			lines = lines[:len(lines)-1]
-		}
-		return m.appendTranscriptPair(
-			transcript.ToolNoteWrite,
-			transcript.EncodeAgentFileCall(m.filepath, "", ""),
-			transcript.EncodeAgentPreviewResult(lines),
-		)
-	}
-	return nil
-}
-
-// recordFetchInTranscript appends a tool_call/tool_result pair for a web fetch
-// to the transcript. Only the URL, title, and a short snippet are persisted —
 // the full page body is intentionally dropped to keep the transcript compact.
 func (m *appModel) recordFetchInTranscript(page web.Page) tea.Cmd {
 	if page.URL == "" {
@@ -2451,88 +2037,6 @@ func removeTranscriptEntry(rows []transcript.Row, rowNum, hitIdx int) []transcri
 	out := make([]transcript.Row, 0, len(rows))
 	for i, r := range rows {
 		if i == callIdx || i == resultIdx {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-// ─── /chat2note ──────────────────────────────────────────────────────────────
-
-// chat2noteStep1DoneMsg carries the structuring step's raw text output.
-type chat2noteStep1DoneMsg struct {
-	Intermediate string
-}
-
-// chat2noteStep1ErrMsg signals that step 1 failed; the transcript is left
-// untouched and the flow aborts.
-type chat2noteStep1ErrMsg struct {
-	Err error
-}
-
-// executeChat2Note kicks off the two-step "condense chat into note" flow.
-// Step 1 (structuring) runs via a one-shot LLM call wrapped in a tea.Cmd;
-// when it returns, the chat2noteStep1DoneMsg handler proceeds to step 2 by
-// invoking the normal runner with the cleaned intermediate as the prompt.
-func (m appModel) executeChat2Note(extra string) (tea.Model, tea.Cmd) {
-	if m.runActive || len(m.chat2noteRowsToClear) > 0 {
-		m.ag.Indicator.SetError("Another run is already active")
-		return m, m.ag.Indicator.StaleCmd()
-	}
-	if m.llmCfg.Model == "" {
-		m.ag.Indicator.SetError("No model configured — check ~/.config/aunic/aunic.json")
-		return m, m.ag.Indicator.StaleCmd()
-	}
-	if len(m.transcriptRows) == 0 {
-		m.ag.Indicator.SetError("No transcript content to integrate")
-		return m, m.ag.Indicator.StaleCmd()
-	}
-
-	// Capture the row Nums currently in scope. These get cleared after
-	// step 2 completes successfully.
-	rowNums := make([]int, len(m.transcriptRows))
-	rowsCopy := make([]transcript.Row, len(m.transcriptRows))
-	for i, r := range m.transcriptRows {
-		rowNums[i] = r.Num
-		rowsCopy[i] = r
-	}
-	m.chat2noteRowsToClear = rowNums
-	m.chat2noteExtra = extra
-
-	m.ag.Indicator.Set("structuring chat…")
-	return m, tea.Batch(
-		m.ag.Indicator.StaleCmd(),
-		chat2noteStep1Cmd(m.llmCfg, rowsCopy),
-	)
-}
-
-// chat2noteStep1Cmd runs the one-shot structuring LLM call in a goroutine.
-func chat2noteStep1Cmd(cfg llm.Config, rows []transcript.Row) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		text, err := runner.Chat2NoteStep1(ctx, cfg, rows)
-		if err != nil {
-			return chat2noteStep1ErrMsg{Err: err}
-		}
-		return chat2noteStep1DoneMsg{Intermediate: text}
-	}
-}
-
-// chat2noteRowFilter returns a copy of rows with any row whose Num appears
-// in clearSet removed.
-func chat2noteRowFilter(rows []transcript.Row, clearSet []int) []transcript.Row {
-	if len(clearSet) == 0 {
-		return rows
-	}
-	idx := make(map[int]bool, len(clearSet))
-	for _, n := range clearSet {
-		idx[n] = true
-	}
-	out := make([]transcript.Row, 0, len(rows))
-	for _, r := range rows {
-		if idx[r.Num] {
 			continue
 		}
 		out = append(out, r)

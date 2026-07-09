@@ -184,6 +184,8 @@ func (tb TranscriptBar) activate(c cell) (TranscriptBar, tea.Cmd) {
 		return tb, func() tea.Msg { return TranscriptDeleteMsg{RowNum: c.rowNum, HitIdx: -1} }
 	case cellTodoExpand:
 		tb.expanded[0] = !tb.expanded[0]
+	case cellTasksButton:
+		return tb, func() tea.Msg { return TasksOpenMsg{} }
 	case cellTodoClear:
 		return tb, func() tea.Msg { return TodoSummaryClearAllMsg{} }
 	case cellTodoItemToggle:

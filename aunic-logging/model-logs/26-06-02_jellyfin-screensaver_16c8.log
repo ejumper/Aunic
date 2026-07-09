@@ -1,0 +1,66 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 13:20:52  |  local  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  <note_path>jellyfin-screensaver.md</note_path>
+  
+  <note_content>
+  # Project
+  I would like to make a screensaver that pulls images from my jellyfin server and plays them in a slideshow. The jellyfin server is at media.halfab.net
+  
+  </note_content>
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user wants to create a screensaver that pulls images from their Jellyfin server (`media.halfab.net`) and plays them in a slideshow.
+    
+    I need to figure out:
+    1.  How to interact with the Jellyfin API to get images.
+    2.  What kind of images are available (posters, backdrops, etc.).
+    3.  How to implement a screensaver (this depends on the platform, but I can suggest a web-based one or a desktop one).
+    
+    First, I should check if there's any existing information or if I should start by researching the Jellyfin API for images.
+    
+    Since the user provided a note, I'll start by acknowledging the project and suggesting a plan.
+    
+    Plan:
+    1.  Research Jellyfin API for retrieving images/media items.
+    2.  Identify suitable image types (e.g., `Backdrop`, `Poster`).
+    3.  Propose a tech stack (e.g., a simple web app that can run in full screen, or a Python/Electron app).
+    4.  Draft a basic implementation plan.
+    
+    Let's start by searching for Jellyfin API documentation regarding images.
+  </THINKING>
+
+  <RESPONSE>
+    That sounds like a great project! To get started, we'll need to figure out how to authenticate with your Jellyfin server and how to query the API to retrieve image URLs.
+    
+    Here is a proposed plan to move this forward:
+    
+    ### 1. Research the Jellyfin API
+    I will look into the Jellyfin API documentation to find:
+    *   **Authentication:** How to get an API key or access token.
+    *   **Media Discovery:** How to list items (movies, shows, music) and their associated images.
+    *   **Image Endpoints:** How to specifically request `Backdrop` or `Poster` images.
+    
+    ### 2. Choose a Platform/Tech Stack
+    Depending on where you want to run this screensaver, we have a few options:
+    *   **Web-based (Easiest):** A simple HTML/JavaScript page that runs in a browser in full-screen mode. This is very portable.
+    *   **Desktop App (Electron/Python):** A dedicated application that runs on your computer.
+    *   **Hardware-specific:** If you are running this on a Raspberry Pi or an Android TV box.
+    
+    ### 3. Implementation Phases
+    *   **Phase 1: Discovery.** Write a script to fetch a list of image URLs from `media.halfab.net`.
+    *   **Phase 2: The Slideshow Engine.** Create a basic loop that displays these images with smooth transitions.
+    *   **Phase 3: Refinement.** Add features like random selection, transition effects, and perhaps metadata display (e.g., movie titles).
+    
+    **How would you like to proceed?** Do you have a preferred platform in mind (e.g., "I want to run it in a web browser" or "I want a Windows app")?
+  </RESPONSE>
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  2630 in  628 out  |  15.8s  |  chat
+════════════════════════════════════════════════════════════════
+

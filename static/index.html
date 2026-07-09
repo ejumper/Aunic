@@ -1,0 +1,1117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Aunic</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#000;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display',Helvetica,sans-serif;color:#fff;overscroll-behavior:none}
+body{display:flex;justify-content:center;align-items:flex-start}
+
+.phone{
+  width:100%;max-width:430px;min-height:100vh;
+  background:#1c1c1e;
+  display:flex;flex-direction:column;
+  position:relative;
+}
+
+/* ── Status bar ─────────────────────────────────── */
+.status{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 20px 10px;
+  border-bottom:0.5px solid rgba(255,255,255,0.08);
+  min-height:52px;
+}
+.status-title{font-size:17px;font-weight:600;letter-spacing:-.3px}
+.status-model{
+  font-size:12px;color:rgba(255,255,255,0.45);
+  max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  text-align:right;
+}
+.status-dot{
+  display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:#30d158;margin-right:5px;
+}
+.status-dot.busy{background:#ff9f0a;animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── Pages ──────────────────────────────────────── */
+.page{display:none;flex:1;flex-direction:column;overflow:hidden}
+.page.active{display:flex}
+
+/* ── Promptor page ──────────────────────────────── */
+.promptor-body{
+  flex:1;display:flex;flex-direction:column;
+  justify-content:space-between;
+  padding:16px 0 8px;
+}
+
+/* Grid of 12 option buttons */
+.grid{
+  display:grid;grid-template-columns:repeat(3,1fr);
+  row-gap:4px;padding:0 16px;
+}
+.grid-cell{display:flex;justify-content:center;align-items:center;padding:10px 0}
+
+.opt-btn{
+  width:76px;height:76px;border-radius:50%;border:none;
+  background:rgba(255,255,255,0.1);color:#fff;
+  font-size:12px;font-weight:500;
+  cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:4px;line-height:1.2;text-align:center;padding:4px;
+  transition:background .15s,transform .08s;
+  user-select:none;-webkit-user-select:none;
+  touch-action:manipulation;
+}
+.opt-btn:active{transform:scale(.93)}
+.opt-btn.on{background:#0a84ff}
+.opt-btn.dim{opacity:.2;pointer-events:none}
+.opt-btn .icon{font-size:20px;line-height:1}
+.opt-btn .label{font-size:11px;opacity:.85}
+
+/* Sub-views (models list, text input) */
+.subview{
+  display:none;flex:1;flex-direction:column;
+  padding:0 20px;
+}
+.subview.active{display:flex}
+
+.model-list{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.model-item{
+  display:flex;flex-direction:column;gap:2px;
+  padding:14px 4px;
+  border-bottom:0.5px solid rgba(255,255,255,0.08);
+  cursor:pointer;
+  transition:background .1s;
+  border-radius:8px;
+}
+.model-item:active{background:rgba(255,255,255,0.06)}
+.model-item.selected .model-name{color:#0a84ff}
+.model-name{font-size:15px;font-weight:500}
+.model-provider{font-size:12px;color:rgba(255,255,255,0.4)}
+.subview-back{
+  padding:10px 4px 14px;font-size:15px;color:#0a84ff;
+  cursor:pointer;border:none;background:transparent;text-align:left;
+}
+
+.text-area-wrap{flex:1;display:flex;flex-direction:column;gap:10px;padding-top:8px}
+textarea.prompt-text{
+  flex:1;background:rgba(255,255,255,0.07);border:none;
+  border-radius:14px;padding:14px;color:#fff;font-size:16px;
+  resize:none;outline:none;font-family:inherit;
+  -webkit-overflow-scrolling:touch;
+}
+textarea.prompt-text::placeholder{color:rgba(255,255,255,0.25)}
+
+/* Action row: send + mic */
+.actions{
+  display:flex;justify-content:space-evenly;align-items:center;
+  padding:12px 24px 16px;
+}
+
+.send-btn{
+  width:76px;height:76px;border-radius:50%;border:none;
+  background:#30d158;color:#fff;
+  font-size:32px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .08s,opacity .15s;
+  touch-action:manipulation;
+}
+.send-btn:active{transform:scale(.93)}
+.send-btn:disabled{opacity:.35;cursor:default}
+
+.mic-btn{
+  width:76px;height:76px;border-radius:50%;border:none;
+  background:rgba(255,255,255,0.1);color:#fff;
+  font-size:28px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  transition:background .15s,box-shadow .15s,transform .08s;
+  touch-action:none;user-select:none;-webkit-user-select:none;
+  position:relative;
+}
+.mic-btn.recording{
+  background:#ff375f;
+  box-shadow:0 0 0 10px rgba(255,55,95,0.25);
+}
+.mic-btn.has-clip{background:rgba(255,255,255,0.18)}
+.mic-btn .clip-dot{
+  position:absolute;top:10px;right:10px;
+  width:10px;height:10px;border-radius:50%;
+  background:#0a84ff;border:2px solid #1c1c1e;
+  display:none;
+}
+.mic-btn.has-clip .clip-dot{display:block}
+.mic-btn .lock-icon{
+  position:absolute;bottom:8px;font-size:13px;
+  display:none;
+}
+.mic-btn.locked .lock-icon{display:block}
+
+.rec-timer{
+  text-align:center;font-size:13px;color:rgba(255,255,255,0.45);
+  margin-bottom:4px;min-height:18px;
+}
+
+/* Delete confirmation bubble */
+.del-confirm{
+  position:absolute;bottom:90px;left:50%;transform:translateX(-50%);
+  background:#2c2c2e;border-radius:14px;padding:14px 20px;
+  display:flex;flex-direction:column;align-items:center;gap:10px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  width:220px;
+  display:none;
+}
+.del-confirm.show{display:flex}
+.del-confirm-msg{font-size:14px;text-align:center;color:rgba(255,255,255,0.8)}
+.del-confirm-btns{display:flex;gap:12px}
+.del-cancel{
+  padding:8px 20px;border-radius:20px;border:none;
+  background:rgba(255,255,255,0.12);color:#fff;font-size:14px;cursor:pointer;
+}
+.del-delete{
+  padding:8px 20px;border-radius:20px;border:none;
+  background:#ff375f;color:#fff;font-size:14px;cursor:pointer;
+}
+
+/* Processing overlay */
+.processing{
+  position:absolute;inset:0;
+  background:rgba(28,28,30,0.85);
+  display:none;align-items:center;justify-content:center;flex-direction:column;
+  gap:16px;z-index:10;
+}
+.processing.show{display:flex}
+.spinner{
+  width:40px;height:40px;border-radius:50%;
+  border:3px solid rgba(255,255,255,0.15);
+  border-top-color:#0a84ff;
+  animation:spin .8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+.processing-label{font-size:14px;color:rgba(255,255,255,0.5)}
+
+/* Error toast */
+.toast{
+  position:absolute;bottom:80px;left:16px;right:16px;
+  background:#2c2c2e;border-radius:12px;padding:12px 16px;
+  font-size:13px;color:rgba(255,100,100,1);
+  box-shadow:0 4px 16px rgba(0,0,0,0.4);
+  display:none;z-index:20;text-align:center;
+}
+.toast.show{display:block}
+
+/* ── File & Transcript pages ────────────────────── */
+.page-scroll{
+  flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  padding:16px 20px;
+}
+.raw-note{
+  font-family:'SF Mono',Menlo,Monaco,monospace;
+  font-size:13px;line-height:1.6;
+  color:rgba(255,255,255,0.75);
+  white-space:pre-wrap;word-break:break-word;
+}
+.page-empty{
+  flex:1;display:flex;align-items:center;justify-content:center;
+  color:rgba(255,255,255,0.25);font-size:15px;
+}
+
+/* Chat transcript bubbles */
+.chat-log{display:flex;flex-direction:column;gap:12px}
+.bubble-row{display:flex;flex-direction:column;gap:3px}
+.bubble-label{font-size:11px;color:rgba(255,255,255,0.35);padding:0 4px}
+.bubble-row.user .bubble-label{text-align:right}
+.bubble{
+  max-width:85%;padding:10px 14px;border-radius:18px;
+  font-size:14px;line-height:1.5;word-break:break-word;
+}
+.bubble-row.user{align-items:flex-end}
+.bubble-row.user .bubble{background:#0a84ff;border-bottom-right-radius:4px}
+.bubble-row.aunic{align-items:flex-start}
+.bubble-row.aunic .bubble{background:#2c2c2e;border-bottom-left-radius:4px}
+.bubble-time{font-size:10px;color:rgba(255,255,255,0.25);padding:0 4px}
+
+/* Consecutive aunic chunks share tighter spacing */
+.aunic-chain+.aunic-chain{margin-top:-6px}
+
+/* Chunk wrapper — positions the delete button */
+.chunk-wrap{display:flex;align-items:flex-start;gap:4px}
+.bubble-del{
+  flex-shrink:0;width:22px;height:22px;border-radius:50%;border:none;
+  background:rgba(255,255,255,0.08);color:rgba(255,255,255,0.35);
+  font-size:11px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  margin-top:10px;
+  opacity:0;transition:opacity .15s;
+  touch-action:manipulation;
+}
+.chunk-wrap:hover .bubble-del,.chunk-wrap:active .bubble-del{opacity:1}
+@media(hover:none){.bubble-del{opacity:.55}}
+
+/* Chunk left-side toggle */
+.chunk-toggle{
+  flex-shrink:0;width:22px;height:22px;border-radius:5px;
+  border:1.5px solid rgba(255,255,255,0.18);background:transparent;
+  color:rgba(255,255,255,0.4);font-size:12px;
+  display:flex;align-items:center;justify-content:center;
+  margin-top:10px;
+  transition:color .15s,border-color .15s;
+}
+.chunk-toggle.expandable{cursor:pointer;touch-action:manipulation}
+.chunk-toggle.expandable:hover{color:rgba(255,255,255,0.75);border-color:rgba(255,255,255,0.4)}
+.chunk-toggle.no-action{cursor:default;opacity:.35}
+/* Inner column holding bubble + expand hint */
+.bubble-inner{flex:1;min-width:0;display:flex;flex-direction:column}
+/* Collapsed bubble: truncate at ~9 lines, fade last line */
+.bubble.collapsed{max-height:calc(13.5em + 20px);overflow:hidden;position:relative}
+.bubble.collapsed::after{
+  content:'';position:absolute;bottom:0;left:0;right:0;
+  height:2.5em;
+  background:linear-gradient(transparent,#2c2c2e);
+  pointer-events:none;
+}
+/* Expand hint row (wavy line + label) */
+.expand-hint{display:flex;align-items:center;gap:6px;padding:3px 2px 2px;cursor:pointer}
+.expand-hint:hover .expand-label{color:rgba(255,255,255,0.6)}
+.expand-hint:hover .expand-wave{border-color:rgba(255,255,255,0.35)}
+.expand-wave{flex:1;height:0;border-bottom:2px wavy rgba(255,255,255,0.18);margin-bottom:1px}
+.expand-label{font-size:11px;color:rgba(255,255,255,0.3);white-space:nowrap}
+
+/* Markdown inside aunic bubbles */
+.bubble h3{font-size:14px;font-weight:700;margin:6px 0 3px;line-height:1.3}
+.bubble h4{font-size:13px;font-weight:600;margin:5px 0 2px}
+.bubble h5{font-size:12px;font-weight:600;margin:4px 0 2px;opacity:.85}
+.bubble p{margin:2px 0}.bubble p:first-child{margin-top:0}.bubble p:last-child{margin-bottom:0}
+.bubble ul,.bubble ol{padding-left:16px;margin:3px 0}
+.bubble li{margin:1px 0}
+.bubble code{font-family:'SF Mono',Menlo,Monaco,monospace;font-size:12px;
+  background:rgba(0,0,0,0.3);padding:1px 4px;border-radius:4px}
+.bubble pre{background:rgba(0,0,0,0.4);border-radius:8px;padding:10px 12px;
+  margin:6px 0;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.bubble pre code{background:none;padding:0;white-space:pre;font-size:12px}
+.bubble blockquote{border-left:3px solid rgba(255,255,255,0.2);
+  padding-left:10px;margin:4px 0;opacity:.8}
+.bubble hr{border:none;border-top:0.5px solid rgba(255,255,255,0.15);margin:8px 0}
+
+/* Save-pruned bar */
+.save-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:9px 14px;flex-shrink:0;
+  background:rgba(255,159,10,0.1);
+  border-bottom:0.5px solid rgba(255,159,10,0.25);
+}
+.save-bar-msg{flex:1;font-size:12px;color:rgba(255,255,255,0.5)}
+.save-btn{
+  padding:5px 13px;border-radius:13px;border:none;
+  background:#ff9f0a;color:#000;font-size:12px;font-weight:600;cursor:pointer;
+}
+.save-discard{
+  padding:5px 10px;border-radius:13px;border:none;
+  background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.55);
+  font-size:12px;cursor:pointer;
+}
+
+/* ── Nav bar ────────────────────────────────────── */
+.nav{
+  display:flex;
+  border-top:0.5px solid rgba(255,255,255,0.1);
+  padding-bottom:env(safe-area-inset-bottom,4px);
+  background:#1c1c1e;
+}
+.nav-tab{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  padding:10px 0 6px;border:none;background:transparent;
+  color:rgba(255,255,255,0.35);font-size:10px;font-weight:500;
+  gap:3px;cursor:pointer;transition:color .15s;
+  touch-action:manipulation;
+}
+.nav-tab.active{color:#0a84ff}
+.nav-tab svg{width:24px;height:24px}
+</style>
+</head>
+<body>
+<div class="phone">
+
+  <!-- Status bar -->
+  <div class="status">
+    <div class="status-title">Aunic</div>
+    <div class="status-model" id="statusModel">Loading…</div>
+  </div>
+
+  <!-- ── Promptor page ── -->
+  <div class="page active" id="pagePromptor">
+    <div class="promptor-body">
+
+      <!-- Grid sub-view: option buttons -->
+      <div id="viewButtons" style="flex:1;display:flex;flex-direction:column">
+        <div class="grid">
+          <!-- Row 1 -->
+          <div class="grid-cell">
+            <button class="opt-btn" id="btnModels" onclick="toggleModels()">
+              <span class="icon">⊞</span>
+              <span class="label" id="btnModelsLabel">Models</span>
+            </button>
+          </div>
+          <div class="grid-cell">
+            <button class="opt-btn" id="btnReasoning" onclick="toggleOption('reasoning')">
+              <span class="icon">✦</span>
+              <span class="label">Reasoning</span>
+            </button>
+          </div>
+          <div class="grid-cell">
+            <button class="opt-btn" id="btnText" onclick="toggleText()">
+              <span class="icon">✎</span>
+              <span class="label">Text</span>
+            </button>
+          </div>
+          <!-- Rows 2–4: placeholders -->
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+          <div class="grid-cell"><button class="opt-btn dim"><span class="icon">·</span></button></div>
+        </div>
+      </div>
+
+      <!-- Grid sub-view: model list -->
+      <div class="subview" id="viewModels">
+        <button class="subview-back" onclick="closeSubview()">← Back</button>
+        <div class="model-list" id="modelList"></div>
+      </div>
+
+      <!-- Grid sub-view: text input -->
+      <div class="subview" id="viewText">
+        <div class="text-area-wrap">
+          <textarea class="prompt-text" id="promptText" placeholder="Type your message…" rows="6"
+            oninput="state.textInput=this.value"></textarea>
+        </div>
+      </div>
+
+      <!-- Recording timer -->
+      <div class="rec-timer" id="recTimer"></div>
+
+      <!-- Action row -->
+      <div class="actions">
+        <button class="send-btn" id="sendBtn" onclick="send()" disabled title="Send">
+          <span>→</span>
+        </button>
+        <button class="mic-btn" id="micBtn"
+          onpointerdown="micDown(event)"
+          onpointermove="micMove(event)"
+          onpointerup="micUp(event)"
+          onpointercancel="micUp(event)"
+          onclick="micClick(event)">
+          <span id="micIcon">🎤</span>
+          <span class="clip-dot"></span>
+          <span class="lock-icon">🔒</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Delete confirmation -->
+    <div class="del-confirm" id="delConfirm">
+      <div class="del-confirm-msg">Clear this recording?</div>
+      <div class="del-confirm-btns">
+        <button class="del-cancel" onclick="closeDelConfirm()">Cancel</button>
+        <button class="del-delete" onclick="clearClip()">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── File page ── -->
+  <div class="page" id="pageFile">
+    <div class="page-scroll">
+      <div id="fileContent" class="raw-note"></div>
+      <div id="fileEmpty" class="page-empty" style="display:none">No session file configured</div>
+    </div>
+  </div>
+
+  <!-- ── Transcript page ── -->
+  <div class="page" id="pageTranscript">
+    <div class="save-bar" id="saveBar" style="display:none">
+      <span class="save-bar-msg" id="saveBarMsg"></span>
+      <button class="save-btn" onclick="saveSession()">Save pruned</button>
+      <button class="save-discard" onclick="discardDeletions()">Discard</button>
+    </div>
+    <div class="page-scroll">
+      <div id="transcriptContent" class="chat-log"></div>
+      <div id="transcriptEmpty" class="page-empty" style="display:none">No conversation yet</div>
+    </div>
+  </div>
+
+  <!-- Processing overlay -->
+  <div class="processing" id="processingOverlay">
+    <div class="spinner"></div>
+    <div class="processing-label">Working…</div>
+  </div>
+
+  <!-- Error toast -->
+  <div class="toast" id="errorToast"></div>
+
+  <!-- Nav bar -->
+  <div class="nav">
+    <button class="nav-tab" id="tabFile" onclick="showPage('file')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+        <polyline points="10 9 9 9 8 9"/>
+      </svg>
+      File
+    </button>
+    <button class="nav-tab" id="tabTranscript" onclick="showPage('transcript')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/>
+      </svg>
+      Transcript
+    </button>
+    <button class="nav-tab active" id="tabPromptor" onclick="showPage('promptor')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+      Promptor
+    </button>
+  </div>
+
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────
+const state = {
+  page: 'promptor',
+  gridView: 'buttons',   // buttons | models | text
+  options: { reasoning: false },
+  selectedModel: null,   // {providerKey, modelKey, providerName, modelName}
+  models: [],
+  rec: {
+    status: 'idle',      // idle | active | locked | paused
+    mediaRecorder: null,
+    stream: null,
+    chunks: [],
+    startY: 0,
+    locked: false,
+    timerID: null,
+    elapsed: 0,
+  },
+  textInput: '',
+  processing: false,
+  exchanges: [],         // parsed transcript exchanges
+  deletedSet: new Set(), // 'ei-ci' keys of hidden chunks
+};
+
+// ── Boot ──────────────────────────────────────────
+(async () => {
+  await loadModels();
+  render();
+})();
+
+// ── Model loading ─────────────────────────────────
+async function loadModels() {
+  try {
+    const r = await fetch('/models');
+    state.models = await r.json();
+    if (state.models.length > 0 && !state.selectedModel) {
+      state.selectedModel = state.models[0];
+    }
+  } catch(e) {
+    showError('Could not load models');
+  }
+}
+
+// ── Render ────────────────────────────────────────
+function render() {
+  // Status model label
+  const m = state.selectedModel;
+  document.getElementById('statusModel').textContent =
+    m ? (m.modelName || m.modelKey) : '—';
+
+  // Option button states
+  document.getElementById('btnReasoning').classList.toggle('on', state.options.reasoning);
+  document.getElementById('btnText').classList.toggle('on', state.gridView === 'text');
+  document.getElementById('btnModels').classList.toggle('on', state.gridView === 'models');
+
+  // Models button label
+  const ml = state.gridView === 'models' ? 'Models ▲' :
+    (state.selectedModel ? (state.selectedModel.modelName || state.selectedModel.modelKey).split(' ').slice(-1)[0] : 'Models');
+  document.getElementById('btnModelsLabel').textContent = ml.length > 10 ? ml.slice(0,9)+'…' : ml;
+
+  // Grid sub-view visibility
+  const views = { buttons: 'viewButtons', models: 'viewModels', text: 'viewText' };
+  Object.entries(views).forEach(([k, id]) => {
+    const el = document.getElementById(id);
+    if (k === 'buttons') {
+      el.style.display = (state.gridView === 'buttons') ? 'flex' : 'none';
+    } else {
+      el.classList.toggle('active', state.gridView === k);
+    }
+  });
+
+  // Send button enabled
+  const hasAudio = state.rec.status !== 'idle' || state.rec.chunks.length > 0;
+  const hasText = state.textInput.trim().length > 0;
+  document.getElementById('sendBtn').disabled = !hasAudio && !hasText || state.processing;
+
+  // Mic button state
+  const micBtn = document.getElementById('micBtn');
+  micBtn.classList.toggle('recording', state.rec.status === 'active' || state.rec.status === 'locked');
+  micBtn.classList.toggle('locked', state.rec.status === 'locked');
+  micBtn.classList.toggle('has-clip', state.rec.chunks.length > 0 && state.rec.status === 'idle');
+
+  // Processing overlay
+  document.getElementById('processingOverlay').classList.toggle('show', state.processing);
+}
+
+// ── Page navigation ───────────────────────────────
+function showPage(page) {
+  state.page = page;
+  ['file','transcript','promptor'].forEach(p => {
+    const pageEl = document.getElementById('page' + p.charAt(0).toUpperCase() + p.slice(1));
+    const tabEl  = document.getElementById('tab'  + p.charAt(0).toUpperCase() + p.slice(1));
+    pageEl.classList.toggle('active', p === page);
+    tabEl.classList.toggle('active', p === page);
+  });
+  if (page === 'file' || page === 'transcript') loadSession(page);
+}
+
+async function loadSession(page) {
+  try {
+    const r = await fetch('/session');
+    if (!r.ok) {
+      if (page === 'file') { showEl('fileEmpty'); hideEl('fileContent'); }
+      else                 { showEl('transcriptEmpty'); hideEl('transcriptContent'); }
+      return;
+    }
+    const { text } = await r.json();
+    if (page === 'file') {
+      hideEl('fileEmpty');
+      const el = document.getElementById('fileContent');
+      el.style.display = '';
+      el.textContent = text || '(empty)';
+    } else {
+      hideEl('transcriptEmpty');
+      renderTranscript(text);
+    }
+  } catch(e) {
+    showError('Could not load session');
+  }
+}
+
+// ── Markdown chunk splitter ───────────────────────
+// Splits a model reply into logical sections. Splits on:
+//   1. Horizontal rules (---, ***, ___) — always
+//   2. A heading that is at the same or higher level (smaller number) than the
+//      heading that started the current chunk (peer/parent heading signals a
+//      new major section). Subsection headings never split.
+//   3. Content before the first heading becomes its own chunk.
+// Never splits inside fenced code blocks.
+function splitMarkdownChunks(text) {
+  if (!text || !text.trim()) return [];
+  const lines = text.split('\n');
+  const chunks = [];
+  let current = [];
+  let chunkHeadingLevel = null; // level of heading that opened the current chunk
+  let inCode = false;
+  let hasContent = false;
+
+  const flush = () => {
+    const s = current.join('\n').trim();
+    if (s) chunks.push(s);
+    current = []; chunkHeadingLevel = null; hasContent = false;
+  };
+
+  for (const line of lines) {
+    if (/^(`{3,}|~{3,})/.test(line)) inCode = !inCode;
+
+    if (!inCode) {
+      // Hard split on horizontal rules; discard the rule itself
+      if (/^(---+|\*\*\*+|___+)\s*$/.test(line)) { flush(); continue; }
+
+      const hm = line.match(/^(#{1,6})\s+\S/);
+      if (hm) {
+        const level = hm[1].length;
+        if (chunkHeadingLevel === null) {
+          if (hasContent) flush();        // intro prose before first heading
+          chunkHeadingLevel = level;
+        } else if (level <= chunkHeadingLevel) {
+          flush();                        // peer or parent heading → new chunk
+          chunkHeadingLevel = level;
+        }
+        // else: subsection (deeper level) → stays in current chunk
+      }
+    }
+
+    current.push(line);
+    if (line.trim()) hasContent = true;
+  }
+  flush();
+  return chunks;
+}
+
+// ── Lightweight markdown → HTML (for bubble display) ─
+function mdToHtml(md) {
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,'<em>$1</em>')
+    .replace(/`([^`]+)`/g,'<code>$1</code>');
+
+  const lines = md.split('\n');
+  let html = '', inCode = false, codeLines = [], inList = false;
+
+  const flushList = () => {
+    if (inList) { html += inList === 'ol' ? '</ol>' : '</ul>'; inList = false; }
+  };
+
+  for (const line of lines) {
+    if (!inCode && /^(`{3,}|~{3,})/.test(line)) {
+      flushList(); inCode = true; codeLines = []; continue;
+    }
+    if (inCode) {
+      if (/^(`{3,}|~{3,})/.test(line)) {
+        inCode = false;
+        html += '<pre><code>' + esc(codeLines.join('\n')) + '</code></pre>';
+        codeLines = [];
+      } else { codeLines.push(line); }
+      continue;
+    }
+
+    const hm = line.match(/^(#{1,6})\s+(.+)/);
+    if (hm) {
+      flushList();
+      const tag = hm[1].length <= 1 ? 'h3' : hm[1].length === 2 ? 'h4' : 'h5';
+      html += `<${tag}>${inline(hm[2])}</${tag}>`; continue;
+    }
+    if (/^(---+|\*\*\*+|___+)\s*$/.test(line)) { flushList(); html += '<hr>'; continue; }
+
+    const bq = line.match(/^>\s*(.*)/);
+    if (bq) { flushList(); html += '<blockquote><p>'+inline(bq[1])+'</p></blockquote>'; continue; }
+
+    const ul = line.match(/^[-*+]\s+(.+)/);
+    if (ul) { if (inList!=='ul'){flushList();html+='<ul>';inList='ul';} html+='<li>'+inline(ul[1])+'</li>'; continue; }
+
+    const ol = line.match(/^\d+\.\s+(.+)/);
+    if (ol) { if (inList!=='ol'){flushList();html+='<ol>';inList='ol';} html+='<li>'+inline(ol[1])+'</li>'; continue; }
+
+    flushList();
+    if (line.trim()) html += '<p>' + inline(line) + '</p>';
+  }
+  flushList();
+  if (inCode) html += '<pre><code>' + esc(codeLines.join('\n')) + '</code></pre>';
+  return html;
+}
+
+// ── Transcript rendering ──────────────────────────
+function renderTranscript(text) {
+  const log = document.getElementById('transcriptContent');
+  log.innerHTML = '';
+  if (!text || !text.trim()) {
+    showEl('transcriptEmpty'); hideEl('transcriptContent'); return;
+  }
+  hideEl('transcriptEmpty');
+  log.style.display = '';
+  state.exchanges = [];
+  state.deletedSet = new Set();
+  updateSaveBar();
+
+  const blocks = text.replace(/^\n+/, '').split(/\n---\n/);
+  blocks.forEach(block => {
+    const userM  = block.match(/\*\*User(?:\s+\[([^\]]+)\])?:\*\*\s*([\s\S]*?)(?=\n\n\*\*Aunic:)/);
+    const aunicM = block.match(/\*\*Aunic:\*\*\s*([\s\S]*?)$/);
+    if (!userM && !aunicM) return;
+
+    const ts        = userM ? (userM[1] || '') : '';
+    const userText  = userM ? userM[2].trim() : '';
+    const aunicText = aunicM ? aunicM[1].trim() : '';
+    const chunks    = aunicText ? splitMarkdownChunks(aunicText) : [];
+    const ei        = state.exchanges.length;
+    state.exchanges.push({ userText, ts, aunicChunks: chunks });
+
+    // User bubble
+    if (userText) {
+      const row = document.createElement('div');
+      row.className = 'bubble-row user';
+      if (ts) {
+        const lbl = document.createElement('div');
+        lbl.className = 'bubble-label';
+        lbl.textContent = 'You · ' + ts;
+        row.appendChild(lbl);
+      }
+      const bub = document.createElement('div');
+      bub.className = 'bubble';
+      bub.textContent = userText;
+      row.appendChild(bub);
+      log.appendChild(row);
+    }
+
+    // Aunic chunks — each is its own deletable bubble
+    if (chunks.length === 0 && aunicText) {
+      // Fallback: no structure found, single bubble
+      chunks.push(aunicText);
+    }
+    chunks.forEach((chunk, ci) => {
+      const isLong = chunk.split('\n').length > 9;
+      const row = document.createElement('div');
+      row.className = 'bubble-row aunic aunic-chain';
+      row.id = 'chunk-' + ei + '-' + ci;
+
+      if (ci === 0) {
+        const lbl = document.createElement('div');
+        lbl.className = 'bubble-label';
+        lbl.textContent = 'Aunic' + (chunks.length > 1 ? ' (' + chunks.length + ' parts)' : '');
+        row.appendChild(lbl);
+      }
+
+      const wrap = document.createElement('div');
+      wrap.className = 'chunk-wrap';
+
+      // Left toggle: ↓/↑ for long, ☐ (inert) for short
+      const toggle = document.createElement('button');
+      toggle.className = 'chunk-toggle ' + (isLong ? 'expandable' : 'no-action');
+      toggle.textContent = isLong ? '↓' : '☐';
+      wrap.appendChild(toggle);
+
+      // Inner column: bubble + optional expand hint
+      const inner = document.createElement('div');
+      inner.className = 'bubble-inner';
+
+      const bub = document.createElement('div');
+      bub.className = 'bubble' + (isLong ? ' collapsed' : '');
+      bub.innerHTML = mdToHtml(chunk);
+      inner.appendChild(bub);
+
+      let hint = null;
+      if (isLong) {
+        hint = document.createElement('div');
+        hint.className = 'expand-hint';
+        hint.innerHTML = '<div class="expand-wave"></div><span class="expand-label">↓ expand</span>';
+        hint.onclick = () => toggleChunk(toggle, bub, hint);
+        inner.appendChild(hint);
+        toggle.onclick = () => toggleChunk(toggle, bub, hint);
+      }
+
+      wrap.appendChild(inner);
+
+      const del = document.createElement('button');
+      del.className = 'bubble-del';
+      del.title = 'Hide this chunk';
+      del.textContent = '✕';
+      del.onclick = () => deleteChunk(ei, ci);
+      wrap.appendChild(del);
+
+      row.appendChild(wrap);
+      log.appendChild(row);
+    });
+  });
+
+  log.parentElement.scrollTop = log.parentElement.scrollHeight;
+}
+
+function toggleChunk(toggleBtn, bub, hint) {
+  const isCollapsed = bub.classList.contains('collapsed');
+  bub.classList.toggle('collapsed', !isCollapsed);
+  toggleBtn.textContent = isCollapsed ? '↑' : '↓';
+  if (hint) hint.style.display = isCollapsed ? 'none' : '';
+}
+
+function deleteChunk(ei, ci) {
+  state.deletedSet.add(ei + '-' + ci);
+  const el = document.getElementById('chunk-' + ei + '-' + ci);
+  if (el) el.style.display = 'none';
+  updateSaveBar();
+}
+
+function updateSaveBar() {
+  const bar = document.getElementById('saveBar');
+  const n = state.deletedSet.size;
+  if (n === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  document.getElementById('saveBarMsg').textContent =
+    n === 1 ? '1 chunk hidden' : n + ' chunks hidden';
+}
+
+function discardDeletions() {
+  state.deletedSet = new Set();
+  document.querySelectorAll('.aunic-chain').forEach(el => el.style.display = '');
+  updateSaveBar();
+}
+
+async function saveSession() {
+  // Reconstruct session file without deleted chunks.
+  let rebuilt = '';
+  state.exchanges.forEach((ex, ei) => {
+    const kept = ex.aunicChunks.filter((_, ci) => !state.deletedSet.has(ei + '-' + ci));
+    const aunicText = kept.join('\n\n');
+    rebuilt += '\n---\n**User' + (ex.ts ? ' [' + ex.ts + ']' : '') + ':** ' +
+      ex.userText + '\n\n**Aunic:** ' + aunicText + '\n';
+  });
+  try {
+    const r = await fetch('/session', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: rebuilt }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    state.deletedSet = new Set();
+    loadSession('transcript');
+  } catch(e) {
+    showError('Save failed: ' + e.message);
+  }
+}
+
+function showEl(id) { document.getElementById(id).style.display = '' }
+function hideEl(id) { document.getElementById(id).style.display = 'none' }
+
+// ── Grid option toggles ───────────────────────────
+function toggleOption(key) {
+  state.options[key] = !state.options[key];
+  render();
+}
+
+function toggleModels() {
+  if (state.gridView === 'models') {
+    closeSubview();
+  } else {
+    state.gridView = 'models';
+    renderModelList();
+    render();
+  }
+}
+
+function toggleText() {
+  if (state.gridView === 'text') {
+    closeSubview();
+  } else {
+    state.gridView = 'text';
+    render();
+    setTimeout(() => document.getElementById('promptText').focus(), 50);
+  }
+}
+
+function closeSubview() {
+  state.gridView = 'buttons';
+  render();
+}
+
+function renderModelList() {
+  const list = document.getElementById('modelList');
+  list.innerHTML = '';
+  state.models.forEach(m => {
+    const item = document.createElement('div');
+    item.className = 'model-item' + (state.selectedModel && state.selectedModel.modelKey === m.modelKey && state.selectedModel.providerKey === m.providerKey ? ' selected' : '');
+    item.innerHTML = `<div class="model-name">${esc(m.modelName || m.modelKey)}</div>
+      <div class="model-provider">${esc(m.providerName || m.providerKey)}</div>`;
+    item.onclick = () => selectModel(m);
+    list.appendChild(item);
+  });
+}
+
+function selectModel(m) {
+  state.selectedModel = m;
+  closeSubview();
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Mic recording ─────────────────────────────────
+let recInterval = null;
+
+function micDown(e) {
+  e.preventDefault();
+  // If has clip and user taps: handled by micClick
+  if (state.rec.chunks.length > 0 && state.rec.status === 'idle') return;
+  if (state.rec.status === 'active' || state.rec.status === 'locked') return;
+
+  state.rec.startY = e.clientY;
+  state.rec.locked = false;
+  document.getElementById('micBtn').setPointerCapture(e.pointerId);
+  startRecording();
+}
+
+function micMove(e) {
+  if (state.rec.status !== 'active') return;
+  const dy = Math.abs(e.clientY - state.rec.startY);
+  if (dy > 45 && !state.rec.locked) {
+    state.rec.locked = true;
+    state.rec.status = 'locked';
+    render();
+  }
+}
+
+function micUp(e) {
+  if (state.rec.status === 'locked') return; // stays recording until tap
+  if (state.rec.status === 'active') {
+    pauseRecording();
+  }
+}
+
+function micClick(e) {
+  // Tapping when locked: stop
+  if (state.rec.status === 'locked') {
+    pauseRecording();
+    return;
+  }
+  // Tapping when has a clip: show delete confirm
+  if (state.rec.chunks.length > 0 && state.rec.status === 'idle') {
+    e.stopPropagation();
+    document.getElementById('delConfirm').classList.add('show');
+    return;
+  }
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const types = ['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg'];
+    const mime = types.find(t => MediaRecorder.isTypeSupported(t)) || '';
+    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : {});
+    mr.ondataavailable = e => { if (e.data.size > 0) state.rec.chunks.push(e.data); };
+    mr.start(250);
+    state.rec.mediaRecorder = mr;
+    state.rec.stream = stream;
+    state.rec.status = 'active';
+    startTimer();
+    render();
+  } catch(err) {
+    showError('Microphone access denied');
+  }
+}
+
+function pauseRecording() {
+  if (!state.rec.mediaRecorder) return;
+  state.rec.mediaRecorder.stop();
+  state.rec.stream.getTracks().forEach(t => t.stop());
+  state.rec.mediaRecorder = null;
+  state.rec.stream = null;
+  state.rec.status = 'idle';
+  state.rec.locked = false;
+  stopTimer();
+  render();
+}
+
+function clearClip() {
+  pauseRecording();
+  state.rec.chunks = [];
+  document.getElementById('delConfirm').classList.remove('show');
+  render();
+}
+
+function closeDelConfirm() {
+  document.getElementById('delConfirm').classList.remove('show');
+}
+
+function startTimer() {
+  state.rec.elapsed = 0;
+  recInterval = setInterval(() => {
+    state.rec.elapsed++;
+    const m = String(Math.floor(state.rec.elapsed/60)).padStart(2,'0');
+    const s = String(state.rec.elapsed % 60).padStart(2,'0');
+    document.getElementById('recTimer').textContent = '⏺ ' + m + ':' + s;
+  }, 1000);
+}
+
+function stopTimer() {
+  clearInterval(recInterval);
+  recInterval = null;
+  const hasClip = state.rec.chunks.length > 0;
+  document.getElementById('recTimer').textContent = hasClip ? 'Recording ready' : '';
+}
+
+// ── Send ──────────────────────────────────────────
+async function send() {
+  if (state.processing) return;
+
+  // Stop any active recording first
+  if (state.rec.status === 'active' || state.rec.status === 'locked') {
+    pauseRecording();
+    await new Promise(r => setTimeout(r, 100)); // let MediaRecorder flush
+  }
+
+  const hasAudio = state.rec.chunks.length > 0;
+  const hasText  = state.textInput.trim().length > 0;
+  if (!hasAudio && !hasText) return;
+
+  state.processing = true;
+  render();
+
+  try {
+    let resp;
+    if (hasAudio) {
+      const blob = new Blob(state.rec.chunks, { type: state.rec.chunks[0].type || 'audio/webm' });
+      const form = new FormData();
+      form.append('audio', blob, 'recording.webm');
+      if (state.selectedModel) {
+        form.append('model', state.selectedModel.providerKey + '/' + state.selectedModel.modelKey);
+      }
+      if (state.options.reasoning) form.append('reasoning', '1');
+      resp = await fetch('/voice', { method: 'POST', body: form });
+    } else {
+      resp = await fetch('/text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: state.textInput.trim(),
+          model: state.selectedModel ? state.selectedModel.providerKey + '/' + state.selectedModel.modelKey : '',
+          reasoning: state.options.reasoning,
+        }),
+      });
+    }
+
+    if (!resp.ok) {
+      const msg = await resp.text().catch(() => 'Unknown error');
+      throw new Error(msg || resp.statusText);
+    }
+
+    const audioBlob = await resp.blob();
+    const url = URL.createObjectURL(audioBlob);
+    const audio = new Audio(url);
+    audio.onended = () => URL.revokeObjectURL(url);
+    await audio.play();
+
+    // Clear inputs
+    state.rec.chunks = [];
+    state.textInput = '';
+    document.getElementById('promptText').value = '';
+    document.getElementById('recTimer').textContent = '';
+
+    // Refresh transcript if on that page
+    if (state.page === 'transcript') loadSession('transcript');
+
+  } catch(err) {
+    showError(err.message || 'Request failed');
+  } finally {
+    state.processing = false;
+    render();
+  }
+}
+
+// ── Error toast ───────────────────────────────────
+let toastTimer = null;
+function showError(msg) {
+  const el = document.getElementById('errorToast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 4000);
+}
+
+// Close del confirm on outside tap
+document.addEventListener('pointerdown', e => {
+  const dc = document.getElementById('delConfirm');
+  if (dc.classList.contains('show') && !dc.contains(e.target) && !document.getElementById('micBtn').contains(e.target)) {
+    dc.classList.remove('show');
+  }
+});
+</script>
+</body>
+</html>

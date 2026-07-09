@@ -1,0 +1,19 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 18:23:07  |  local  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  <note_path>jellyfin-screensaver.md</note_path>
+  
+  <note_content>
+  # Project
+  I would like to make a screensaver that pulls images from my jellyfin server and plays them in a slideshow. The jellyfin server is at media.halfab.net
+  
+  ## Guide
+  This should be a QML-based wallpaper plugin that fetches jellyfin images directly vir `XMLHttpRequest` and cycles them. 
+  - should be appliable to either the desktop background, lockscreen and screen saver
+  </note_content>
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+

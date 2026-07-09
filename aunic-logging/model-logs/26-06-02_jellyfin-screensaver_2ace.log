@@ -1,0 +1,66 @@
+════════════════════════════════════════════════════════════════
+Run  2026-06-02 14:53:22  |  claude-sonnet-4-6 (agent-sdk)  |  chat
+════════════════════════════════════════════════════════════════
+
+<USER>
+  1. place a 15GB cap on the folder size. If the cap is met, the daily deletion goes up to 5. There is also a minimum of 25 images.
+  2. Your suggestion makes sense
+  3. Can you not use login instead of API?
+</USER>
+
+── Step 1 ──────────────────────────────────────────────────────
+
+  <THINKING>
+    The user is asking about using login credentials (username/password) instead of an API key for Jellyfin. Let me think about this.
+    
+    Jellyfin does support authentication via username/password through the `/Users/AuthenticateByName` endpoint, which returns an access token. This token can then be used in subsequent requests similarly to an API key.
+    
+    The auth endpoint is:
+    `POST /Users/AuthenticateByName`
+    With body: `{"Username": "user", "Pw": "password"}`
+    And headers including: `X-Emby-Authorization: MediaBrowser Client="...", Device="...", DeviceId="...", Version="..."`
+    
+    
+    This returns an `AccessToken` that works like an API key. While technically possible, using login credentials in a bash script introduces complications—you'd need to store plaintext credentials, handle token expiration and re-authentication, and add extra logic—whereas an API key is simpler, never expires unless revoked, and is the more standard approach for this use case.
+  </THINKING>
+
+  <RESPONSE>
+    On question 3: you can, but it's actually worse than an API key for this use case. Here's why:
+    
+    Using username/password in a script means:
+    - Storing your password in plaintext in the script file (same risk as an API key, but exposing more)
+    - The script has to call `/Users/AuthenticateByName` first, get a token back, then use that token — which is just recreating an API key manually every run
+    - Sessions can expire or get invalidated, breaking the script silently
+    
+    An API key is strictly better here:
+    - One short token in the script, never expires unless you revoke it
+    - Scoped to read-only API access — if it leaks, an attacker can browse your media but can't log into your account
+    - Takes 30 seconds to generate: Dashboard → Administration → API Keys → ⊕
+    
+    The net result is the script ends up with `JELLYFIN_API_KEY="abc123"` either way — the difference is that the API key approach skips the auth step entirely.
+    
+    ---
+    
+    **All decisions locked in. Here's the final spec:**
+    
+    - **Script**: `~/Scripts-Apps-Plugins/Scripts/lock-screen.bash`
+    - **Images**: `~/.local/share/jellyfin-wallpapers/`
+    - **Sources**: Movie, Series, MusicArtist — all backdrop indices
+    - **Resolution**: Full
+    - **Seed**: 50 images on first run
+    - **Growth**: +1 image per 10 min locked (accumulated)
+    - **Shrink**: −2 images/inactive day (0 lock minutes that day)
+    - **Cap**: 15GB folder size → daily deletion jumps to −5 when over cap
+    - **Floor**: 25 images minimum
+    - **Inactive day**: any day where `locked_minutes_accumulated == 0`
+    - **Deduplication**: filename = `{itemId}_backdrop_{index}.jpg`
+    - **Auth**: `JELLYFIN_API_KEY=""` placeholder
+    - **Lock detection**: `dbus-monitor`
+    
+    Ready to build. Provide the API key when you have it and I'll delegate the implementation.
+  </RESPONSE>
+
+════════════════════════════════════════════════════════════════
+Run end  |  1 steps  |  6 in  12 out  |  21.1s  |  chat
+════════════════════════════════════════════════════════════════
+
