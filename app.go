@@ -292,7 +292,7 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 		}
 	}
 
-	// Pi harness: spawn the subprocess if the configured provider is "pi".
+	// Pi harness: spawn the subprocess if the configured harness is "pi".
 	if appliedCfg.Harness == "pi" {
 		proc, err := pi.Open(m.piOpts())
 		if err != nil {
@@ -302,7 +302,7 @@ func newApp(fp, content string, cfg llm.Config) appModel {
 		}
 	}
 
-	// Claude harness: spawn the subprocess if the configured provider is "claude".
+	// Claude harness: spawn the subprocess if the configured harness is "claude".
 	if appliedCfg.Harness == "claude" {
 		proc, err := claude.Open(m.claudeOpts())
 		if err != nil {
@@ -897,12 +897,9 @@ func (m *appModel) recordSearchInTranscript(query string, results []web.Result) 
 	)
 }
 
-// recordRunnerToolInTranscript handles model-side web_search / web_fetch tool
-// calls emitted by the runner. It decodes the runner's raw JSON back into
-// web.Result / web.Page values and routes through the same record helpers used
-// by the user-driven @web path. Returns nil for tools we don't persist
-// (note_edit / note_write are applied to the editor buffer instead).
-// the full page body is intentionally dropped to keep the transcript compact.
+// recordFetchInTranscript records a fetched page in the transcript through
+// the same record helpers the user-driven @web path uses. The full page body
+// is intentionally dropped to keep the transcript compact.
 func (m *appModel) recordFetchInTranscript(page web.Page) tea.Cmd {
 	if page.URL == "" {
 		return nil

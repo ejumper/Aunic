@@ -1,8 +1,7 @@
 // Package todos holds the persistent todo list that lives in the "## Todos"
 // section at the bottom of a note file's transcript area. Todos are rendered
 // as a markdown checkbox list (e.g. "- [ ] #1 Write tests") so the file stays
-// human-readable and portable. The model interacts with this list via the
-// todo_write and todo_done tools in the runner package; the list itself is
+// human-readable and portable. The list is
 // surfaced to the model by appending it to the user prompt text at run start.
 package todos
 

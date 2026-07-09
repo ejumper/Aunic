@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// Config is the flattened per-run configuration the runner receives.
+// Config is the flattened per-run configuration a harness run receives.
 type Config struct {
 	// Harness selects the Aunic-side dispatch backend (e.g. "pi"). This is
 	// the key of the aunic.json "harnesses" block the active model came
