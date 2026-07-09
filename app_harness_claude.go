@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -365,13 +364,7 @@ func (m appModel) handleClaudeToolResult(data []byte) (appModel, tea.Cmd) {
 		if (toolName == transcript.ToolEdit || toolName == transcript.ToolWrite) && m.claudeToolTouchedNoteFile(block.ToolUseID) {
 			m.claudeNoteEditedInRun = true
 			m.claudeNoteSnapshotHash = "" // force re-injection on next run
-			if raw, err := os.ReadFile(m.filepath); err == nil {
-				noteBody, _ := transcript.Split(string(raw))
-				m.editor.SetContent(noteBody)
-				m.savedValue = noteBody
-				m.refreshMarkerHighlight()
-				m.clearInsertHighlight()
-			}
+			m.reloadNoteFromDisk()
 		}
 	}
 
@@ -455,8 +448,7 @@ func (m appModel) claudeOpts() claude.Opts {
 // on the model regardless of whether noteCtx is empty.
 func (m appModel) injectClaudeSnapshotIfStale(parsed markers.Parse, absNotePath string) (noteCtx, newHash string) {
 	snap := parsed.BuildSnapshot()
-	h := fnv64(snap.Visible)
-	key := fmt.Sprintf("%d:%x", len(snap.Visible), h)
+	key := snapshotFingerprint(snap)
 	if m.claudeNoteSnapshotHash == key {
 		return "", key
 	}
@@ -471,19 +463,7 @@ func (m appModel) claudeToolTouchedNoteFile(toolUseID string) bool {
 	if !ok {
 		return false
 	}
-	row := m.transcriptRows[idx]
-	c, err := transcript.DecodeAgentFileCall(row.Content)
-	if err != nil {
-		return false
-	}
-	absNote, _ := filepath.Abs(m.filepath)
-	// Claude's cwd = filepath.Dir(absNote); resolve relative paths from there.
-	claudeCwd := filepath.Dir(absNote)
-	absTarget := c.FilePath
-	if !filepath.IsAbs(absTarget) {
-		absTarget = filepath.Join(claudeCwd, absTarget)
-	}
-	return absNote == absTarget
+	return m.rowTargetsNoteFile(idx)
 }
 
 // extractClaudeToolText extracts the text of a tool_result's content field,

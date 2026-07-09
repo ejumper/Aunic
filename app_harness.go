@@ -387,13 +387,7 @@ func (m appModel) handleToolExecEnd(data []byte) (appModel, tea.Cmd) {
 	if (ev.ToolName == "edit" || ev.ToolName == "write") && m.toolTouchedNoteFile(ev) {
 		m.piNoteEditedInRun = true
 		m.piNoteSnapshotHash = "" // force re-injection on next run
-		if raw, err := os.ReadFile(m.filepath); err == nil {
-			noteBody, _ := transcript.Split(string(raw))
-			m.editor.SetContent(noteBody)
-			m.savedValue = noteBody
-			m.refreshMarkerHighlight()
-			m.clearInsertHighlight()
-		}
+		m.reloadNoteFromDisk()
 	}
 
 	// Persist transcript after every tool pair. Also restores transcript section
@@ -526,8 +520,7 @@ func (m appModel) piOpts() pi.Opts {
 // the last injection. Returns the new fingerprint string (always valid).
 func (m appModel) injectSnapshotIfStale(parsed markers.Parse, absNotePath string) (newHash string, err error) {
 	snap := parsed.BuildSnapshot()
-	h := fnv64(snap.Visible)
-	key := fmt.Sprintf("%d:%x", len(snap.Visible), h)
+	key := snapshotFingerprint(snap)
 	if m.piNoteSnapshotHash == key {
 		return key, nil
 	}
@@ -549,19 +542,7 @@ func (m appModel) toolTouchedNoteFile(ev pi.ToolExecEndEvent) bool {
 	if !ok {
 		return false
 	}
-	row := m.transcriptRows[idx]
-	c, err := transcript.DecodeAgentFileCall(row.Content)
-	if err != nil {
-		return false
-	}
-	absNote, _ := filepath.Abs(m.filepath)
-	// Pi's cwd = filepath.Dir(absNote); resolve relative paths from there.
-	piCwd := filepath.Dir(absNote)
-	absTarget := c.FilePath
-	if !filepath.IsAbs(absTarget) {
-		absTarget = filepath.Join(piCwd, absTarget)
-	}
-	return absNote == absTarget
+	return m.rowTargetsNoteFile(idx)
 }
 
 // extractToolText joins all text content blocks from a Pi ToolResult.
@@ -606,13 +587,6 @@ func sessionIDForPath(absPath string) string {
 }
 
 // aunicSessionDir returns ~/.local/share/aunic/sessions/, creating it if needed.
-func aunicSessionDir() string {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".local", "share", "aunic", "sessions")
-	_ = os.MkdirAll(dir, 0755)
-	return dir
-}
-
 // toolsForAgentMode returns the tool list for the given agent mode.
 // "off" → empty slice (--no-tools); "read" → read-only subset; "work" → nil (all tools).
 func toolsForAgentMode(mode string) []string {
@@ -639,8 +613,3 @@ func buildSystemPrompt(notePath string) string {
 
 // snapshotTempPath returns a stable temp file path for the note snapshot,
 // keyed by the note's absolute path so multiple open files don't collide.
-func snapshotTempPath(absNotePath string) string {
-	h := sha256.Sum256([]byte(absNotePath))
-	name := "aunic-snap-" + hex.EncodeToString(h[:4]) + ".md"
-	return filepath.Join(os.TempDir(), name)
-}
