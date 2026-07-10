@@ -64,7 +64,7 @@ func (p *Pane) SetModelNames(names map[string]bool) {
 
 // OpenModel activates the model picker, replacing the prompt box.
 func (p Pane) OpenModel(items []ModelItem) Pane {
-	mb := NewModelBar(items, p.width-2)
+	mb := NewModelBar(items, p.innerWidth())
 	p.modelBar = &mb
 	p.findBar = nil
 	p.gotoBar = nil
@@ -85,7 +85,7 @@ func (p Pane) IsModelMode() bool { return p.modelBar != nil }
 
 // OpenCmdBar activates the command picker, replacing the prompt box.
 func (p Pane) OpenCmdBar() Pane {
-	cb := NewCmdBar(p.width - 2)
+	cb := NewCmdBar(p.innerWidth())
 	p.cmdBar = &cb
 	p.findBar = nil
 	p.gotoBar = nil
@@ -107,7 +107,7 @@ func (p Pane) IsCmdMode() bool { return p.cmdBar != nil }
 
 // OpenWebQueryBar activates the web search query input, replacing the prompt box.
 func (p Pane) OpenWebQueryBar() Pane {
-	wb := NewWebQueryBar(p.width - 2)
+	wb := NewWebQueryBar(p.innerWidth())
 	p.webQueryBar = &wb
 	p.findBar = nil
 	p.gotoBar = nil
@@ -208,6 +208,10 @@ func NewPane(width int) Pane {
 		width:     width,
 	}
 }
+
+// innerWidth is the pane's content width: the terminal width minus the two
+// border columns.
+func (p Pane) innerWidth() int { return p.width - 2 }
 
 // SetWidth resizes all components to the new terminal width.
 func (p *Pane) SetWidth(width int) {
@@ -323,7 +327,7 @@ func (p Pane) OpenFindCmd(sc *SlashCmdResult) Pane {
 
 // OpenGoto activates goto mode, replacing the prompt box with a goto bar.
 func (p Pane) OpenGoto() Pane {
-	gb := NewGotoBar(p.width - 2)
+	gb := NewGotoBar(p.innerWidth())
 	p.gotoBar = &gb
 	p.findBar = nil
 	p.webBar = nil
@@ -342,7 +346,7 @@ func (p Pane) CloseGoto() Pane {
 // returns the pane plus a tea.Cmd that runs the DDG search asynchronously.
 func (p Pane) OpenWeb(query string, n int) (Pane, tea.Cmd) {
 	maxRows := webMaxRows(p.height)
-	innerWidth := p.width - 2
+	innerWidth := p.innerWidth()
 	if innerWidth < 2 {
 		innerWidth = 2
 	}
@@ -359,7 +363,7 @@ func (p Pane) OpenWeb(query string, n int) (Pane, tea.Cmd) {
 // running a search first. Used when the user opens a transcript URL in the pager.
 func (p Pane) OpenWebForURL(url string) (Pane, tea.Cmd) {
 	maxRows := webMaxRows(p.height)
-	innerWidth := p.width - 2
+	innerWidth := p.innerWidth()
 	if innerWidth < 2 {
 		innerWidth = 2
 	}
@@ -378,7 +382,7 @@ func (p Pane) OpenWebForURL(url string) (Pane, tea.Cmd) {
 // the caller applies content via ApplyWebPage right after calling this.
 func (p Pane) OpenWebForFile() Pane {
 	maxRows := webMaxRows(p.height)
-	innerWidth := p.width - 2
+	innerWidth := p.innerWidth()
 	if innerWidth < 2 {
 		innerWidth = 2
 	}
@@ -668,7 +672,7 @@ func (p Pane) Update(msg tea.Msg) (Pane, tea.Cmd) {
 // View renders the full agent pane as a multi-line string without a trailing
 // newline.
 func (p Pane) View() string {
-	innerWidth := p.width - 2
+	innerWidth := p.innerWidth()
 	if innerWidth < 2 {
 		innerWidth = 2
 	}
