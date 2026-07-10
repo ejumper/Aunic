@@ -19,6 +19,10 @@ import (
 // these sequences but bubbletea emits them as the internal unknownCSISequenceMsg
 // type. We intercept them here and convert to the nearest tea.KeyMsg equivalent.
 func kittyInputFilter(_ tea.Model, msg tea.Msg) tea.Msg {
+	// unknownCSISequenceMsg is unexported, so there's no type to switch on and
+	// no public API to match it — we identify it by reflected type name. This
+	// is deliberately fragile: it silently stops matching if bubbletea renames
+	// the type, which just means shift+enter falls back to plain enter.
 	rv := reflect.ValueOf(msg)
 	if rv.Kind() != reflect.Slice || rv.Type().String() != "tea.unknownCSISequenceMsg" {
 		return msg
