@@ -15,6 +15,14 @@ import (
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
+// Fixed column widths shared by the row-layout renderers below: the toggle
+// glyph, the tool-name column, and the close/expand marker.
+const (
+	toggleW = 3
+	toolW   = 8
+	xW      = 3
+)
+
 // hitRange records the screen X range of one focusable cell on one line.
 type hitRange struct {
 	cell cell
@@ -252,9 +260,6 @@ func (tb TranscriptBar) renderTopBar(width int) (string, []hitRange) {
 // with tool rows. ANSI 6 (cyan) is applied to every cell. Focus is rendered as
 // reverse video, layered on top of cyan.
 func (tb TranscriptBar) renderTodoSummaryRow(width int) (string, []hitRange) {
-	const toggleW = 3
-	const toolW = 8
-	const xW = 3
 	queryW := width - toggleW - toolW - xW
 	if queryW < 4 {
 		queryW = 4
@@ -311,8 +316,6 @@ func (tb TranscriptBar) renderTodoSummaryRow(width int) (string, []hitRange) {
 // widths match renderHitRow so the layout aligns with web-search hit rows.
 func (tb TranscriptBar) renderTodoItemRow(t todos.Todo, width int) (string, []hitRange) {
 	const indent = 3
-	const toggleW = 3
-	const xW = 3
 	textW := width - indent - toggleW - xW
 	if textW < 4 {
 		textW = 4
@@ -355,9 +358,6 @@ func (tb TranscriptBar) renderTodoItemRow(t todos.Todo, width int) (string, []hi
 // renderRow renders a top-level row: [↓]|tool|query|x|. Tool cell is 8 cells
 // total (incl. brackets); toggle/delete are 3; query fills remainder.
 func (tb TranscriptBar) renderRow(p pair, width int) (string, []hitRange) {
-	const toggleW = 3
-	const toolW = 8
-	const xW = 3
 	queryW := width - toggleW - toolW - xW
 	if queryW < 4 {
 		queryW = 4
@@ -444,8 +444,6 @@ func (tb TranscriptBar) renderRow(p pair, width int) (string, []hitRange) {
 // renderHitRow renders an indented (3 spaces) sub-row for a single search hit.
 func (tb TranscriptBar) renderHitRow(rowNum, hitIdx int, h transcript.SearchResultHit, width int) (string, []hitRange) {
 	const indent = 3
-	const toggleW = 3
-	const xW = 3
 	urlW := width - indent - toggleW - xW
 	if urlW < 4 {
 		urlW = 4
