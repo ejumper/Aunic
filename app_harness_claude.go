@@ -368,7 +368,7 @@ func (m appModel) handleClaudeToolResult(data []byte) (appModel, tea.Cmd) {
 		}
 	}
 
-	_ = m.writeNote()
+	m.saveNote()
 	return m, m.ag.Indicator.StaleCmd()
 }
 
@@ -390,7 +390,7 @@ func (m appModel) handleClaudeResult(_ []byte) (appModel, tea.Cmd) {
 		m.claudeRunActive = true // the follow-up is itself a new run
 	}
 
-	_ = m.writeNote()
+	m.saveNote()
 	return m, m.ag.Indicator.StaleCmd()
 }
 

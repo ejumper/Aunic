@@ -403,11 +403,27 @@ func (m *appModel) writeNote() error {
 	if err := os.WriteFile(m.filepath, []byte(full), 0644); err != nil {
 		return err
 	}
-	_ = transcript.SaveGlobalState(m.currentState())
+	// The note file saved; the global settings file and the voice symlink are
+	// secondary. Surface their failures in the indicator but don't fail the
+	// save — a settings-write hiccup shouldn't look like a lost note.
+	if err := transcript.SaveGlobalState(m.currentState()); err != nil {
+		m.ag.Indicator.SetError("Settings save failed: " + err.Error())
+	}
 	if m.voiceEnabled {
-		_ = voice.ClaimSymlink(os.Getpid())
+		if err := voice.ClaimSymlink(os.Getpid()); err != nil {
+			m.ag.Indicator.SetError("Voice link failed: " + err.Error())
+		}
 	}
 	return nil
+}
+
+// saveNote writes the note to disk and surfaces any failure in the indicator.
+// Use it in place of a discarded writeNote() at call sites that can't return
+// the error themselves — it never changes control flow.
+func (m *appModel) saveNote() {
+	if err := m.writeNote(); err != nil {
+		m.ag.Indicator.SetError("Save failed: " + err.Error())
+	}
 }
 
 // currentState gathers the persistent UI state for serialization. Transcript
@@ -801,7 +817,7 @@ func (m appModel) handleTitleBarClick(x int) (tea.Model, tea.Cmd) {
 func (m appModel) executeDialog() (tea.Model, tea.Cmd) {
 	switch m.dialogFocus {
 	case 0: // save
-		_ = m.writeNote()
+		m.saveNote()
 		return m, tea.Quit
 	case 1: // exit without saving
 		return m, tea.Quit

@@ -114,7 +114,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		m.mode = target
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
-		_ = m.writeNote()
+		m.saveNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.SlashWork, agent.SlashRead, agent.SlashAgentOff:
@@ -131,7 +131,7 @@ func (m appModel) executeSlashCmd(cmd *agent.SlashCmdResult) (tea.Model, tea.Cmd
 		}
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
-		_ = m.writeNote()
+		m.saveNote()
 		return m.respawnActiveHarness()
 
 	case agent.SlashWeb:

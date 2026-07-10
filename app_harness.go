@@ -42,7 +42,7 @@ func (m appModel) switchToModel(cfg llm.Config) (appModel, tea.Cmd, string) {
 	}
 	m.ag.SetModelLabel(cfg.ModelName)
 	m.ag.Indicator.Set("Model: " + cfg.ModelName)
-	_ = m.writeNote()
+	m.saveNote()
 	m.llmCfg = cfg
 	m, cmd := m.respawnActiveHarness()
 	return m, cmd, ""
@@ -392,7 +392,7 @@ func (m appModel) handleToolExecEnd(data []byte) (appModel, tea.Cmd) {
 
 	// Persist transcript after every tool pair. Also restores transcript section
 	// if Pi's write overwrote it (writeNote re-appends from m.transcriptRows).
-	_ = m.writeNote()
+	m.saveNote()
 	return m, m.ag.Indicator.StaleCmd()
 }
 
@@ -412,7 +412,7 @@ func (m appModel) handleAgentEnd(_ []byte) (appModel, tea.Cmd) {
 		m.piFollowUpSent = true
 	}
 
-	_ = m.writeNote()
+	m.saveNote()
 	return m, m.ag.Indicator.StaleCmd()
 }
 

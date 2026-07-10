@@ -377,7 +377,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ag.SetAgentLabel("agent: " + m.agentMode)
 		m.ag.Indicator.Set("Agent mode: " + m.agentMode)
-		_ = m.writeNote()
+		m.saveNote()
 		return m.respawnActiveHarness()
 
 	case agent.ModeTogglePressMsg:
@@ -388,7 +388,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ag.SetModeLabel("mode: " + m.mode)
 		m.ag.Indicator.Set("Switched to " + m.mode + " mode")
-		_ = m.writeNote()
+		m.saveNote()
 		return m, m.ag.Indicator.StaleCmd()
 
 	case agent.VoiceTogglePressMsg:
@@ -413,7 +413,7 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.voicePipeRelease = release
 			m.ag.Buttons.VoiceLabel = "🔈"
 		}
-		_ = m.writeNote()
+		m.saveNote()
 		return m, tea.Batch(m.ag.Indicator.StaleCmd(), m.waitForVoiceInput())
 
 	case voiceInputMsg:

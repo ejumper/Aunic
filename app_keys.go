@@ -117,7 +117,7 @@ func (m appModel) handleAppKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		bar, cmd := m.transcriptBar.Update(msg)
 		m.transcriptBar = bar
 		if wasFull != m.transcriptBar.IsFullHeight() || wasCollapsed != m.transcriptBar.IsCollapsed() {
-			_ = m.writeNote()
+			m.saveNote()
 		}
 		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
 	}

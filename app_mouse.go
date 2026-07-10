@@ -89,7 +89,7 @@ func (m appModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m = m.setFocus(focusTranscript)
 		}
 		if wasFull != m.transcriptBar.IsFullHeight() || wasCollapsed != m.transcriptBar.IsCollapsed() {
-			_ = m.writeNote()
+			m.saveNote()
 		}
 		return m, tea.Batch(cmd, m.maybeResizeEditorCmd())
 	}
