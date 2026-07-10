@@ -194,7 +194,7 @@ func (tb TranscriptBar) renderCollapsedBar(width int) (string, []hitRange) {
 		prefix = "\x1b[7m[^]\x1b[0m"
 	}
 	body := prefix + " Open transcript"
-	return padTo("\x1b[2m"+body+"\x1b[0m", width), hr
+	return padTo(ansiDim+body+ansiReset, width), hr
 }
 
 func (tb TranscriptBar) renderTopBar(width int) (string, []hitRange) {
@@ -231,11 +231,11 @@ func (tb TranscriptBar) renderTopBar(width int) (string, []hitRange) {
 			b.WriteByte(' ')
 			x++
 		}
-		open, close := "\x1b[2m", "\x1b[0m"
+		open, close := ansiDim, ansiReset
 		if tb.focus && tb.cursor == bt.cellIdx {
-			open, close = "\x1b[7m", "\x1b[0m"
+			open, close = ansiReverse, ansiReset
 		} else if bt.active {
-			open, close = "\x1b[1m", "\x1b[0m"
+			open, close = "\x1b[1m", ansiReset
 		}
 		b.WriteString(open + bt.label + close)
 		lblLen := len(bt.label)
@@ -290,11 +290,11 @@ func (tb TranscriptBar) renderTodoSummaryRow(width int) (string, []hitRange) {
 	cyan := func(kind cellKind, s string) string {
 		idx := tb.cellIdx(kind, 0, -1)
 		if idx >= 0 && tb.focus && tb.cursor == idx {
-			return "\x1b[36m\x1b[7m" + s + "\x1b[0m"
+			return "\x1b[36m\x1b[7m" + s + ansiReset
 		}
-		return "\x1b[36m" + s + "\x1b[0m"
+		return "\x1b[36m" + s + ansiReset
 	}
-	cyanStatic := func(s string) string { return "\x1b[36m" + s + "\x1b[0m" }
+	cyanStatic := func(s string) string { return "\x1b[36m" + s + ansiReset }
 
 	line := cyan(cellTodoExpand, toggle) + cyanStatic(labelCell) + cyanStatic(bodyCell) + cyan(cellTodoClear, delCell)
 
@@ -335,11 +335,11 @@ func (tb TranscriptBar) renderTodoItemRow(t todos.Todo, width int) (string, []hi
 	cyan := func(kind cellKind, s string) string {
 		idx := tb.cellIdx(kind, 0, t.ID)
 		if idx >= 0 && tb.focus && tb.cursor == idx {
-			return "\x1b[36m\x1b[7m" + s + "\x1b[0m"
+			return "\x1b[36m\x1b[7m" + s + ansiReset
 		}
-		return "\x1b[36m" + s + "\x1b[0m"
+		return "\x1b[36m" + s + ansiReset
 	}
-	cyanStatic := func(s string) string { return "\x1b[36m" + s + "\x1b[0m" }
+	cyanStatic := func(s string) string { return "\x1b[36m" + s + ansiReset }
 
 	line := strings.Repeat(" ", indent) + cyan(cellTodoItemToggle, toggle) + cyanStatic(textCell) + cyan(cellTodoItemDelete, delCell)
 
@@ -422,7 +422,7 @@ func (tb TranscriptBar) renderRow(p pair, width int) (string, []hitRange) {
 	r := func(kind cellKind, s string) string {
 		idx := tb.cellIdx(kind, p.callNum, -1)
 		if idx >= 0 && tb.focus && tb.cursor == idx {
-			return "\x1b[7m" + s + "\x1b[0m"
+			return ansiReverse + s + ansiReset
 		}
 		return s
 	}
@@ -468,7 +468,7 @@ func (tb TranscriptBar) renderHitRow(rowNum, hitIdx int, h transcript.SearchResu
 	r := func(kind cellKind, s string) string {
 		idx := tb.cellIdx(kind, rowNum, hitIdx)
 		if idx >= 0 && tb.focus && tb.cursor == idx {
-			return "\x1b[7m" + s + "\x1b[0m"
+			return ansiReverse + s + ansiReset
 		}
 		return s
 	}
@@ -677,8 +677,8 @@ func renderEditExpand(oldStr, newStr string, innerWidth int) []string {
 		if i < len(newLines) {
 			nw = newLines[i]
 		}
-		oldCell := "\x1b[31m" + padRight(o, colW) + "\x1b[0m"
-		newCell := "\x1b[32m" + padRight(nw, colW) + "\x1b[0m"
+		oldCell := "\x1b[31m" + padRight(o, colW) + ansiReset
+		newCell := "\x1b[32m" + padRight(nw, colW) + ansiReset
 		out = append(out, prefix+oldCell+"│"+newCell)
 	}
 	return out

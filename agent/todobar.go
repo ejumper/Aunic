@@ -293,7 +293,7 @@ func (tb TodoBar) View(innerWidth int) []string {
 		tb.todoInputs[i].Width = inputW
 		line := label + tb.todoInputs[i].View()
 		if tb.zone == todoZoneTodos && i == tb.rowIdx {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = ansiReverse + line + ansiReset
 		}
 		lines = append(lines, padTo(line, innerWidth))
 	}
@@ -302,10 +302,10 @@ func (tb TodoBar) View(innerWidth int) []string {
 	addBtn := "[+]"
 	delBtn := "[x]"
 	if tb.zone == todoZoneButtons && tb.btnIdx == 0 {
-		addBtn = "\x1b[7m" + addBtn + "\x1b[0m"
+		addBtn = ansiReverse + addBtn + ansiReset
 	}
 	if tb.zone == todoZoneButtons && tb.btnIdx == 1 {
-		delBtn = "\x1b[7m" + delBtn + "\x1b[0m"
+		delBtn = ansiReverse + delBtn + ansiReset
 	}
 	lines = append(lines, padTo(addBtn+delBtn, innerWidth))
 

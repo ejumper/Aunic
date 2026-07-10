@@ -68,12 +68,12 @@ func (ind Indicator) View(width int) string {
 		msg = indicatorTruncate(msg, width)
 	}
 	if ind.isError {
-		return "\x1b[3m\x1b[31m" + msg + "\x1b[0m"
+		return "\x1b[3m\x1b[31m" + msg + ansiReset
 	}
 	if ind.stale {
-		return "\x1b[2m\x1b[3m" + msg + "\x1b[0m"
+		return "\x1b[2m\x1b[3m" + msg + ansiReset
 	}
-	return "\x1b[3m" + msg + "\x1b[0m"
+	return "\x1b[3m" + msg + ansiReset
 }
 
 // indicatorVisibleLen counts printable runes, skipping ANSI CSI sequences.

@@ -343,7 +343,7 @@ func (p PromptBox) View(innerWidth int) string {
 			runes = runes[:innerWidth]
 		}
 		padded := string(runes) + strings.Repeat(" ", innerWidth-len(runes))
-		visible[0] = "\x1b[90m" + padded + "\x1b[0m"
+		visible[0] = ansiGray + padded + ansiReset
 	} else {
 		// Pad each row to innerWidth.
 		for i, row := range visible {

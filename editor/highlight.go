@@ -93,7 +93,7 @@ var inlineRules = []inlineRule{
 	{regexp.MustCompile(`(^|\s)(_[^_\s][^_]*_)(\W|$)`), "\x1b[3m", "\x1b[23m", true, false},
 	{regexp.MustCompile(`(^|\s)(~~[^~\s][^~]*~~)(\W|$)`), "\x1b[9m", "\x1b[29m", true, false},
 	{regexp.MustCompile("`[^`]+`"), "\x1b[34m", "\x1b[39m", false, true},
-	{regexp.MustCompile(`!?\[[^\]]+\]\([^)]+\)`), "\x1b[35;4m", "\x1b[0m", false, false},
+	{regexp.MustCompile(`!?\[[^\]]+\]\([^)]+\)`), "\x1b[35;4m", ansiReset, false, false},
 }
 
 // inlineMatch is one regex hit inside a line. matchStart is the absolute
@@ -212,15 +212,15 @@ func HighlightLine(content string) string {
 	case content == "":
 		return ""
 	case isH1(content), isH2(content), isH3toH6(content):
-		return "\x1b[1;34;4m" + content + "\x1b[0m"
+		return "\x1b[1;34;4m" + content + ansiReset
 	case isHorizontalRule(content):
-		return "\x1b[36m" + content + "\x1b[0m"
+		return "\x1b[36m" + content + ansiReset
 	case isCheckedList(content):
-		return "\x1b[32m" + content + "\x1b[0m"
+		return "\x1b[32m" + content + ansiReset
 	case isUncheckedList(content):
-		return "\x1b[90m" + content + "\x1b[0m"
+		return ansiGray + content + ansiReset
 	case isBlockquote(content):
-		return "\x1b[90m" + content + "\x1b[0m"
+		return ansiGray + content + ansiReset
 	}
 	return styleInline(content)
 }
@@ -354,14 +354,14 @@ func ParseCodeBlockRanges(lines []string, cache map[string]string) map[int]strin
 				lang = strings.TrimSpace(trimmed[3:])
 				bodyStart = i + 1
 				bodyLines = nil
-				result[i] = "\x1b[90m" + line + "\x1b[0m"
+				result[i] = ansiGray + line + ansiReset
 			}
 			continue
 		}
 		// Inside a block.
 		if strings.TrimSpace(trimmed) == "```" {
 			flushBlock(i)
-			result[i] = "\x1b[90m" + line + "\x1b[0m"
+			result[i] = ansiGray + line + ansiReset
 			inBlock = false
 			lang = ""
 			bodyLines = nil

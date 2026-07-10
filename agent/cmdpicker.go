@@ -657,9 +657,9 @@ func (cb CmdBar) View(innerWidth int) []string {
 				hovered := idx == cb.hoverIdx
 				switch {
 				case focused:
-					rowB.WriteString("\x1b[7m" + e.display + "\x1b[0m")
+					rowB.WriteString(ansiReverse + e.display + ansiReset)
 				case hovered:
-					rowB.WriteString("\x1b[4m" + e.display + "\x1b[0m")
+					rowB.WriteString("\x1b[4m" + e.display + ansiReset)
 				default:
 					rowB.WriteString(e.display)
 				}

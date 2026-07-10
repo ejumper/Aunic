@@ -240,9 +240,9 @@ func injectCursor(s string, visualCol int) string {
 		}
 
 		if vis == visualCol || (vis < visualCol && vis+cw > visualCol) {
-			out.WriteString("\x1b[7m")
+			out.WriteString(ansiReverse)
 			out.WriteRune(r)
-			out.WriteString("\x1b[27m")
+			out.WriteString(ansiReverseOff)
 			vis += cw
 			injected = true
 			continue
@@ -262,8 +262,8 @@ func injectCursor(s string, visualCol int) string {
 // selection background. toCol < 0 means extend to end of line.
 func applySelectionBackground(line string, fromCol, toCol int) string {
 	const (
-		selOpen  = "\x1b[103m"
-		selClose = "\x1b[49m"
+		selOpen  = ansiSelectionBG
+		selClose = ansiBGDefault
 	)
 	var b strings.Builder
 	vis := 0

@@ -47,7 +47,7 @@ func (wb WebBar) viewPage(innerWidth int) []string {
 		lines = append(lines, padTo(wb.viewSearchBar(), innerWidth))
 	} else {
 		hint := "↑↓←→ move  enter open link  alt+←/→ back/fwd  / search  ctrl+c copy  ctrl+o browser  esc close"
-		lines = append(lines, padTo("\x1b[2m"+hint+"\x1b[0m", innerWidth))
+		lines = append(lines, padTo(ansiDim+hint+ansiReset, innerWidth))
 	}
 	return lines
 }

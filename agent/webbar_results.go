@@ -25,7 +25,7 @@ func (wb WebBar) viewResults(innerWidth int) []string {
 	}
 
 	hint := "↑↓ nav  → expand  ← collapse  enter fetch  ctrl+o browser  esc close"
-	lines = append(lines, padTo("\x1b[2m"+hint+"\x1b[0m", innerWidth))
+	lines = append(lines, padTo(ansiDim+hint+ansiReset, innerWidth))
 	return lines
 }
 func (wb WebBar) renderResult(i, innerWidth int) []string {
@@ -39,8 +39,8 @@ func (wb WebBar) renderResult(i, innerWidth int) []string {
 	domainLine := padTo("    "+r.Domain, innerWidth)
 
 	if focused {
-		titleLine = "\x1b[7m" + titleLine + "\x1b[27m"
-		domainLine = "\x1b[7m" + domainLine + "\x1b[27m"
+		titleLine = ansiReverse + titleLine + ansiReverseOff
+		domainLine = ansiReverse + domainLine + ansiReverseOff
 	}
 
 	out := []string{titleLine, domainLine}
@@ -49,7 +49,7 @@ func (wb WebBar) renderResult(i, innerWidth int) []string {
 		for _, sl := range wb.snippetLines(r.Abstract) {
 			line := padTo("    "+sl, innerWidth)
 			if focused {
-				line = "\x1b[7m" + line + "\x1b[27m"
+				line = ansiReverse + line + ansiReverseOff
 			}
 			out = append(out, line)
 		}

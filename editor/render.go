@@ -70,7 +70,7 @@ func fillH1Underline(wl string, contentW int) string {
 	if pad < 0 {
 		pad = 0
 	}
-	return wl + "\x1b[34;4m" + strings.Repeat(" ", pad) + "\x1b[0m"
+	return wl + "\x1b[34;4m" + strings.Repeat(" ", pad) + ansiReset
 }
 
 // countLines returns the number of visible rows that a wrapped block occupies.
@@ -327,9 +327,9 @@ func injectCursor(s string, visualCol int) string {
 		}
 
 		if vis == visualCol || (vis < visualCol && vis+cw > visualCol) {
-			out.WriteString("\x1b[7m")
+			out.WriteString(ansiReverse)
 			out.WriteRune(r)
-			out.WriteString("\x1b[27m")
+			out.WriteString(ansiReverseOff)
 			vis += cw
 			injected = true
 			continue
@@ -465,8 +465,8 @@ func (m Model) visualToBuffer(visualRow, visualCol int) (row, col int) {
 // counting toward visual width.
 func applySelectionBackground(line string, fromCol, toCol int) string {
 	const (
-		selOpen  = "\x1b[103m" // bright-yellow background (ANSI 11)
-		selClose = "\x1b[49m"  // background reset
+		selOpen  = ansiSelectionBG // bright-yellow background (ANSI 11)
+		selClose = ansiBGDefault   // background reset
 	)
 	var b strings.Builder
 	vis := 0
@@ -734,7 +734,7 @@ func (s ansiState) emit() string {
 		b.WriteString("\x1b[4m")
 	}
 	if s.reverse {
-		b.WriteString("\x1b[7m")
+		b.WriteString(ansiReverse)
 	}
 	if s.strike {
 		b.WriteString("\x1b[9m")
@@ -867,7 +867,7 @@ func buildView(lines []string, contentWidth, gutterW, cursorLine int, hlCache ma
 				if i == cursorLine {
 					b.WriteString("\x1b[1m")
 				} else {
-					b.WriteString("\x1b[2m")
+					b.WriteString(ansiDim)
 				}
 				b.WriteString(fmt.Sprintf(lineNumFmt, i+1))
 				b.WriteString("\x1b[22m")

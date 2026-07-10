@@ -455,7 +455,7 @@ func renderTableSeparator(colW []int, tStart, tEnd int) pageLine {
 	for i, w := range colW {
 		parts[i] = strings.Repeat("─", w)
 	}
-	display := "\x1b[90m" + strings.Join(parts, "─┼─") + "\x1b[0m"
+	display := ansiGray + strings.Join(parts, "─┼─") + ansiReset
 	return pageLine{
 		display:    display,
 		srcLine:    tStart + 1,
@@ -517,12 +517,12 @@ func renderTextLine(srcLine string, srcIdx, innerWidth int) []pageLine {
 // Re-applies the background after every internal full-reset so it persists
 // through any styled tokens emitted by HighlightLine.
 func fillH1Line(line string, innerWidth int) string {
-	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m\x1b[44m")
+	line = strings.ReplaceAll(line, ansiReset, "\x1b[0m\x1b[44m")
 	pad := innerWidth - visualWidth(line)
 	if pad < 0 {
 		pad = 0
 	}
-	return "\x1b[44m" + line + strings.Repeat(" ", pad) + "\x1b[0m"
+	return "\x1b[44m" + line + strings.Repeat(" ", pad) + ansiReset
 }
 
 // ── Cursor / selection helpers ────────────────────────────────────────────────
@@ -615,8 +615,8 @@ func visualColToRuneOffset(display string, visualCol int) int {
 // cursor sits inside a markdown link.
 func injectCursorAtRuneRange(display string, fromRune, toRune int) string {
 	const (
-		curOpen  = "\x1b[7m"
-		curClose = "\x1b[27m"
+		curOpen  = ansiReverse
+		curClose = ansiReverseOff
 	)
 	if fromRune >= toRune {
 		return display
@@ -683,9 +683,9 @@ func injectCursorAtRune(display string, runeOffset int) string {
 			continue
 		}
 		if seen == runeOffset {
-			out.WriteString("\x1b[7m")
+			out.WriteString(ansiReverse)
 			out.WriteRune(r)
-			out.WriteString("\x1b[27m")
+			out.WriteString(ansiReverseOff)
 			injected = true
 			seen++
 			continue
@@ -708,8 +708,8 @@ func injectCursorAtRune(display string, runeOffset int) string {
 // styling, etc.) would silently strip the selection bg mid-range.
 func applySelectionRuneRange(display string, fromRune, toRune int) string {
 	const (
-		selOpen  = "\x1b[103m"
-		selClose = "\x1b[49m"
+		selOpen  = ansiSelectionBG
+		selClose = ansiBGDefault
 	)
 	var b strings.Builder
 	seen := 0
