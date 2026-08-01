@@ -11,6 +11,6 @@ const (
 	ansiDim        = "\x1b[2m"  // dim/faint text
 	ansiGray       = "\x1b[90m" // bright-black — muted/placeholder text
 
-	ansiSelectionBG = "\x1b[103m" // bright-yellow background — text selection
+	ansiSelectionBG = "\x1b[100m" // dark-grey background — text selection
 	ansiBGDefault   = "\x1b[49m"  // default background (closes a bg span)
 )

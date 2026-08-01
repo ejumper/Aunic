@@ -465,7 +465,7 @@ func (m Model) visualToBuffer(visualRow, visualCol int) (row, col int) {
 // counting toward visual width.
 func applySelectionBackground(line string, fromCol, toCol int) string {
 	const (
-		selOpen  = ansiSelectionBG // bright-yellow background (ANSI 11)
+		selOpen  = ansiSelectionBG // dark-grey background (ANSI 100)
 		selClose = ansiBGDefault   // background reset
 	)
 	var b strings.Builder
