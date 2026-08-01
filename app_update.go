@@ -255,6 +255,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m2, cmd
 
 	case piDeadMsg:
+		// Ignore the death of a process we've already replaced (respawn,
+		// model-switch, or harness-switch closes the old one deliberately).
+		if msg.proc != m.piProc {
+			return m, nil
+		}
 		m.piRunActive = false
 		m.piProc = nil
 		m.ag.Indicator.SetError("pi: process exited")
@@ -268,6 +273,11 @@ func (m appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m2, cmd
 
 	case claudeDeadMsg:
+		// Ignore the death of a process we've already replaced (respawn,
+		// model-switch, or harness-switch closes the old one deliberately).
+		if msg.proc != m.claudeProc {
+			return m, nil
+		}
 		m.claudeRunActive = false
 		m.claudeProc = nil
 		m.ag.Indicator.SetError("claude: process exited")

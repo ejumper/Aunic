@@ -20,8 +20,11 @@ import (
 // piEventMsg delivers one raw JSON event line from Pi's stdout.
 type piEventMsg struct{ data []byte }
 
-// piDeadMsg is emitted when the Pi subprocess exits unexpectedly.
-type piDeadMsg struct{}
+// piDeadMsg is emitted when a Pi subprocess's output channel closes. It
+// carries the specific process that died so the handler can tell a genuine
+// crash of the live process apart from the expected shutdown of a process we
+// just replaced (respawn/model-switch) — see the piDeadMsg case in Update.
+type piDeadMsg struct{ proc *pi.Process }
 
 // knownHarnesses is the set of harness keys with a working Aunic-side
 // dispatch implementation. aunic.json can list a harness Aunic doesn't
@@ -59,31 +62,51 @@ func (m appModel) startRun(prompt string) (appModel, tea.Cmd) {
 	}
 }
 
-// respawnActiveHarness respawns whichever harness subprocess is currently
-// configured, after an agent-mode or model change requiring a fresh process.
-// Preserves the existing indicator-refresh behavior even when no respawn is
-// needed (e.g. no harness running yet).
+// respawnActiveHarness (re)launches whichever harness is currently configured
+// and tears down the other, after a model or agent-mode change. It cold-starts
+// the target harness when its process isn't running yet — so switching from a
+// harness that failed to launch at boot, or switching across harnesses
+// (Pi ↔ Claude), actually brings the new one up rather than silently doing
+// nothing. Only one harness subprocess is ever live per note.
 func (m appModel) respawnActiveHarness() (appModel, tea.Cmd) {
 	switch m.llmCfg.Harness {
 	case "pi":
-		if m.piProc != nil {
-			return m.respawnPiOpts()
-		}
+		m = m.closeClaude()
+		return m.respawnPiOpts()
 	case "claude":
-		if m.claudeProc != nil {
-			return m.respawnClaudeOpts()
-		}
+		m = m.closePi()
+		return m.respawnClaudeOpts()
 	}
+	// No known harness configured (e.g. an unresolved config): tear both down
+	// so nothing stale keeps running, and leave the indicator to report it.
+	m = m.closePi()
+	m = m.closeClaude()
 	return m, m.ag.Indicator.StaleCmd()
+}
+
+// closePi tears down the Pi subprocess if one is running and clears its
+// per-process state. Used when switching to a different harness (or to no
+// harness) so only one subprocess is ever live per note. The output-wait
+// goroutine bound to the old process emits a piDeadMsg that Update ignores,
+// since the process is no longer the live one.
+func (m appModel) closePi() appModel {
+	if m.piProc != nil {
+		_ = m.piProc.Close()
+		m.piProc = nil
+	}
+	m.piRunActive = false
+	m.piNoteSnapshotHash = ""
+	return m
 }
 
 // waitForPiOutput returns a tea.Cmd that blocks until the next JSON event
 // arrives on the Pi output channel. Must be re-queued after every event.
 func (m appModel) waitForPiOutput() tea.Cmd {
+	proc := m.piProc
 	return func() tea.Msg {
-		data, ok := <-m.piProc.Output()
+		data, ok := <-proc.Output()
 		if !ok {
-			return piDeadMsg{}
+			return piDeadMsg{proc: proc}
 		}
 		return piEventMsg{data: data}
 	}

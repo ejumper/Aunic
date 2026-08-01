@@ -18,8 +18,11 @@ import (
 // claudeEventMsg delivers one raw JSON event line from Claude's stdout.
 type claudeEventMsg struct{ data []byte }
 
-// claudeDeadMsg is emitted when the Claude subprocess exits unexpectedly.
-type claudeDeadMsg struct{}
+// claudeDeadMsg is emitted when a Claude subprocess's output channel closes.
+// It carries the specific process that died so the handler can tell a genuine
+// crash of the live process apart from the expected shutdown of a process we
+// just replaced (respawn/model-switch) — see the claudeDeadMsg case in Update.
+type claudeDeadMsg struct{ proc *claude.Process }
 
 // claudeToolCallBuf accumulates a tool_use content block's streamed
 // arguments (delivered as input_json_delta/partial_json chunks) until its
@@ -32,10 +35,11 @@ type claudeToolCallBuf struct {
 // waitForClaudeOutput returns a tea.Cmd that blocks until the next JSON event
 // arrives on Claude's output channel. Must be re-queued after every event.
 func (m appModel) waitForClaudeOutput() tea.Cmd {
+	proc := m.claudeProc
 	return func() tea.Msg {
-		data, ok := <-m.claudeProc.Output()
+		data, ok := <-proc.Output()
 		if !ok {
-			return claudeDeadMsg{}
+			return claudeDeadMsg{proc: proc}
 		}
 		return claudeEventMsg{data: data}
 	}
@@ -423,6 +427,22 @@ func (m appModel) respawnClaudeOpts() (appModel, tea.Cmd) {
 // why this is a full respawn rather than an in-place interrupt.
 func (m appModel) abortClaudeRun() (appModel, tea.Cmd) {
 	return m.respawnClaudeOpts()
+}
+
+// closeClaude tears down the Claude subprocess if one is running and clears
+// its per-process state. Used when switching to a different harness (or to no
+// harness) so only one subprocess is ever live per note. The output-wait
+// goroutine bound to the old process emits a claudeDeadMsg that Update
+// ignores, since the process is no longer the live one.
+func (m appModel) closeClaude() appModel {
+	if m.claudeProc != nil {
+		_ = m.claudeProc.Close()
+		m.claudeProc = nil
+	}
+	m.claudeRunActive = false
+	m.claudeNoteSnapshotHash = ""
+	m.claudeHistoryInjected = false
+	return m
 }
 
 // claudeOpts builds the Claude subprocess options from the current model
