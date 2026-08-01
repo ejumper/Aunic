@@ -324,26 +324,25 @@ func (m appModel) handleMessageUpdate(data []byte) (appModel, tea.Cmd) {
 // stores the row index in piActiveToolRows for later lookup by tool result.
 func (m appModel) appendToolCallRow(tc pi.ToolCallObj) appModel {
 	var content json.RawMessage
+	// Pi's tool arguments use its own key names: read/write/edit take "path"
+	// (not "file_path"), and edit takes an "edits" array of {oldText,newText}
+	// (not a single old_string/new_string). bash/grep/find match directly.
 	switch tc.Name {
 	case "edit":
-		filePath, _ := tc.Arguments["file_path"].(string)
-		oldStr, _ := tc.Arguments["old_string"].(string)
-		newStr, _ := tc.Arguments["new_string"].(string)
+		filePath, _ := tc.Arguments["path"].(string)
+		oldStr, newStr := piEditTexts(tc.Arguments)
 		content = transcript.EncodeAgentFileCall(filePath, oldStr, newStr)
 	case "write":
-		filePath, _ := tc.Arguments["file_path"].(string)
+		filePath, _ := tc.Arguments["path"].(string)
 		fileContent, _ := tc.Arguments["content"].(string)
 		content = transcript.EncodeAgentFileCall(filePath, "", fileContent)
 	case "read":
-		filePath, _ := tc.Arguments["file_path"].(string)
+		filePath, _ := tc.Arguments["path"].(string)
 		content = transcript.EncodeAgentFileCall(filePath, "", "")
 	case "bash":
 		cmd, _ := tc.Arguments["command"].(string)
 		content = transcript.EncodeAgentCmdCall(cmd)
-	case "grep":
-		pattern, _ := tc.Arguments["pattern"].(string)
-		content = transcript.EncodeAgentPatternCall(pattern)
-	case "glob":
+	case "grep", "find", "glob":
 		pattern, _ := tc.Arguments["pattern"].(string)
 		content = transcript.EncodeAgentPatternCall(pattern)
 	default:
@@ -365,6 +364,32 @@ func (m appModel) appendToolCallRow(tc pi.ToolCallObj) appModel {
 	return m
 }
 
+// piEditTexts extracts the combined old/new text from Pi's edit tool
+// arguments. Pi's edit takes an "edits" array of {oldText,newText} objects
+// (multi-edit); it also accepts a legacy single-edit form with top-level
+// oldText/newText. Multiple edits are joined so the transcript's edit-expand
+// view reflects every change.
+func piEditTexts(args map[string]any) (oldText, newText string) {
+	if edits, ok := args["edits"].([]any); ok && len(edits) > 0 {
+		var olds, news []string
+		for _, e := range edits {
+			em, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			o, _ := em["oldText"].(string)
+			n, _ := em["newText"].(string)
+			olds = append(olds, o)
+			news = append(news, n)
+		}
+		return strings.Join(olds, "\n"), strings.Join(news, "\n")
+	}
+	// Legacy single-edit form.
+	o, _ := args["oldText"].(string)
+	n, _ := args["newText"].(string)
+	return o, n
+}
+
 // handleToolExecEnd records the tool result, reloads the editor if the note
 // was touched, and persists the transcript to disk.
 func (m appModel) handleToolExecEnd(data []byte) (appModel, tea.Cmd) {
@@ -377,7 +402,7 @@ func (m appModel) handleToolExecEnd(data []byte) (appModel, tea.Cmd) {
 
 	var content json.RawMessage
 	switch ev.ToolName {
-	case "read", "grep", "glob":
+	case "read", "grep", "glob", "find":
 		lines := strings.Split(output, "\n")
 		if len(lines) == 1 && lines[0] == "" {
 			lines = []string{}
@@ -596,7 +621,9 @@ func mapToolName(name string) string {
 		return transcript.ToolBash
 	case "grep":
 		return transcript.ToolGrep
-	case "glob":
+	case "glob", "find":
+		// Pi's file-name search tool is "find"; Aunic has no distinct Find
+		// row type, so it renders through the Glob path (both show a pattern).
 		return transcript.ToolGlob
 	}
 	return name
